@@ -1,0 +1,25 @@
+{
+  "name": "nostr-tank-arena",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --port 4173 --strictPort",
+    "test:live": "node test/two-player.mjs"
+  },
+  "dependencies": {
+    "nostr-tools": "^2.10.4"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10",
+    "puppeteer-core": "^25.8.0"
+  },
+  "allowScripts": {
+    "esbuild@0.21.5": true
+  },
+  "description": "Four-player tank deathmatch with no game server. Identity, netcode and scores ride on Nostr relays.",
+  "license": "MIT"
+}

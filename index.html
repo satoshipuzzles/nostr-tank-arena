@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Nostr Tank Arena</title>
+    <meta name="description" content="Four-player tank deathmatch with no game server. Identity, netcode and scores all ride on Nostr relays." />
+    <meta property="og:title" content="Nostr Tank Arena" />
+    <meta property="og:description" content="Four-player tank deathmatch with no game server. Identity, netcode and scores all ride on Nostr relays." />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230d1119'/><rect x='6' y='12' width='16' height='10' fill='%23ffc44d'/><rect x='20' y='15' width='9' height='4' fill='%23ffc44d'/></svg>" />
+  </head>
+  <body>
+    <canvas id="stage"></canvas>
+
+    <div id="hud" hidden>
+      <div class="panel" id="scoreboard"></div>
+      <div class="panel" id="status"></div>
+      <div id="feed"></div>
+      <div id="controls-hint">
+        <span><b>WASD</b> drive</span><span><b>mouse</b> aim</span><span><b>click / space</b> fire</span
+        ><span><b>gamepad</b> supported</span>
+      </div>
+      <div id="hud-actions">
+        <button id="copy-link" class="ghost">Copy invite link</button>
+        <button id="publish-score" class="ghost">Publish score</button>
+        <button id="show-board" class="ghost">Leaderboard</button>
+      </div>
+    </div>
+
+    <div id="lobby">
+      <div class="card">
+        <h1>Nostr Tank Arena</h1>
+        <p class="tag">
+          Four-player deathmatch with no game server. Your npub is your identity, relays are the
+          netcode, your score is a signed event.
+        </p>
+
+        <label>Callsign<input id="name" maxlength="16" placeholder="tank" /></label>
+        <label>Room<input id="room" maxlength="24" placeholder="lobby" /></label>
+
+        <details>
+          <summary>Relays</summary>
+          <textarea id="relays" rows="4" spellcheck="false"></textarea>
+          <p class="fine">
+            One websocket URL per line. Shells and positions ride on ephemeral events, so relays
+            forward them and store nothing. A relay you control will always feel better than a busy
+            public one.
+          </p>
+        </details>
+
+        <div class="row">
+          <button id="play-nip07">Play with my npub</button>
+          <button id="play-guest" class="ghost">Play as guest</button>
+        </div>
+        <p class="fine" id="lobby-note">
+          Guest play generates a throwaway key in this tab. Nothing to install, nothing saved.
+        </p>
+        <p class="error" id="lobby-error" hidden></p>
+      </div>
+    </div>
+
+    <div id="board" hidden>
+      <div class="card">
+        <h2>Leaderboard</h2>
+        <p class="fine">
+          Self-reported and signed by each player. Anyone can publish any number — see
+          <b>How to cheat this</b> in the README.
+        </p>
+        <div id="board-rows">loading…</div>
+        <button id="board-close" class="ghost">Close</button>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
