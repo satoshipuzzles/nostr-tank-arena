@@ -1,3 +1,4 @@
+import { KIND_STATE } from './protocol'
 import {
   SimplePool,
   finalizeEvent,
@@ -205,6 +206,12 @@ const OK_PREFIX: Record<string, FailureKind | 'accepted'> = {
   'rate-limited:': 'refused',
   'restricted:': 'refused',
   'auth-required:': 'refused',
+  // Not in NIP-01. newlay carries a ninth prefix in `RejectPrefix.kt`, and at
+  // 267a2f3 it is an enum constant with no emitter — reserved for something
+  // somebody will wire up. Without a row here it would fall past the closed
+  // set, miss every heuristic, and land on `unknown`, which never strikes:
+  // the exact shape of the bug this table was rewritten to fix.
+  'mute:': 'refused',
   'invalid:': 'malformed',
   // NIP-01 defines `error:` as "any other reason" — the catch-all. That is the
   // weakest possible basis for writing a relay off, so it does not mute.
@@ -268,6 +275,70 @@ export function classifyFailure(reason: string): FailureKind | 'accepted' {
 if (typeof window !== 'undefined') {
   ;(window as unknown as { __classifyFailure: typeof classifyFailure }).__classifyFailure =
     classifyFailure
+  ;(window as unknown as { __parseRateLimit: typeof parseRateLimit }).__parseRateLimit =
+    parseRateLimit
+}
+
+/**
+ * Pull the effective cap out of a `rate-limited:` reason.
+ *
+ * newlay answers a too-fast publisher with its own number:
+ *
+ *   rate-limited: publishing too fast (limit 180 events/min); slow down or AUTH
+ *
+ * and that number is the *behaviour-scaled* cap, not the configured one — the
+ * profile is folded as `DEFAULTS ⊕ TIER ⊕ BEHAVIOR×m` and retuned on every
+ * score change. So a tier configured at 1800 answering `limit 180` is a relay
+ * telling you, in the only channel it has, that it has walked you down to the
+ * 0.1x band. NIP-65535 LIMITS cannot carry this: rate fields are excluded from
+ * the payload by the spec, and behaviour retunes deliberately never push a
+ * frame. The OK string is it.
+ *
+ * Returns null when there is no number, which is itself the discriminator that
+ * matters: newlay's per-IP gate says `rate-limited: too many events from your
+ * IP; slow down` with no figure at all. Per-connection carries a limit; per-IP
+ * never does — so a cap two sockets would fix is separable from one they would
+ * not, by whether this function finds anything.
+ */
+export function parseRateLimit(reason: string): number | null {
+  const m = /limit\s+(\d+)\s*events?\/min/i.exec(reason)
+  if (!m) return null
+  const n = Number(m[1])
+  return Number.isFinite(n) && n > 0 ? n : null
+}
+
+/**
+ * What we have agreed to slow down to for one relay.
+ *
+ * Muting a rate-limiting relay is the wrong response when it has told us its
+ * number, and against newlay it is actively harmful. The bucket refills
+ * continuously, so a hammering client gets a steady trickle of acceptances —
+ * roughly one in eleven at stock 60/min against a 12Hz tick — and every one of
+ * them resets the consecutive-strike counter. The relay is therefore *never*
+ * muted, and the client hammers it all session at an 8% accept rate. Each
+ * rejection is a −2 on a behaviour score that recovers at +2 per *clean*
+ * minute, so continuing to publish is precisely what pins the multiplier at its
+ * floor and keeps the cap a tenth of what it was configured to be.
+ *
+ * Pacing inverts that. A client publishing under the cap takes no rate hits, so
+ * its minutes are clean, so the score climbs and the number in the string goes
+ * back up while you watch. For an anonymous key it is the only path back inside
+ * a session: the other recovery credit is authed-only and ephemeral session
+ * keys never AUTH.
+ */
+interface RelayPace {
+  /** Events per minute we are currently allowing ourselves. */
+  allowance: number
+  /** The last figure the relay reported. */
+  reported: number
+  /** The lowest it ever reported — how far down the spiral went. */
+  lowest: number
+  /** Earliest we may send this relay another disposable event. */
+  nextAt: number
+  /** Last time this relay refused us, for deciding when to probe faster. */
+  lastRefusalAt: number
+  /** Refusals since pacing began. The valve for when pacing is not working. */
+  refusalsWhilePaced: number
 }
 
 /** What a relay has been saying about our publishes lately. */
@@ -311,6 +382,10 @@ export interface RelayLedger {
   noVerdict: number
   malformed: number
   unknown: number
+  /** Lowest events/min this relay has reported, or 0 if it never gave a number. */
+  lowestLimit: number
+  /** Events/min we are pacing ourselves to right now, or 0 when unpaced. */
+  pacedTo: number
   /** Times this relay has been muted, so a flapping relay is distinguishable. */
   mutes: number
   lastReason: string
@@ -349,6 +424,35 @@ export class Net {
   private muted = new Map<string, { until: number; span: number }>()
   /** How long the next mute lasts, per relay. Outlives the prune in `publish`. */
   private muteSpan = new Map<string, number>()
+  /** Relays that told us their number, and what we are doing about it. */
+  private pace = new Map<string, RelayPace>()
+  /**
+   * How long a paced relay must go without refusing before we try it faster.
+   *
+   * Without this the pace is a one-way ratchet: a client obeying the cap never
+   * gets refused, so it never sees a new number, so it never learns the relay
+   * has forgiven it — which is the whole point of pacing rather than muting.
+   */
+  private static readonly PACE_PROBE_MS = 30_000
+  /** Ceiling past which pacing is pointless; we tick well below this. */
+  private static readonly PACE_UNCAP = 1_500
+  /**
+   * Refusals to tolerate while paced before falling back to muting.
+   *
+   * If we are obeying the number and still being refused, the number is not the
+   * problem — a per-IP cap, or a limit walking down faster than we adapt — and
+   * continuing to pace would be its own version of hammering.
+   */
+  private static readonly PACE_GIVE_UP = 40
+  /**
+   * Aim just under the number rather than exactly at it.
+   *
+   * A token bucket refilling at the same rate we spend it sits on the boundary,
+   * and jitter alone then produces refusals — each one a −2 on the score we are
+   * pacing to protect. Ninety percent costs one event in ten and stops the
+   * client tripping the very limit it is trying to respect.
+   */
+  private static readonly PACE_MARGIN = 0.9
   private strikes = new Map<string, number>()
   private static readonly MUTE_AFTER = 15
   /**
@@ -399,7 +503,15 @@ export class Net {
   publish(event: Event): Promise<PublishOutcome> {
     const now = Date.now()
     for (const [url, m] of this.muted) if (now >= m.until) this.muted.delete(url)
-    const targets = this.relays.filter((url) => !this.muted.has(url))
+    // Only the position tick is disposable. It is ten a second and the next one
+    // is always 100ms away, so dropping one to stay under a relay's stated cap
+    // costs nothing. Everything else — the shell, the death, the claim
+    // published exactly once — goes regardless of the pace, because skipping it
+    // to save a rate limit would trade a throttle for a divergence.
+    const disposable = event.kind === KIND_STATE
+    const targets = this.relays.filter(
+      (url) => !this.muted.has(url) && (!disposable || this.paceAllows(url, now)),
+    )
     const outcome: PublishOutcome = {
       sent: targets.length,
       accepted: 0,
@@ -409,6 +521,7 @@ export class Net {
       reason: null,
     }
     if (!targets.length) return Promise.resolve(outcome)
+    if (disposable) for (const url of targets) this.paceSpend(url, now)
     const results = this.pool.publish(targets, event)
     this.published += results.length
     const settled = results.map((p, i) => {
@@ -461,6 +574,16 @@ export class Net {
           // is not a verdict, our own bad event is not the relay's fault, and a
           // message we cannot parse is not evidence for the destructive option.
           if (kind !== 'refused') return
+
+          // A rate limit that names its number is the one refusal with an
+          // instruction in it. Obey the instruction rather than writing the
+          // relay off — see RelayPace for why muting makes this strictly worse.
+          const limit = parseRateLimit(reason)
+          if (limit !== null && this.startPacing(url, limit)) {
+            this.strikes.set(url, 0)
+            return
+          }
+
           const strikes = (this.strikes.get(url) ?? 0) + 1
           this.strikes.set(url, strikes)
           if (strikes >= Net.MUTE_AFTER) this.mute(url)
@@ -473,12 +596,77 @@ export class Net {
     })
   }
 
+  // ------------------------------------------------------------------ pacing
+
+  /** True when this relay is due another disposable event. */
+  private paceAllows(url: string, now: number): boolean {
+    const p = this.pace.get(url)
+    if (!p) return true
+    if (now < p.nextAt) return false
+    // Quiet for a while: try a little faster, so a relay that has forgiven us
+    // can be noticed. Multiplicative up, snap back down on the next refusal.
+    if (now - p.lastRefusalAt > Net.PACE_PROBE_MS) {
+      p.allowance = Math.min(p.allowance * 1.5, Net.PACE_UNCAP)
+      p.lastRefusalAt = now
+      if (p.allowance >= Net.PACE_UNCAP) {
+        this.pace.delete(url)
+        this.entry(url).pacedTo = 0
+        return true
+      }
+      this.entry(url).pacedTo = Math.round(p.allowance)
+    }
+    return true
+  }
+
+  private paceSpend(url: string, now: number): void {
+    const p = this.pace.get(url)
+    if (p) p.nextAt = now + 60_000 / p.allowance
+  }
+
+  /**
+   * Start (or tighten) a pace for a relay that named its cap.
+   *
+   * Returns false when pacing is not the answer after all, which hands the
+   * caller back to the strike-and-mute path.
+   */
+  private startPacing(url: string, limit: number): boolean {
+    const now = Date.now()
+    let p = this.pace.get(url)
+    if (!p) {
+      p = {
+        allowance: limit * Net.PACE_MARGIN,
+        reported: limit,
+        lowest: limit,
+        nextAt: now,
+        lastRefusalAt: now,
+        refusalsWhilePaced: 0,
+      }
+      this.pace.set(url, p)
+    } else {
+      p.refusalsWhilePaced++
+      // Obeying the number and still refused: the number is not the problem.
+      if (p.refusalsWhilePaced > Net.PACE_GIVE_UP) {
+        this.pace.delete(url)
+        this.entry(url).pacedTo = 0
+        return false
+      }
+      p.allowance = limit * Net.PACE_MARGIN
+      p.reported = limit
+      p.lowest = Math.min(p.lowest, limit)
+      p.lastRefusalAt = now
+    }
+    const led = this.entry(url)
+    led.pacedTo = Math.round(p.allowance)
+    led.lowestLimit = led.lowestLimit ? Math.min(led.lowestLimit, p.lowest) : p.lowest
+    return true
+  }
+
   private entry(url: string): RelayLedger {
     let led = this.ledger.get(url)
     if (!led) {
       led = {
         url, accepted: 0, refused: 0, noVerdict: 0, malformed: 0, unknown: 0,
-        mutes: 0, lastReason: '', lastAt: 0,
+        lowestLimit: 0, pacedTo: 0, mutes: 0, lastReason: '', lastAt: 0,
       }
       this.ledger.set(url, led)
     }

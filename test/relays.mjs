@@ -82,13 +82,60 @@ const BEHAVIOURS = {
   duplicate: () => ({ ok: false, msg: 'duplicate: already have this event' }),
   // NIP-01's catch-all. Ambiguous, and muting is the destructive direction.
   unknownerr: () => ({ ok: false, msg: 'error: unknown error' }),
+  // newlay's per-IP gate. Same `rate-limited:` prefix, deliberately no figure —
+  // that absence is the discriminator between a cap two sockets would fix and
+  // one they would not, so there is nothing here to pace to.
+  perip: () => ({ ok: false, msg: 'rate-limited: too many events from your IP; slow down' }),
+  // newlay's ninth reject prefix, which is not in NIP-01.
+  muted: () => ({ ok: false, msg: 'mute: you have been muted by a moderator' }),
   silent: () => null, // accept the frame, answer nothing, ever
 }
 
 const servers = []
+
+/**
+ * A relay with a real token bucket, which is the only way to reproduce the
+ * behaviour that matters: newlay's bucket refills continuously, so a client
+ * hammering past the cap gets a steady *trickle* of acceptances rather than a
+ * clean run of refusals. That trickle is what resets the consecutive-strike
+ * counter, which is why the relay never gets muted and the client hammers it
+ * all session — the thing pacing exists to stop.
+ */
+function startBucketRelay(perMin) {
+  const wss = new WebSocketServer({ port: 0 })
+  const state = { behaviour: 'bucket', received: 0, accepted: 0, connections: 0, perMin }
+  let tokens = perMin
+  let last = Date.now()
+  wss.on('connection', (ws) => {
+    state.connections++
+    ws.on('message', (raw) => {
+      let msg
+      try { msg = JSON.parse(raw.toString()) } catch { return }
+      if (msg[0] === 'REQ') return ws.send(JSON.stringify(['EOSE', msg[1]]))
+      if (msg[0] !== 'EVENT') return
+      state.received++
+      const now = Date.now()
+      tokens = Math.min(perMin, tokens + ((now - last) / 60_000) * perMin)
+      last = now
+      if (tokens >= 1) {
+        tokens -= 1
+        state.accepted++
+        return ws.send(JSON.stringify(['OK', msg[1].id, true, '']))
+      }
+      ws.send(JSON.stringify([
+        'OK', msg[1].id, false,
+        `rate-limited: publishing too fast (limit ${perMin} events/min); slow down or AUTH for higher limits`,
+      ]))
+    })
+  })
+  servers.push(wss)
+  state.url = `ws://localhost:${wss.address().port}`
+  return state
+}
+
 function startRelay(behaviour) {
   const wss = new WebSocketServer({ port: 0 })
-  const state = { behaviour, received: 0, connections: 0 }
+  const state = { behaviour, received: 0, accepted: 0, connections: 0 }
   wss.on('connection', (ws) => {
     state.connections++
     ws.on('message', (raw) => {
@@ -123,6 +170,9 @@ const expired = startRelay('expired')
 const timedout = startRelay('timedout')
 const duplicate = startRelay('duplicate')
 const unknownerr = startRelay('unknownerr')
+const perip = startRelay('perip')
+const moderated = startRelay('muted')
+const bucket = startBucketRelay(60)
 const silent = startRelay('silent')
 
 const browser = await puppeteer.launch({
@@ -146,7 +196,8 @@ try {
   // game at these. ws:// is only reachable because the preview is http://.
   const list = [
     good.url, limited.url, pow.url, blocked.url,
-    expired.url, timedout.url, duplicate.url, unknownerr.url, silent.url,
+    expired.url, timedout.url, duplicate.url, unknownerr.url,
+    perip.url, moderated.url, bucket.url, silent.url,
   ].join('\n')
   await page.$eval('#relays', (el, v) => { el.value = v }, list)
   await page.type('#name', 'relaytest')
@@ -156,7 +207,7 @@ try {
     .waitForFunction(() => !!window.__game, { timeout: 25_000 })
     .then(() => true)
     .catch(() => false)
-  check('game starts against nine fake relays', started)
+  check('game starts against twelve fake relays', started)
   if (!started) throw new Error('never reached the arena')
 
   const using = await page.evaluate(() => window.__game.net.relays)
@@ -178,6 +229,7 @@ try {
           dupe: window.__classifyFailure('duplicate: already have this event'),
           catchall: window.__classifyFailure('error: unknown error'),
           gibberish: window.__classifyFailure('something nobody has ever seen'),
+          moderatorMute: window.__classifyFailure('mute: you have been muted by a moderator'),
           timeout: window.__classifyFailure('publish timed out'),
           socket: window.__classifyFailure('WebSocket connection closed'),
           expired: window.__classifyFailure('invalid: event expired'),
@@ -185,6 +237,31 @@ try {
         }
       : null,
   )
+  const rl = await page.evaluate(() =>
+    window.__parseRateLimit
+      ? {
+          newlay: window.__parseRateLimit(
+            'rate-limited: publishing too fast (limit 180 events/min); slow down or AUTH for higher limits',
+          ),
+          configured: window.__parseRateLimit('rate-limited: publishing too fast (limit 1800 events/min)'),
+          perip: window.__parseRateLimit('rate-limited: too many events from your IP; slow down'),
+          conns: window.__parseRateLimit('rate-limited: too many open connections from your IP'),
+          nonsense: window.__parseRateLimit('blocked: spam not permitted'),
+        }
+      : null,
+  )
+  if (rl) {
+    check('the effective cap is read out of the refusal', rl.newlay === 180, String(rl.newlay))
+    check('...whatever the number is', rl.configured === 1800, String(rl.configured))
+    // The absence of a figure is the per-IP signal, and per-IP is the cap that
+    // two sockets do nothing about — so it must not look like a paceable one.
+    check('a per-IP refusal carries no number', rl.perip === null, String(rl.perip))
+    check('nor does the connection-count refusal', rl.conns === null, String(rl.conns))
+    check('and a non-rate refusal carries none', rl.nonsense === null, String(rl.nonsense))
+  } else {
+    check('parseRateLimit is reachable for testing', false, 'window.__parseRateLimit missing')
+  }
+
   if (!cls) {
     check('classifyFailure is reachable for testing', false, 'window.__classifyFailure missing')
   } else {
@@ -228,6 +305,11 @@ try {
       'an unrecognised message defaults to not muting',
       cls.gibberish === 'unknown',
       cls.gibberish,
+    )
+    check(
+      "newlay's ninth prefix is a refusal, not an unknown",
+      cls.moderatorMute === 'refused',
+      `${cls.moderatorMute} — "mute:" is not in NIP-01`,
     )
   }
 
@@ -303,6 +385,16 @@ try {
     state.muted.includes(duplicate.url) ? 'MUTED — struck for already having our event' : 'never muted',
   )
   check(
+    'the per-IP relay IS muted — no number means nothing to pace to',
+    state.muted.includes(perip.url),
+    state.muted.includes(perip.url) ? '' : 'still hammering a per-IP cap',
+  )
+  check(
+    'the moderator-mute relay IS muted',
+    state.muted.includes(moderated.url),
+    state.muted.includes(moderated.url) ? '' : '"mute:" fell through the prefix set',
+  )
+  check(
     'the catch-all-error relay is NOT muted',
     !state.muted.includes(unknownerr.url),
     state.muted.includes(unknownerr.url) ? 'MUTED — struck on an unparsed reason' : 'never muted',
@@ -340,6 +432,72 @@ try {
     state.summary.includes('localhost') && /refus/i.test(state.summary),
     JSON.stringify(state.summary),
   )
+
+  // --------------------------------------------------------------- pacing
+  //
+  // The bucket relay caps at 60 events/min and refills continuously. Hammering
+  // it produces a trickle of acceptances rather than a run of refusals, so the
+  // strike counter keeps resetting and it is never muted — the client just
+  // pounds it all session at a low accept rate, and every refusal is a −2 on a
+  // behaviour score that only recovers during a clean minute.
+  //
+  // Measured in a steady-state window, after the client has had time to see the
+  // number and slow to it.
+
+  const paceStart = { received: bucket.received, accepted: bucket.accepted }
+  const PACE_WINDOW = 14_000
+  await wait(PACE_WINDOW)
+  const sent = bucket.received - paceStart.received
+  const took = bucket.accepted - paceStart.accepted
+  const perSec = sent / (PACE_WINDOW / 1000)
+  const acceptPct = sent ? (took / sent) * 100 : 0
+  console.log(
+    `\n  bucket relay (cap 60/min = 1.0/s): ${perSec.toFixed(1)} sent/s, ${acceptPct.toFixed(0)}% accepted\n`,
+  )
+
+  // Sampled after the window rather than before it: pacing has to have settled
+  // for "not muted" to mean anything.
+  const state2 = await page.evaluate(() => {
+    const n = window.__game.net
+    return { muted: n.mutedRelays, ledger: n.ledger ? [...n.ledger.values()] : null }
+  })
+
+  // The cap is 1.0/s and we aim at 90% of it. Anything near the tick rate means
+  // we are still hammering; anything near zero means we throttled ourselves off.
+  check(
+    'we slowed to roughly the cap the relay named',
+    perSec > 0.4 && perSec < 2.2,
+    `${perSec.toFixed(1)}/s against a 1.0/s cap`,
+  )
+  check(
+    'and almost everything we send is now accepted',
+    acceptPct > 65,
+    `${acceptPct.toFixed(0)}% accepted`,
+  )
+  // Read this one alongside the two above, never on its own. It passes against
+  // the code without pacing too — for the opposite reason: the bucket's trickle
+  // of acceptances keeps resetting the strike counter, so the relay is never
+  // muted *because* the client is hammering it. "Not muted" is the same
+  // observation for a healthy pace and for an unchecked flood; only the rate
+  // and the accept ratio tell them apart.
+  check(
+    'the rate-limiting relay is NOT muted — it told us its number',
+    !state2.muted.includes(bucket.url),
+    state2.muted.includes(bucket.url) ? 'MUTED instead of paced' : 'paced, still publishing',
+  )
+  if (hasLedger) {
+    const b = state2.ledger?.find((l) => l.url === bucket.url)
+    check(
+      'the ledger records what we paced ourselves to',
+      b && b.pacedTo > 0 && b.pacedTo <= 60,
+      b ? `pacedTo ${b.pacedTo}/min` : 'no ledger entry',
+    )
+    check(
+      'and the lowest cap the relay ever reported',
+      b && b.lowestLimit === 60,
+      b ? `lowest ${b.lowestLimit}/min` : 'no ledger entry',
+    )
+  }
 
   // ------------------------------------------------------------- recovery
   //

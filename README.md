@@ -880,7 +880,9 @@ things a rejected promise can mean:
 
 | kind | what happened | mute? |
 |---|---|---|
-| `refused` | `pow:` `blocked:` `rate-limited:` `restricted:` `auth-required:` | **yes** |
+| `refused` | `pow:` `blocked:` `restricted:` `auth-required:` `mute:` | **yes** |
+| `refused` | `rate-limited:` **without** a number | **yes** |
+| `refused` | `rate-limited:` **with** a number | no — paced instead |
 | `no-verdict` | nothing came back: publish timeout, dropped socket | no |
 | `malformed` | `invalid: ...` — the event was bad | no |
 | `unknown` | `error:`, or anything with no recognised prefix | no |
@@ -966,6 +968,73 @@ because a rejected promise carries nothing else. A relay that answers a bad
 signature with something generic — `relay.fountain.fm` says `error: unknown
 error` — reads as `refused` when it is really `malformed`, and costs itself
 strikes it did not earn.
+
+### Pace to the number, do not mute the messenger
+
+A rate limit is the one refusal with an instruction in it:
+
+```
+rate-limited: publishing too fast (limit 180 events/min); slow down or AUTH for higher limits
+```
+
+Muting that relay is the wrong answer, and against newlay it is actively
+harmful. Worked through, because the mechanism is not obvious:
+
+newlay's token bucket **refills continuously**, so a client publishing past the
+cap does not get a clean run of refusals — it gets a steady trickle of
+acceptances mixed in. Roughly one in eleven at a 60/min cap against a 12Hz tick.
+And `strikes` resets to zero on every acceptance. So the run of fifteen
+consecutive refusals never arrives, **the relay is never muted, and the client
+hammers it for the whole session at an 8% accept rate.**
+
+Every one of those rejections is −2 on a behaviour score that recovers at +2 per
+*clean* minute — a minute containing any violation is not clean. At ~8 rejects a
+second the score is on the floor within seconds, the multiplier drops to 0.1×,
+and the cap becomes a tenth of what was configured. **Continuing to publish is
+what holds it there.** For an anonymous key there is no way out: the other
+recovery credit is authed-only and ephemeral session keys never AUTH.
+
+Measured against a fake relay with a real token bucket capped at 60/min:
+
+```
+                          sent/s    accepted
+muting (before)              8.9         11%
+pacing (after)               0.9        100%
+```
+
+So: parse `limit (\d+) events/min`, pace to 90% of it, and do not strike. A
+client under the cap takes no rate hits, so its minutes are clean, so the score
+climbs and the number in the string goes back up while you watch. The margin
+matters — spending a bucket exactly as fast as it refills sits on the boundary,
+where jitter alone produces the refusals you are pacing to avoid.
+
+Pacing is a pace, not a ratchet. A relay that has gone quiet for thirty seconds
+gets tried 1.5× faster, snapping back to whatever it reports next; obey the
+number and you stop being refused, so without probing you would never learn it
+had forgiven you. And there is a valve: forty refusals while paced means the
+number is not the problem, and the relay goes back on the strike-and-mute path.
+
+**Only the position tick is paced.** It is ten a second and the next one is
+always 100ms away. The shell, the death, and the claim published exactly once go
+regardless — skipping those to respect a rate limit would trade a throttle for a
+divergence.
+
+#### The absence of a number is the other half of the signal
+
+newlay's per-IP gate refuses with `rate-limited: too many events from your IP;
+slow down` — same prefix, **no figure**. Per-connection carries a limit; per-IP
+never does. That single difference separates the cap that a second socket fixes
+from the cap it does nothing about, and nothing can be paced to a number that
+was not given, so those go back to muting.
+
+#### One check that is not a discriminator
+
+`the rate-limiting relay is NOT muted` passes against the code *without* pacing
+too, for the opposite reason: the trickle of acceptances keeps resetting the
+strike counter, so the relay is never muted precisely *because* the client is
+hammering it. Not-muted is the same observation for a healthy pace and for an
+unchecked flood. Only the send rate and the accept ratio tell them apart, which
+is why all three are asserted together.
 
 ## Tuning
 
