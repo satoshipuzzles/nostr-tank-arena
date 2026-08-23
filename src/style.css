@@ -657,3 +657,97 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
   .row button { padding: 8px 14px; }
   #lobby-note, .advanced { display: none; }
 }
+
+/* ----------------------------------------------------- the leaderboard wall */
+
+/*
+ * The chain, not a table.
+ *
+ * mempool.space is the reference and the thing worth copying from it is not the
+ * colour scheme, it is the decision to lay the blocks out in the order the
+ * chain produced them and let you scroll along it. A table sorted by kills
+ * throws away the only axis this game has: every round *is* a block, and the
+ * question "who won that one" has exactly one answer per height.
+ *
+ * Horizontal, newest at the left, scrolling with a thumb or a trackpad. Season
+ * boundaries are drawn between tiles rather than announced in a header, because
+ * a difficulty epoch is a position in the chain and that is where it belongs.
+ */
+.board-card { width: min(880px, 100%); }
+
+.wall {
+  display: flex;
+  gap: 10px;
+  align-items: stretch;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 6px 2px 14px;
+  scroll-snap-type: x proximity;
+  /* Momentum scrolling on iOS, and no rubber-banding of the page behind it. */
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+}
+.wall::-webkit-scrollbar { height: 8px; }
+.wall::-webkit-scrollbar-thumb { background: var(--line); border-radius: 999px; }
+
+.blocktile {
+  flex: 0 0 auto;
+  width: 118px;
+  scroll-snap-align: start;
+  display: grid;
+  justify-items: center;
+  gap: 4px;
+  padding: 12px 8px 10px;
+  border-radius: 12px;
+  /* The face of a block: lit from the top, with a hard edge at the bottom, so a
+     row of them reads as solid objects rather than as cards. */
+  background: linear-gradient(180deg, #1b2536 0%, #121a28 100%);
+  border: 1px solid var(--line);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 3px 0 #0a0e16;
+}
+.bt-height {
+  font-size: 11px;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.3px;
+}
+.bt-face { margin: 2px 0; }
+.bt-face .avatar { border-color: rgba(255, 196, 77, 0.5); }
+.bt-name {
+  font-size: 12px;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.bt-kd { font-size: 12px; font-weight: 700; }
+.bt-fine { font-size: 10px; color: var(--dim); }
+
+/*
+ * A season boundary is a difficulty adjustment, so it is drawn as a break in
+ * the chain rather than as a label above a group. The block number underneath
+ * is checkable against any explorer, which is the point of deriving seasons
+ * from the height instead of numbering them ourselves.
+ */
+.season-sep {
+  flex: 0 0 auto;
+  align-self: stretch;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 3px;
+  padding: 0 12px;
+  border-left: 1px dashed var(--line);
+  border-right: 1px dashed var(--line);
+  text-align: center;
+  max-width: 150px;
+}
+.season-name { font-size: 12px; font-weight: 700; color: var(--accent); white-space: nowrap; }
+.season-fine { font-size: 10px; color: var(--dim); }
+
+.tabs button.on { background: var(--accent); color: #16120a; border-color: var(--accent); }
+
+@media (max-width: 620px) {
+  .blocktile { width: 104px; padding: 10px 6px 8px; }
+  .tabs button { padding: 8px 10px; font-size: 12px; }
+}

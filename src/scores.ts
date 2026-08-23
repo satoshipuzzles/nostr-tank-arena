@@ -139,3 +139,111 @@ function rank(events: Event[], limit: number, mode: 'latest' | 'best' = 'latest'
     .sort((a, b) => b.kills - a.kills || a.deaths - b.deaths)
     .slice(0, limit)
 }
+
+/**
+ * The difficulty epoch a block belongs to, which is what this game calls a season.
+ *
+ * 2016 blocks, roughly a fortnight, and — the reason it is the right boundary
+ * rather than a nice round number — it is *derived from the chain* rather than
+ * announced by anybody. Every client computes the same season for the same
+ * block with no server and no coordination, which is the same trick the round
+ * clock already plays with the block hash.
+ */
+export const EPOCH_BLOCKS = 2016
+export const seasonOf = (height: number): number => Math.floor(height / EPOCH_BLOCKS)
+
+export interface BlockResult {
+  height: number
+  season: number
+  /** Whoever posted the most kills for that block. Never null — a block with no
+   *  records is not in this list at all. */
+  winner: ScoreRow
+  /** How many distinct players published a result for that block. */
+  players: number
+  /** Total kills anybody claimed in that round, which is the block's "size". */
+  kills: number
+}
+
+/**
+ * Every block anybody has played, newest first, with its winner.
+ *
+ * This is the leaderboard as a chain rather than as a table: one card per block
+ * in the order the chain produced them, the way a block explorer shows blocks.
+ * It reads the same signed records `fetchScores` does — no new event kind, no
+ * new tag, nothing to publish. The per-block board was already one addressable
+ * slot per player per height; this only groups them the other way round.
+ *
+ * The same caveat applies as everywhere else on this screen and it is worth
+ * restating rather than assuming: every number here was chosen by the player
+ * who signed it. Winning a block means having published the largest number, not
+ * having scored it. The README's "How to cheat this" is the honest version.
+ */
+export async function fetchBlockWall(net: Net, limit = 60): Promise<BlockResult[]> {
+  const events: Event[] = await net.list({
+    kinds: [KIND_SCORE],
+    '#t': ['nostr-tank-arena'],
+    limit: 500,
+  })
+  /** height -> pubkey -> that player's latest record for the block. */
+  const byBlock = new Map<number, Map<string, ScoreRow>>()
+  for (const e of events) {
+    const p = parsePayload<ScorePayload>(e.content)
+    if (!p || typeof p.block !== 'number' || typeof p.kills !== 'number') continue
+    if (typeof p.deaths !== 'number') continue
+    const height = Math.floor(p.block)
+    if (!Number.isFinite(height) || height <= 0) continue
+    const row: ScoreRow = {
+      pubkey: e.pubkey,
+      npub: nip19.npubEncode(e.pubkey),
+      kills: Math.max(0, Math.floor(p.kills)),
+      deaths: Math.max(0, Math.floor(p.deaths)),
+      at: e.created_at,
+      block: height,
+    }
+    let players = byBlock.get(height)
+    if (!players) byBlock.set(height, (players = new Map()))
+    const seen = players.get(e.pubkey)
+    // One slot per player per block: a relay handing back both an old and a new
+    // signature for the same addressable event must not count as two players.
+    if (!seen || row.at > seen.at) players.set(e.pubkey, row)
+  }
+  const wall: BlockResult[] = []
+  for (const [height, players] of byBlock) {
+    const rows = [...players.values()]
+    // Fewest deaths breaks a tie on kills, and the earlier signature breaks
+    // that — so the order is the same on every client rather than being
+    // whatever order the relay happened to answer in.
+    rows.sort((a, b) => b.kills - a.kills || a.deaths - b.deaths || a.at - b.at)
+    wall.push({
+      height,
+      season: seasonOf(height),
+      winner: rows[0],
+      players: rows.length,
+      kills: rows.reduce((n, r) => n + r.kills, 0),
+    })
+  }
+  return wall.sort((a, b) => b.height - a.height).slice(0, limit)
+}
+
+/**
+ * Who took each season, from a wall that has already been fetched.
+ *
+ * Blocks won, not kills totalled. A season is a fortnight of rounds and the
+ * thing worth being proud of is having taken more of them than anybody else —
+ * totalling kills would hand the season to whoever played the most, which is a
+ * measure of free time rather than of anything that happened in a match.
+ */
+export function seasonWinners(wall: BlockResult[]): { season: number; pubkey: string; blocks: number }[] {
+  const bySeason = new Map<number, Map<string, number>>()
+  for (const b of wall) {
+    let tally = bySeason.get(b.season)
+    if (!tally) bySeason.set(b.season, (tally = new Map()))
+    tally.set(b.winner.pubkey, (tally.get(b.winner.pubkey) ?? 0) + 1)
+  }
+  return [...bySeason]
+    .map(([season, tally]) => {
+      const [pubkey, blocks] = [...tally].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]
+      return { season, pubkey, blocks }
+    })
+    .sort((a, b) => b.season - a.season)
+}

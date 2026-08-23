@@ -12,7 +12,16 @@ import type { ClockDirection } from './nostr'
 import { modifierForBlock } from './modifiers'
 import { type Buffs, PICKUPS, type PickupKind } from './pickups'
 import { type Profile, Profiles, shortNpub } from './profiles'
-import { fetchBlockScores, fetchScores, publishScore } from './scores'
+import {
+  type BlockResult,
+  type ScoreRow,
+  EPOCH_BLOCKS,
+  fetchBlockScores,
+  fetchBlockWall,
+  fetchScores,
+  publishScore,
+  seasonWinners,
+} from './scores'
 
 const $ = <T extends HTMLElement>(id: string): T => {
   const el = document.getElementById(id)
@@ -399,6 +408,10 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     // after the picture was already in hand.
     profiles.onChange(() => {
       hudAt = 0
+      // The board is a modal that renders once and then sits there. Without
+      // this, a leaderboard opened a second before the kind-0 events landed
+      // showed short npubs for as long as it stayed open.
+      if (!board.hidden) paintBoard()
     })
     // Exposed on purpose: the two-player smoke test in test/ drives the match
     // through this handle, and it is genuinely useful in the console.
@@ -955,12 +968,119 @@ $('publish-score').addEventListener('click', async () => {
   }, 2000)
 })
 
-async function loadBoard(scope: 'block' | 'all'): Promise<void> {
+/**
+ * The leaderboard as a chain rather than as a table.
+ *
+ * One tile per block, newest first, with the face of whoever won it — the same
+ * shape a block explorer uses, for the same reason: the chain is already the
+ * ordering, and a table sorted by kills throws away the only axis this game
+ * actually has. It reads records that were already being published; nothing new
+ * is signed for this view.
+ *
+ * Seasons are difficulty epochs, 2016 blocks apiece. The boundary is drawn
+ * between tiles rather than announced anywhere, because it is derived from the
+ * height and every client computes the same one.
+ */
+function renderWall(wall: BlockResult[]): string {
+  if (!wall.length) return 'No block has been played yet. Win one and it is the first tile here.'
+  const champions = new Map(seasonWinners(wall).map((s) => [s.season, s]))
+  const tiles: string[] = []
+  let season: number | null = null
+  for (const b of wall) {
+    if (b.season !== season) {
+      season = b.season
+      const champ = champions.get(season)
+      // Named by the epoch's first block, which is a number anybody can check
+      // against a block explorer, rather than by an ordinal this game invented.
+      tiles.push(
+        `<div class="season-sep"><span class="season-name">Season ${season}</span>` +
+          `<span class="season-fine">from block ${season * EPOCH_BLOCKS}</span>` +
+          (champ && champ.blocks > 1
+            ? `<span class="season-fine">${escapeHtml(
+                running?.profiles.get(champ.pubkey)?.name ?? shortNpub(champ.pubkey),
+              )} leads with ${champ.blocks} blocks</span>`
+            : '') +
+          `</div>`,
+      )
+    }
+    const profile = running?.profiles.get(b.winner.pubkey) ?? null
+    const hue = parseInt(b.winner.pubkey.slice(0, 4), 16) % 360
+    tiles.push(
+      `<div class="blocktile"><div class="bt-height">#${b.height}</div>` +
+        `<div class="bt-face">${avatar(profile, profile?.name ?? b.winner.npub.slice(4), hue, 40)}</div>` +
+        `<div class="bt-name">${escapeHtml(profile?.name ?? shortNpub(b.winner.pubkey))}</div>` +
+        `<div class="bt-kd">${b.winner.kills} kills</div>` +
+        `<div class="bt-fine">${b.players} player${b.players === 1 ? '' : 's'}</div></div>`,
+    )
+  }
+  return `<div class="wall">${tiles.join('')}</div>`
+}
+
+/**
+ * What the board last fetched, so a face landing repaints without re-querying.
+ *
+ * Profiles arrive a second or two after the rows they belong to — that is the
+ * whole design, and it is why nothing on this screen waits for them. But
+ * nothing repainted either, so a leaderboard opened before the kind-0 events
+ * landed showed short npubs until you closed it and opened it again. Rendering
+ * from a cache separates "go and ask the relays" from "draw what we have",
+ * which is what makes a repaint free.
+ */
+let boardCache:
+  | { scope: 'wall'; wall: BlockResult[] }
+  | { scope: 'block' | 'all'; scores: ScoreRow[]; height?: number }
+  | null = null
+
+function paintBoard(): void {
   const rows = $('board-rows')
+  if (!boardCache) return
+  if (boardCache.scope === 'wall') {
+    rows.innerHTML = renderWall(boardCache.wall)
+    return
+  }
+  const { scope, scores, height } = boardCache
+  rows.innerHTML = scores.length
+    ? scores
+        .map((s, i) => {
+          const profile = running?.profiles.get(s.pubkey) ?? null
+          const hue = parseInt(s.pubkey.slice(0, 4), 16) % 360
+          const badge = nip05Badge(profile)
+          return `<div class="score-row"><span class="who"><span class="rank">${i + 1}</span>
+              ${avatar(profile, profile?.name ?? s.npub.slice(4), hue, 26)}
+              <span class="ident"><span class="name">${escapeHtml(profile?.name ?? shortNpub(s.pubkey))}</span>
+              ${badge}</span></span>
+              <span class="kd">${s.kills} / ${s.deaths}${
+                scope === 'all' && s.block ? ` <span class="npub">#${s.block}</span>` : ''
+              }</span></div>`
+        })
+        .join('')
+    : scope === 'block'
+      ? `Nothing published for block ${height} yet. Be the first.`
+      : 'No scores published yet. Be the first.'
+}
+
+async function loadBoard(scope: 'block' | 'all' | 'wall'): Promise<void> {
+  const rows = $('board-rows')
+  $('board-tab-wall').classList.toggle('on', scope === 'wall')
   $('board-tab-block').classList.toggle('on', scope === 'block')
   $('board-tab-all').classList.toggle('on', scope === 'all')
   rows.textContent = 'loading…'
+  boardCache = null
   if (!running) return
+  if (scope === 'wall') {
+    try {
+      const wall = await fetchBlockWall(running.players[0].game.net)
+      // Faces arrive after the tiles do, exactly as on the other two tabs: the
+      // wall renders with short npubs immediately and upgrades itself when the
+      // kind-0 events land, so a slow profile relay never holds up the board.
+      for (const b of wall) running?.profiles.want(b.winner.pubkey)
+      boardCache = { scope, wall }
+      paintBoard()
+    } catch {
+      rows.textContent = 'Could not reach the relays.'
+    }
+    return
+  }
   const height = running.clock.tip?.height
   if (scope === 'block' && !height) {
     rows.textContent = 'No block height yet — the explorer has not answered.'
@@ -975,24 +1095,8 @@ async function loadBoard(scope: 'block' | 'all'): Promise<void> {
     // profile fetch is fire-and-forget: rows render with the npub immediately
     // and upgrade themselves to a face and a NIP-05 when the events land.
     for (const s of scores) running?.profiles.want(s.pubkey)
-    rows.innerHTML = scores.length
-      ? scores
-          .map((s, i) => {
-            const profile = running?.profiles.get(s.pubkey) ?? null
-            const hue = parseInt(s.pubkey.slice(0, 4), 16) % 360
-            const badge = nip05Badge(profile)
-            return `<div class="score-row"><span class="who"><span class="rank">${i + 1}</span>
-                ${avatar(profile, profile?.name ?? s.npub.slice(4), hue, 26)}
-                <span class="ident"><span class="name">${escapeHtml(profile?.name ?? shortNpub(s.pubkey))}</span>
-                ${badge}</span></span>
-                <span class="kd">${s.kills} / ${s.deaths}${
-                  scope === 'all' && s.block ? ` <span class="npub">#${s.block}</span>` : ''
-                }</span></div>`
-          })
-          .join('')
-      : scope === 'block'
-        ? `Nothing published for block ${height} yet. Be the first.`
-        : 'No scores published yet. Be the first.'
+    boardCache = { scope, scores, height }
+    paintBoard()
   } catch {
     rows.textContent = 'Could not reach the relays.'
   }
@@ -1000,8 +1104,9 @@ async function loadBoard(scope: 'block' | 'all'): Promise<void> {
 
 $('show-board').addEventListener('click', () => {
   board.hidden = false
-  void loadBoard(running?.clock.tip ? 'block' : 'all')
+  void loadBoard('wall')
 })
+$('board-tab-wall').addEventListener('click', () => void loadBoard('wall'))
 $('board-tab-block').addEventListener('click', () => void loadBoard('block'))
 $('board-tab-all').addEventListener('click', () => void loadBoard('all'))
 
