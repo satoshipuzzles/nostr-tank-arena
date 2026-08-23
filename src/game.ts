@@ -210,6 +210,13 @@ export class Game {
    */
   private spent = new Set<string>()
   /**
+   * Pads this client swept up itself, as opposed to hearing about.
+   *
+   * `claimed` cannot tell the two apart — it holds every id anybody claimed —
+   * and a rollback must not undo a grab that this player genuinely made.
+   */
+  private minePads = new Set<string>()
+  /**
    * Diagnostics for the claim path. Both numbers, because either alone lies.
    *
    * `unmatchedClaims` counts claims that arrived before their pad existed —
@@ -963,6 +970,7 @@ export class Game {
 
       pickup.taken = true
       this.claimed.add(pickup.id)
+      this.minePads.add(pickup.id)
       const spec = PICKUPS[pickup.kind]
       if (pickup.kind === 'repair') {
         this.tank.hp = this.maxHp
@@ -1042,18 +1050,49 @@ export class Game {
    * agree with the room again, and lets the grab be retried by driving over it.
    */
   private settleClaim(pickup: Pickup, outcome: PublishOutcome): void {
-    if (!outcome.unanimouslyRefused) return
+    // `definitelyNowhere`, not `unanimouslyRefused`. The two questions came
+    // apart: whether to give up on a relay is answered by policy refusals
+    // alone, but whether the event exists anywhere has to count `invalid:` as
+    // well — that one is rejected before storage, never forwarded, and bad at
+    // every relay including the ones we never asked. A claim every relay calls
+    // `invalid: event expired` is the one total publish failure anybody here has
+    // actually observed, and it used to slip straight past this line.
+    if (!outcome.definitelyNowhere) return
     // Spent before the pad is restored, and that ordering is the whole of it.
     // `sweepPickups` runs every frame and the tank is still standing on the pad
     // — putting it back without this re-grabs it, re-publishes, is refused
     // again, and loops at frame rate. The first version of this did exactly
     // that: nine refusals in a second and a half before the test caught it.
     this.spent.add(pickup.id)
-    const live = this.pickups.get(pickup.id)
+    // Our own rollback is unconditional — `unclaim` deliberately refuses to
+    // undo a grab the caller made themselves, and here the caller *is* the
+    // grabber. That guard is for the mirrors.
     this.claimed.delete(pickup.id)
+    this.minePads.delete(pickup.id)
+    const live = this.pickups.get(pickup.id)
     if (live) live.taken = false
+    // The claim was mirrored to the other local players before it was
+    // published, so they already marked that pad taken. Undoing it here only
+    // would leave player one agreeing with the room and player two not — and it
+    // would not heal, because player two keeps the id in `claimed` and re-marks
+    // the pad on every rebuild. The rollback travels the same way the claim did.
+    for (const other of this.localMirror) other.unclaim(pickup.id)
     this.refusedClaims++
     this.pushFeed(`claim refused — ${PICKUPS[pickup.kind]?.label ?? 'that pad'} is back`)
+  }
+
+  /**
+   * Forget that a pad was claimed. Safe to call on a client that never saw it.
+   *
+   * Skipped for a player who took the pad themselves: they have their own claim
+   * out, and undoing their grab because somebody else's failed would be a second
+   * divergence rather than the repair of the first.
+   */
+  unclaim(id: string): void {
+    if (this.minePads.has(id)) return
+    this.claimed.delete(id)
+    const live = this.pickups.get(id)
+    if (live) live.taken = false
   }
 
   private onClaim(e: Event): void {

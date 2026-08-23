@@ -558,6 +558,50 @@ try {
     spans !== null && spans.span > firstSpan.span * 1.5,
     spans === null ? 'no mute recorded' : `first ${(firstSpan.span / 1000).toFixed(0)}s, second ${(spans.span / 1000).toFixed(0)}s`,
   )
+  // ------------------------------------- a real frame driving a real rollback
+  //
+  // Everything above asserts what `classifyFailure` returns. Nothing until here
+  // ran a relay's actual words all the way through to a decision the *game*
+  // makes — so the gap cowboy found was invisible to a green suite by
+  // construction: the claim rollback keyed on `unanimouslyRefused`, which counts
+  // policy refusals only, and a claim every relay answers `invalid: event
+  // expired` produced `refused: 0` and never rolled anything back. That is the
+  // one total publish failure anybody has actually observed.
+  //
+  // Every relay but the expired one is muted by hand, so the claim goes to
+  // exactly one fake and comes back malformed from all of it.
+  const rolled = await page.evaluate(
+    async ([keep, height, mined]) => {
+      const g = window.__game
+      const far = Date.now() + 600_000
+      for (const url of g.net.relays) {
+        if (url !== keep) g.net.muted.set(url, { until: far, span: 600_000 })
+      }
+      window.__clock.accept({ height, hash: 'ab'.repeat(30) + '0301', time: mined })
+      document.getElementById('podium').hidden = true
+      await new Promise((r) => setTimeout(r, 1500))
+
+      const pad = [...g.pickups.values()].find((p) => !p.taken && !g.spent.has(p.id))
+      if (!pad) return { skipped: 'no pad' }
+      g.tank.dead = false
+      g.tank.hp = g.maxHp
+      g.tank.x = pad.at.x
+      g.tank.y = pad.at.y
+      await new Promise((r) => setTimeout(r, 2500))
+      return {
+        id: pad.id,
+        back: !!g.pickups.get(pad.id) && !g.pickups.get(pad.id).taken,
+        refusedClaims: g.refusedClaims,
+        malformed: g.net.ledger.get(keep)?.malformed ?? 0,
+      }
+    },
+    [expired.url, 999_500, Math.floor(Date.now() / 1000)],
+  )
+  check(
+    'a claim the relay answers `invalid: event expired` rolls the pad back',
+    !rolled.skipped && rolled.back && rolled.refusedClaims >= 1,
+    JSON.stringify(rolled),
+  )
 } catch (err) {
   check('the run completed', false, err.message)
 } finally {

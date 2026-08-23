@@ -199,12 +199,34 @@ than a second reading of the clock straddling the signature.
 item would stall for a round trip. So a claim nobody accepted leaves this client
 alone in believing the pad is gone while every remote player still sees it live.
 
-`publish()` returns an outcome for exactly this reason. The pad is restored on a
-**unanimous refusal** — every relay that was asked looked at the event and said
-no — and never on silence or a timeout, because the event may well have landed
-and putting the pad back would be inventing a divergence rather than repairing
-one. Splitting refusal from silence is what makes the rollback safe to write at
-all.
+`publish()` returns an outcome for exactly this reason, and it answers two
+questions that turned out not to be the same one:
+
+| question | counts |
+|---|---|
+| should I give up on this relay? | `refused` only |
+| does this event exist anywhere? | `refused` **and** `malformed`, or nothing sent |
+
+`malformed` is a *stronger* verdict than a policy refusal, not a weaker one.
+`invalid:` is emitted before storage — never stored, never forwarded — and a bad
+event is bad at **every** relay, including the muted ones that were never asked.
+A refusal only tells you about the relays in `targets`. So a claim every relay
+answers `invalid: event expired` — the one total publish failure anybody in this
+thread has actually observed, and the exact case the rollback exists for — has to
+count, and keying the rollback on refusals alone let it through untouched.
+
+The pad is never restored on silence or a timeout: the event may well have
+landed, and putting it back then would be inventing a divergence rather than
+repairing one. Splitting refusal from silence is what makes the rollback safe to
+write at all.
+
+The rollback travels the same way the claim did. `publishClaim` mirrors before
+publishing, so the other local player already marked that pad taken — undoing it
+on the publishing client alone leaves player one agreeing with the room and
+player two not, and it does not heal, because player two keeps the id and
+re-marks the pad on every rebuild. A player who took the pad *themselves* is
+never rolled back; undoing a real grab because somebody else's claim failed is a
+second divergence rather than the repair of the first.
 
 Two things it deliberately does not do. It does not take the pickup's effect
 back: nobody outside this client ever saw the grab, so nothing out there

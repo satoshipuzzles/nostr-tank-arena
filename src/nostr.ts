@@ -169,10 +169,29 @@ export interface PublishOutcome {
   sent: number
   accepted: number
   refused: number
+  /** Every relay said `invalid:` — the event itself was bad. */
+  malformed: number
   /** Silence, timeouts, and reasons we could not classify. */
   unclear: number
   /** True only when every relay asked refused it outright. */
   unanimouslyRefused: boolean
+  /**
+   * True when this event is definitely nowhere, and it is a different question.
+   *
+   * `unanimouslyRefused` answers "should I give up on these relays" — only a
+   * policy refusal counts, because that is the only kind that says anything
+   * about the relay. This one answers "does this event exist anywhere", and for
+   * that `malformed` is a *stronger* guarantee than `refused`, not a weaker
+   * one: `invalid:` is emitted before storage, the event is never stored and
+   * never forwarded, and a bad event is bad at every relay — including the
+   * muted ones that were never asked. A refusal only tells you about the relays
+   * in `targets`.
+   *
+   * Which is why a claim rejected everywhere as `invalid: event expired` — the
+   * one total publish failure anybody in this thread has actually observed —
+   * has to count. `sent === 0`, everything muted, is definitively nowhere too.
+   */
+  definitelyNowhere: boolean
   /** The last refusal reason, in the relay's own words. */
   reason: string | null
 }
@@ -516,8 +535,10 @@ export class Net {
       sent: targets.length,
       accepted: 0,
       refused: 0,
+      malformed: 0,
       unclear: 0,
       unanimouslyRefused: false,
+      definitelyNowhere: false,
       reason: null,
     }
     if (!targets.length) return Promise.resolve(outcome)
@@ -549,6 +570,9 @@ export class Net {
           }
           if (kind === 'refused') {
             outcome.refused++
+            outcome.reason = reason
+          } else if (kind === 'malformed') {
+            outcome.malformed++
             outcome.reason = reason
           } else {
             outcome.unclear++
@@ -592,6 +616,8 @@ export class Net {
     })
     return Promise.all(settled).then(() => {
       outcome.unanimouslyRefused = outcome.refused === outcome.sent && outcome.sent > 0
+      outcome.definitelyNowhere =
+        outcome.sent === 0 || outcome.refused + outcome.malformed === outcome.sent
       return outcome
     })
   }

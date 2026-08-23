@@ -511,6 +511,17 @@ try {
   check('and the other client sees that pad go empty', seen.taken,
     JSON.stringify(seen.feed.slice(-3)))
 
+  // A fresh board with every pad stocked, because the checks below consume one
+  // pad each and a standard round leaves one deliberately empty. `03` is Supply
+  // Run, `01` is The Lanes — four pads, none skipped.
+  await Promise.all([a, b].map((p) => p.evaluate(([h, t]) => {
+    window.__clock.accept({ height: h, hash: 'ab'.repeat(30) + '0301', time: t })
+    document.getElementById('podium').hidden = true
+  }, [HEIGHT + 2, Math.floor(Date.now() / 1000)])))
+  await wait(1500)
+  const stocked = await a.evaluate(() => window.__game.pickups.size)
+  check('a stocked board for the rollback checks', stocked >= 4, `${stocked} pads`)
+
   // ------------------------------------------------ a claim nobody accepted
   //
   // The claim is the one thing this game publishes exactly once, so it is the
@@ -538,25 +549,41 @@ try {
       }
     }, outcome)
 
-  const grabAnother = () =>
-    a.evaluate(() => {
-      const g = window.__game
-      // Skip anything already consumed-but-unannounced: a pad restored by the
-      // rollback is live for the room and not for us, so parking on it again
-      // publishes nothing and the next check would measure the wrong pad.
-      const next = [...g.pickups.values()].find((p) => !p.taken && !g.spent.has(p.id))
-      if (!next) return null
-      g.tank.dead = false
-      g.tank.hp = g.maxHp
-      g.tank.x = next.at.x
-      g.tank.y = next.at.y
-      return next.id
-    })
+  // Polled, because a wave clears the board for a stretch between spawns and
+  // "no pad right now" is not the same as "no pad available". A fixed attempt
+  // reads the gap as a broken board.
+  const refusals = () => a.evaluate(() => window.__game.refusedClaims)
+  // Counted as a delta, never as a total. `grabAnother` polls across wave
+  // boundaries, and a tank parked on a pad while a new wave spawns one under it
+  // sweeps that too — so the absolute tally drifts for reasons that have nothing
+  // to do with the pad under test.
+  const grabAnother = async () => {
+    for (let i = 0; i < 14; i++) {
+      const id = await a.evaluate(() => {
+        const g = window.__game
+        // Skip anything already consumed-but-unannounced: a pad restored by the
+        // rollback is live for the room and not for us, so parking on it again
+        // publishes nothing and the next check would measure the wrong pad.
+        const next = [...g.pickups.values()].find((p) => !p.taken && !g.spent.has(p.id))
+        if (!next) return null
+        g.tank.dead = false
+        g.tank.hp = g.maxHp
+        g.tank.x = next.at.x
+        g.tank.y = next.at.y
+        return next.id
+      })
+      if (id) return id
+      await wait(1000)
+    }
+    return null
+  }
 
   await forceOutcome({
-    sent: 4, accepted: 0, refused: 4, unclear: 0,
-    unanimouslyRefused: true, reason: 'blocked: not accepted here',
+    sent: 4, accepted: 0, refused: 4, malformed: 0, unclear: 0,
+    unanimouslyRefused: true, definitelyNowhere: true,
+    reason: 'blocked: not accepted here',
   })
+  const beforeRefused = await refusals()
   const refusedId = await grabAnother()
   await wait(1600)
   const rolled = refusedId
@@ -572,7 +599,7 @@ try {
       }, refusedId)
     : null
   check('a claim every relay refused puts the pad back',
-    !!rolled && rolled.back && rolled.refusedClaims === 1, JSON.stringify(rolled))
+    !!rolled && rolled.back && rolled.refusedClaims > beforeRefused, JSON.stringify(rolled))
   // Nobody outside this client ever saw the grab, so nothing out there disagrees
   // about the effect — and a game that confiscates a shield for a network reason
   // feels broken in a way leaving it does not.
@@ -582,9 +609,10 @@ try {
     !!rolled && rolled.feed.some((t) => t.includes('claim refused')), JSON.stringify(rolled))
 
   await forceOutcome({
-    sent: 4, accepted: 0, refused: 0, unclear: 4,
-    unanimouslyRefused: false, reason: null,
+    sent: 4, accepted: 0, refused: 0, malformed: 0, unclear: 4,
+    unanimouslyRefused: false, definitelyNowhere: false, reason: null,
   })
+  const beforeSilent = await refusals()
   const silentId = await grabAnother()
   await wait(1600)
   const held = silentId
@@ -594,7 +622,53 @@ try {
       }, silentId)
     : null
   check('a claim nobody answered is left alone, because it may well have landed',
-    !!held && held.stillTaken && held.refusedClaims === 1, JSON.stringify(held))
+    !!held && held.stillTaken && held.refusedClaims === beforeSilent,
+    `${JSON.stringify(held)} was ${beforeSilent}`)
+
+  // The case the rollback exists for, and the one it used to miss.
+  //
+  // `invalid:` is a *stronger* verdict than a policy refusal, not a weaker one:
+  // the relay rejects it before storage, never forwards it, and a bad event is
+  // bad at every relay including the muted ones nobody asked. A clock far enough
+  // behind makes every claim expire on arrival — the one total publish failure
+  // anybody in this thread has actually observed — and counting only `refused`
+  // let it through untouched.
+  await forceOutcome({
+    sent: 4, accepted: 0, refused: 0, malformed: 4, unclear: 0,
+    unanimouslyRefused: false, definitelyNowhere: true,
+    reason: 'invalid: event expired',
+  })
+  const beforeExpired = await refusals()
+  const expiredId = await grabAnother()
+  await wait(1600)
+  const expired = expiredId
+    ? await a.evaluate((id) => {
+        const g = window.__game
+        return { back: !!g.pickups.get(id) && !g.pickups.get(id).taken, refusedClaims: g.refusedClaims }
+      }, expiredId)
+    : null
+  check('a claim every relay called invalid puts the pad back too',
+    !!expired && expired.back && expired.refusedClaims > beforeExpired,
+    `${JSON.stringify(expired)} was ${beforeExpired}`)
+
+  // Everything muted is also definitively nowhere, and used to answer `false`.
+  await forceOutcome({
+    sent: 0, accepted: 0, refused: 0, malformed: 0, unclear: 0,
+    unanimouslyRefused: false, definitelyNowhere: true, reason: null,
+  })
+  const beforeMuted = await refusals()
+  const mutedId = await grabAnother()
+  await wait(1600)
+  const noneSent = mutedId
+    ? await a.evaluate((id) => {
+        const g = window.__game
+        return { back: !!g.pickups.get(id) && !g.pickups.get(id).taken, refusedClaims: g.refusedClaims }
+      }, mutedId)
+    : null
+  check('and so is a claim that went to no relay at all',
+    !!noneSent && noneSent.back && noneSent.refusedClaims > beforeMuted,
+    `${JSON.stringify(noneSent)} was ${beforeMuted}`)
+
   await a.evaluate(() => {
     window.__game.net.publish = window.__realPublish
   })

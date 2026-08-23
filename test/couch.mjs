@@ -342,6 +342,61 @@ try {
   check('and their panel is actually on the page', drawn.p2Panel && drawn.panelDisplay !== 'none',
     JSON.stringify(drawn))
 
+  // ------------------------------------------ a rollback has to reach both
+  //
+  // `publishClaim` mirrors before publishing, so player two already marked that
+  // pad taken. Rolling back only the game that published leaves player one
+  // agreeing with the room and player two not — and it does not heal, because
+  // player two keeps the id in `claimed` and re-marks the pad on every rebuild.
+  // The pad ends up dead for both people, in two different ways, on the one
+  // screen where you can see both.
+  const rollback = await page.evaluate(async () => {
+    const [one, two] = window.__players
+    const g = one.game
+    const pad = [...g.pickups.values()].find((p) => !p.taken && !g.spent.has(p.id))
+    if (!pad) return { skipped: true }
+
+    const real = g.net.publish.bind(g.net)
+    g.net.publish = (e) =>
+      e.kind === 30078 && e.tags.some((t) => t[0] === 'expiration')
+        ? Promise.resolve({
+            sent: 4, accepted: 0, refused: 4, malformed: 0, unclear: 0,
+            unanimouslyRefused: true, definitelyNowhere: true,
+            reason: 'blocked: not accepted here',
+          })
+        : real(e)
+
+    g.tank.dead = false
+    g.tank.x = pad.at.x
+    g.tank.y = pad.at.y
+    await new Promise((r) => setTimeout(r, 1200))
+    const mid = { twoSawIt: two.claimed?.has?.(pad.id) ?? null }
+    await new Promise((r) => setTimeout(r, 1200))
+    g.net.publish = real
+    return {
+      skipped: false,
+      id: pad.id,
+      mid,
+      oneBack: !!one.game.pickups.get(pad.id) && !one.game.pickups.get(pad.id).taken,
+      twoBack: !!two.game.pickups.get(pad.id) && !two.game.pickups.get(pad.id).taken,
+      twoStillClaims: two.game.claimed.has(pad.id),
+    }
+  })
+  if (rollback.skipped) {
+    check('a rollback reaches both local players', false, 'no free pad to test with')
+  } else {
+    check('a refused claim puts the pad back for player one', rollback.oneBack,
+      JSON.stringify(rollback))
+    // The half that was missing. Player two heard the claim through the mirror,
+    // so player two has to hear the rollback the same way.
+    check('and for player two, who only ever heard about it through the mirror',
+      rollback.twoBack, JSON.stringify(rollback))
+    // Otherwise `refreshPickups` re-marks it taken on every rebuild and the pad
+    // stays dead for player two long after player one has it back.
+    check('and player two is not still holding the claim that was withdrawn',
+      !rollback.twoStillClaims, JSON.stringify(rollback))
+  }
+
   check('no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '))
 } finally {
   await browser.close()
