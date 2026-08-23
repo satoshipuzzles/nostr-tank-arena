@@ -200,6 +200,19 @@ export async function fetchBlockWall(net: Net, limit = 60): Promise<BlockWall> {
     '#t': ['nostr-tank-arena'],
     limit: 500,
   })
+  const wall = groupBlocks(events)
+  return { blocks: wall.slice(0, limit), truncated: wall.length > limit }
+}
+
+/**
+ * Signed records to one result per block, newest first.
+ *
+ * Split out of `fetchBlockWall` because the season view needs exactly the same
+ * grouping over a different set of events, and two copies of "who won a block"
+ * is two answers waiting to disagree — a season champion computed by a second
+ * implementation would eventually crown somebody the wall does not.
+ */
+function groupBlocks(events: Event[]): BlockResult[] {
   /** height -> pubkey -> that player's latest record for the block. */
   const byBlock = new Map<number, Map<string, ScoreRow>>()
   for (const e of events) {
@@ -223,14 +236,14 @@ export async function fetchBlockWall(net: Net, limit = 60): Promise<BlockWall> {
     // signature for the same addressable event must not count as two players.
     if (!seen || row.at > seen.at) players.set(e.pubkey, row)
   }
-  const wall: BlockResult[] = []
+  const out: BlockResult[] = []
   for (const [height, players] of byBlock) {
     const rows = [...players.values()]
     // Fewest deaths breaks a tie on kills, and the earlier signature breaks
     // that — so the order is the same on every client rather than being
     // whatever order the relay happened to answer in.
     rows.sort((a, b) => b.kills - a.kills || a.deaths - b.deaths || a.at - b.at)
-    wall.push({
+    out.push({
       height,
       season: seasonOf(height),
       winner: rows[0],
@@ -238,8 +251,7 @@ export async function fetchBlockWall(net: Net, limit = 60): Promise<BlockWall> {
       kills: rows.reduce((n, r) => n + r.kills, 0),
     })
   }
-  wall.sort((a, b) => b.height - a.height)
-  return { blocks: wall.slice(0, limit), truncated: wall.length > limit }
+  return out.sort((a, b) => b.height - a.height)
 }
 
 /**
@@ -262,6 +274,108 @@ export function seasonWinners(wall: BlockResult[]): { season: number; pubkey: st
     .map(([season, tally]) => {
       const [pubkey, blocks] = [...tally].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]
       return { season, pubkey, blocks }
+    })
+    .sort((a, b) => b.season - a.season)
+}
+
+export interface SeasonRow {
+  season: number
+  /** First and last height of the epoch itself, not of what we found in it. */
+  from: number
+  to: number
+  /** Whoever won the most blocks in it. Null when the season is empty. */
+  champion: ScoreRow | null
+  /** Blocks the champion took. */
+  won: number
+  /** Blocks of this season anybody published a result for. */
+  played: number
+  /**
+   * Whether the paging reached back past this season's first block.
+   *
+   * The distinction the whole view turns on. A champion computed over a
+   * *partial* season is not a champion, and the difference is invisible from
+   * the number alone — "four blocks" looks the same whether it is four out of
+   * six or four out of two hundred. When this is false the screen says so
+   * rather than crowning anybody.
+   */
+  complete: boolean
+}
+
+/**
+ * Season standings, paged back through the relays' history.
+ *
+ * A season is a difficulty epoch and there is no way to ask a relay for "score
+ * records between height X and Y" — heights live in a `t` tag, one per block,
+ * and a filter listing 2016 of them is not a filter. So this pages backwards
+ * the ordinary Nostr way, `until` the oldest `created_at` it has already seen,
+ * and stops when a page comes back short.
+ *
+ * The cursor is deliberately an *event's own* timestamp rather than a time this
+ * client computed. A `since`/`until` written from the local clock is matched by
+ * the relay against `created_at` values written by everybody else, so a machine
+ * whose clock is wrong quietly receives nothing and the page looks empty rather
+ * than broken. This game has already lost a day to that once.
+ */
+export async function fetchSeasons(net: Net, pages = 6, perPage = 500): Promise<SeasonRow[]> {
+  const seen = new Map<string, Event>()
+  let until: number | undefined
+  let exhausted = false
+  for (let page = 0; page < pages; page++) {
+    const batch: Event[] = await net.list({
+      kinds: [KIND_SCORE],
+      '#t': ['nostr-tank-arena'],
+      limit: perPage,
+      ...(until ? { until } : {}),
+    })
+    // Relays overlap and re-send; count distinct events, and stop when a page
+    // adds nothing rather than when it *returns* nothing, because a page of
+    // pure duplicates is the same dead end wearing a different hat.
+    const before = seen.size
+    let oldest = Infinity
+    for (const e of batch) {
+      seen.set(e.id, e)
+      if (e.created_at < oldest) oldest = e.created_at
+    }
+    if (seen.size === before || !Number.isFinite(oldest)) {
+      exhausted = true
+      break
+    }
+    until = oldest - 1
+  }
+
+  const blocks = groupBlocks([...seen.values()])
+  if (!blocks.length) return []
+  const oldestHeight = blocks[blocks.length - 1].height
+
+  const bySeason = new Map<number, BlockResult[]>()
+  for (const b of blocks) {
+    let list = bySeason.get(b.season)
+    if (!list) bySeason.set(b.season, (list = []))
+    list.push(b)
+  }
+  return [...bySeason]
+    .map(([season, list]) => {
+      const tally = new Map<string, { row: ScoreRow; won: number }>()
+      for (const b of list) {
+        const held = tally.get(b.winner.pubkey)
+        if (held) held.won++
+        else tally.set(b.winner.pubkey, { row: b.winner, won: 1 })
+      }
+      const top = [...tally.values()].sort(
+        (a, b) => b.won - a.won || a.row.pubkey.localeCompare(b.row.pubkey),
+      )[0]
+      return {
+        season,
+        from: season * EPOCH_BLOCKS,
+        to: (season + 1) * EPOCH_BLOCKS - 1,
+        champion: top?.row ?? null,
+        won: top?.won ?? 0,
+        played: list.length,
+        // We can only claim a season is fully in view if we paged back past
+        // where it begins — either because the relays ran out of history, or
+        // because we are holding a block older than its first.
+        complete: exhausted || oldestHeight < season * EPOCH_BLOCKS,
+      }
     })
     .sort((a, b) => b.season - a.season)
 }

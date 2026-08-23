@@ -15,10 +15,12 @@ import { type Profile, Profiles, shortNpub } from './profiles'
 import {
   type BlockWall,
   type ScoreRow,
+  type SeasonRow,
   EPOCH_BLOCKS,
   fetchBlockScores,
   fetchBlockWall,
   fetchScores,
+  fetchSeasons,
   publishScore,
   seasonWinners,
 } from './scores'
@@ -1066,6 +1068,7 @@ function renderWall({ blocks, truncated }: BlockWall): string {
  * which is what makes a repaint free.
  */
 let boardCache:
+  | { scope: 'seasons'; seasons: SeasonRow[] }
   | { scope: 'wall'; wall: BlockWall }
   | { scope: 'block' | 'all'; scores: ScoreRow[]; height?: number }
   | null = null
@@ -1073,6 +1076,10 @@ let boardCache:
 function paintBoard(): void {
   const rows = $('board-rows')
   if (!boardCache) return
+  if (boardCache.scope === 'seasons') {
+    rows.innerHTML = renderSeasons(boardCache.seasons)
+    return
+  }
   if (boardCache.scope === 'wall') {
     rows.innerHTML = renderWall(boardCache.wall)
     return
@@ -1100,14 +1107,79 @@ function paintBoard(): void {
       : 'No scores published yet. Be the first.'
 }
 
-async function loadBoard(scope: 'block' | 'all' | 'wall'): Promise<void> {
+/**
+ * A season is a difficulty epoch, and its champion is derived rather than awarded.
+ *
+ * Nobody signs this. Every client computes it from the same public score events
+ * and gets the same answer, which is the only reason it can exist in a game
+ * with no server — there is no trophy to hand out, only an arithmetic anybody
+ * can redo. That also means it is exactly as trustworthy as the records under
+ * it, which is to say: everyone chose their own numbers. The card says so.
+ *
+ * A season that has not been paged back past is shown *without* a champion. A
+ * tally over a partial season is not a smaller truth, it is a different claim,
+ * and "four blocks" reads identically whether it is four out of six or four out
+ * of two hundred.
+ */
+function renderSeasons(seasons: SeasonRow[]): string {
+  if (!seasons.length) return 'No season has been played yet.'
+  return (
+    `<div class="seasons">` +
+    seasons
+      .map((s) => {
+        const profile = s.champion ? (running?.profiles.get(s.champion.pubkey) ?? null) : null
+        const hue = s.champion ? parseInt(s.champion.pubkey.slice(0, 4), 16) % 360 : 0
+        const head =
+          `<div class="sn-head"><span class="sn-title">Season ${s.season}</span>` +
+          `<span class="sn-range">blocks ${s.from}–${s.to}</span></div>`
+        if (!s.champion) {
+          return `<div class="seasoncard empty">${head}<p class="fine">Nothing published yet.</p></div>`
+        }
+        if (!s.complete) {
+          // Deliberately not a podium. Naming a leader here would be the same
+          // lie the wall used to tell, one screen over.
+          return (
+            `<div class="seasoncard partial">${head}` +
+            `<p class="fine">${s.played} block${s.played === 1 ? '' : 's'} in view, ` +
+            `but not the whole season — the relays did not go back far enough to say who took it.</p></div>`
+          )
+        }
+        return (
+          `<div class="seasoncard">${head}` +
+          `<div class="sn-champ">${avatar(profile, profile?.name ?? shortNpub(s.champion.pubkey), hue, 52)}` +
+          `<div class="sn-who"><span class="sn-name">${escapeHtml(
+            profile?.name ?? shortNpub(s.champion.pubkey),
+          )}</span>` +
+          `<span class="sn-won">${s.won} of ${s.played} block${s.played === 1 ? '' : 's'}</span></div></div></div>`
+        )
+      })
+      .join('') +
+    `</div>` +
+    `<p class="fine">Champions are worked out from the same signed records the block wall shows — ` +
+    `nobody awards them, so anybody can check one.</p>`
+  )
+}
+
+async function loadBoard(scope: 'block' | 'all' | 'wall' | 'seasons'): Promise<void> {
   const rows = $('board-rows')
+  $('board-tab-seasons').classList.toggle('on', scope === 'seasons')
   $('board-tab-wall').classList.toggle('on', scope === 'wall')
   $('board-tab-block').classList.toggle('on', scope === 'block')
   $('board-tab-all').classList.toggle('on', scope === 'all')
   rows.textContent = 'loading…'
   boardCache = null
   if (!running) return
+  if (scope === 'seasons') {
+    try {
+      const seasons = await fetchSeasons(running.players[0].game.net)
+      for (const s of seasons) if (s.champion) running?.profiles.want(s.champion.pubkey)
+      boardCache = { scope, seasons }
+      paintBoard()
+    } catch {
+      rows.textContent = 'Could not reach the relays.'
+    }
+    return
+  }
   if (scope === 'wall') {
     try {
       const wall = await fetchBlockWall(running.players[0].game.net)
@@ -1148,6 +1220,7 @@ $('show-board').addEventListener('click', () => {
   void loadBoard('wall')
 })
 $('board-tab-wall').addEventListener('click', () => void loadBoard('wall'))
+$('board-tab-seasons').addEventListener('click', () => void loadBoard('seasons'))
 $('board-tab-block').addEventListener('click', () => void loadBoard('block'))
 $('board-tab-all').addEventListener('click', () => void loadBoard('all'))
 

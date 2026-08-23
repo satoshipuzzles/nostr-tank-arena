@@ -205,6 +205,69 @@ deepWss.on('connection', (ws) => {
 })
 const deepUrl = `ws://localhost:${deepWss.address().port}`
 
+// ------------------------------------------------------------- seasons
+//
+// Two relays, because the two cases are the same code reaching two opposite
+// conclusions and one relay cannot be both.
+//
+// Both cap a response at twenty events however large a limit is asked for,
+// which is what real relays do and is the only way `until` paging is exercised
+// at all: a relay that answers everything in one page never pages.
+
+const CAP = 20
+/** A relay that honours `until` and hands back at most `CAP` events a time. */
+function startPagingRelay(records) {
+  const server = new WebSocketServer({ port: 0 })
+  const state = { pages: 0 }
+  server.on('connection', (ws) => {
+    ws.on('message', (raw) => {
+      let msg
+      try {
+        msg = JSON.parse(raw.toString())
+      } catch {
+        return
+      }
+      if (msg[0] === 'EVENT') return ws.send(JSON.stringify(['OK', msg[1].id, true, '']))
+      if (msg[0] !== 'REQ') return
+      const [, id, ...filters] = msg
+      for (const f of filters) {
+        if (!(f.kinds ?? []).includes(KIND_SCORE)) continue
+        state.pages++
+        const page = records
+          .filter((e) => (f.until === undefined ? true : e.created_at <= f.until))
+          .sort((a, b) => b.created_at - a.created_at)
+          .slice(0, CAP)
+        for (const e of page) ws.send(JSON.stringify(['EVENT', id, e]))
+      }
+      ws.send(JSON.stringify(['EOSE', id]))
+    })
+  })
+  state.url = `ws://localhost:${server.address().port}`
+  state.close = () => server.close()
+  return state
+}
+
+// A season small enough that the paging runs out of history inside it, so the
+// champion can be claimed. Brick posts the most *kills* and ace wins the most
+// *blocks* — the season goes to ace, because a season measured in kills is a
+// measure of who played the most rather than of who won.
+const DONE_SEASON = 410
+const DONE_BASE = DONE_SEASON * EPOCH
+const DONE = []
+for (let i = 0; i < 5; i++) DONE.push(score(ace, DONE_BASE + i, 2, 1, now - 900 + i))
+for (let i = 5; i < 8; i++) DONE.push(score(brick, DONE_BASE + i, 40, 0, now - 900 + i))
+for (let i = 0; i < 5; i++) DONE.push(score(brick, DONE_BASE + i, 1, 3, now - 900 + i))
+
+// And a season with far more blocks than six pages of twenty can reach back
+// through, so the paging stops inside it and nobody may be crowned.
+const HUGE_SEASON = 411
+const HUGE_BASE = HUGE_SEASON * EPOCH
+const HUGE = []
+for (let i = 0; i < 150; i++) HUGE.push(score(cinder, HUGE_BASE + i, 3, 1, now - 5000 + i))
+
+const doneRelay = startPagingRelay(DONE)
+const hugeRelay = startPagingRelay(HUGE)
+
 const browser = await puppeteer.launch({
   executablePath: CHROME,
   headless: 'new',
@@ -392,12 +455,99 @@ try {
     )
     await deep.close()
   }
+  // --- seasons -------------------------------------------------------------
+
+  const openBoard = async (url, tag) => {
+    const pg = await browser.newPage()
+    await pg.setViewport({ width: 1280, height: 900 })
+    await pg.goto(SITE, { waitUntil: 'domcontentloaded', timeout: 30_000 })
+    await pg.$eval('#relays', (el, v) => { el.value = v }, url)
+    await pg.type('#name', tag)
+    await pg.type('#room', tag + Math.floor(Math.random() * 1e6))
+    await pg.click('#play-guest')
+    const ok = await pg
+      .waitForFunction(() => !!window.__game, { timeout: 25_000 })
+      .then(() => true)
+      .catch(() => false)
+    if (!ok) return null
+    await pg.click('#show-board')
+    await pg.click('#board-tab-seasons')
+    return pg
+  }
+
+  const donePage = await openBoard(doneRelay.url, 'season')
+  check('a session starts against a relay with a finished season on it', donePage !== null)
+  if (donePage) {
+    const card = await until(async () => {
+      const v = await donePage.evaluate(() => {
+        const c = document.querySelector('.seasoncard')
+        return c
+          ? {
+              partial: c.classList.contains('partial'),
+              title: c.querySelector('.sn-title')?.textContent ?? null,
+              range: c.querySelector('.sn-range')?.textContent ?? null,
+              name: c.querySelector('.sn-name')?.textContent ?? null,
+              won: c.querySelector('.sn-won')?.textContent ?? null,
+            }
+          : null
+      })
+      return v
+    })
+    check('a finished season gets a champion card', card && !card.partial, JSON.stringify(card))
+    check(
+      'the season is named and bounded by its epoch',
+      card?.title === `Season ${DONE_SEASON}` && card?.range === `blocks ${DONE_BASE}–${DONE_BASE + EPOCH - 1}`,
+      JSON.stringify(card),
+    )
+    // The whole point of the tiebreak. Brick claimed 120 kills across three
+    // blocks; ace claimed 10 across five. A season measured in kills goes to
+    // brick and measures who played the most, not who won.
+    check(
+      'the season goes to the most blocks won, not the most kills scored',
+      card?.name === short(ace.pk),
+      `${card?.name} — ace won 5 blocks with 10 kills, brick won 3 with 120 (${short(brick.pk)})`,
+    )
+    check('and it says how many of the season they took', card?.won === '5 of 8 blocks', String(card?.won))
+    check('the relay was actually paged, not asked once', doneRelay.pages > 1, `${doneRelay.pages} REQs`)
+    if (process.env.TANK_SHOT) {
+      const seasonShot = process.env.TANK_SHOT.replace(/\.png$/, '-seasons.png')
+      await donePage.screenshot({ path: seasonShot })
+      console.log(`      wrote ${seasonShot}`)
+    }
+    await donePage.close()
+  }
+
+  const hugePage = await openBoard(hugeRelay.url, 'huge')
+  check('a session starts against a season too long to page through', hugePage !== null)
+  if (hugePage) {
+    const partial = await until(async () =>
+      hugePage.evaluate(() => {
+        const c = document.querySelector('.seasoncard')
+        return c ? { partial: c.classList.contains('partial'), text: c.textContent ?? '' } : null
+      }))
+    // Cinder won every block we can see. Crowning them would be the same lie
+    // the block wall used to tell about season tallies, one screen over.
+    check(
+      'a season the paging could not reach the start of crowns nobody',
+      partial?.partial === true && !/of \d+ blocks/.test(partial.text),
+      JSON.stringify(partial),
+    )
+    check(
+      'and says why, rather than showing an empty card',
+      /not the whole season/.test(partial?.text ?? ''),
+      JSON.stringify(partial?.text?.slice(0, 120)),
+    )
+    await hugePage.close()
+  }
+
 } catch (err) {
   check('the run completed', false, err.message)
 } finally {
   await browser.close()
   wss.close()
   deepWss.close()
+  doneRelay.close()
+  hugeRelay.close()
 }
 
 console.log('')

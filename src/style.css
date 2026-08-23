@@ -779,3 +779,36 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
 .score-row.win .stat.deaths, .score-row.you .stat.deaths { color: inherit; opacity: 0.7; }
 .bt-kd { display: flex; align-items: center; }
 .bt-kd .ico { opacity: 0.9; }
+
+/* ---------------------------------------------------------------- seasons */
+
+/*
+ * A card per difficulty epoch, with the face of whoever took the most blocks
+ * in it. Nobody signs these — every client derives the same answer from the
+ * same public records — so the card is a statement of arithmetic rather than an
+ * award, and the copy under the grid says exactly that.
+ */
+.seasons {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+  margin: 4px 0 2px;
+}
+.seasoncard {
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #1b2536 0%, #121a28 100%);
+  border: 1px solid var(--line);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+/* A season nobody can vouch for yet does not get the champion's styling. */
+.seasoncard.partial, .seasoncard.empty { background: #0f1420; border-style: dashed; }
+.sn-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.sn-title { font-weight: 700; color: var(--accent); }
+.sn-range { font-size: 10px; color: var(--dim); font-variant-numeric: tabular-nums; }
+.sn-champ { display: flex; align-items: center; gap: 11px; margin-top: 10px; }
+.sn-champ .avatar { border-color: rgba(255, 196, 77, 0.55); }
+.sn-who { display: grid; gap: 2px; min-width: 0; }
+.sn-name { font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sn-won { font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; }
+.seasoncard .fine { margin-top: 8px; }
