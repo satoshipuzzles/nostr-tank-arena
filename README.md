@@ -261,9 +261,68 @@ src/protocol.ts  wire format for every custom kind
 src/blocks.ts    the chain tip, which is the round clock
 src/render.ts    three.js: the board, the tanks, the confetti, the camera
 src/scores.ts    signed score records and the leaderboard query
+src/sound.ts     every sound in the game, synthesised at runtime
 src/main.ts      lobby, HUD, game loop
 test/two-player.mjs  headless two-browser smoke test against live relays
+test/sound.mjs       renders every voice and measures the samples
+test/render-sounds.mjs  dumps all twelve voices to a .wav you can listen to
 ```
+
+## Sound
+
+Twelve voices, no audio files. Everything is oscillators, filtered noise and
+gain envelopes built at runtime, so the bundle is exactly the same size as it
+was before audio existed and there is nothing to download mid-match.
+
+```
+fire  remoteFire  struck  hit  death  remoteDeath
+kill  streak  repair  respawn  pickup  block
+```
+
+Plus a continuous engine drone — two detuned saws through a lowpass, pitch and
+cutoff following the throttle. It is the only sound that responds on every
+frame rather than on an event, and it does more for the feel of driving than
+any of the one-shots.
+
+Positional sounds are attenuated by distance and panned in stereo relative to
+your own tank. Not a real spatialiser: the camera is above and behind you, so a
+full HRTF would be a lie about where your head is. Distance and stereo
+placement is the honest amount, and it is enough to turn and look at a shot you
+did not see fired.
+
+`M` mutes, so does the HUD button, and the choice is remembered.
+
+Three structural rules, because audio breaks quietly:
+
+- **Voices are pure functions of `(context, destination, startTime)`.** They
+  never read a singleton and never ask the clock what time it is. That is what
+  makes them renderable into an `OfflineAudioContext` and measurable.
+- **Nothing in `sound.ts` may throw.** A browser with no `AudioContext` gets a
+  `Sfx` that is a complete no-op and a game that still plays.
+- **The context is built inside a click and nowhere else.** One built at module
+  load comes back suspended in a real browser and silently plays nothing
+  forever. `test/sound.mjs` counts constructions and fails if any happen before
+  a gesture.
+
+```bash
+npm run test:sound     # 78 checks
+npm run sounds:wav     # /tmp/tank-arena-sounds.wav, all twelve in order
+```
+
+The test renders each voice offline and measures peak, RMS, and how long it is
+actually audible against how long it claims to last — which catches both a
+node nobody connected and an envelope that never closes. Its control renders
+the same voices into a *disconnected* node and requires silence, so the
+measurement is known to be capable of returning zero. Then it starts a real
+match and taps the live context with an analyser, and finally swaps in a
+recording stand-in for `Sfx` to prove the game actually calls the thing.
+
+One honest limit: the autoplay lock cannot be reproduced from this harness.
+Chrome under Puppeteer reports `navigator.userActivation.hasBeenActive === true`
+before anything is clicked — headless, headful, and with
+`--autoplay-policy=user-gesture-required` — so a context here always starts
+running. The suspended-context bug is caught by the construction count instead,
+which does fail when the constructor is moved out of the click.
 
 ## Testing
 

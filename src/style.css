@@ -177,6 +177,10 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
 /* Ghost buttons over the sky need a plate of their own for the same reason. */
 #hud-actions button.ghost { background: var(--panel); border-color: var(--line); }
 #hud-actions button.ghost:hover { background: #1b2536; filter: none; }
+/* The mute button carries a lit dot so its state reads without being read. */
+#sound-toggle.on::before { content: '●'; color: var(--accent); margin-right: 6px; font-size: 10px; }
+#sound-toggle::before { content: '○'; color: var(--dim); margin-right: 6px; font-size: 10px; }
+#sound-toggle:disabled { opacity: .5; cursor: default; }
 
 /* ------------------------------------------------------------- podium */
 
@@ -207,7 +211,7 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
 #podium-rows .score-row { padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.06); }
 #podium-rows .score-row:last-child { border-bottom: none; }
 #podium-rows .rank { color: var(--dim); width: 22px; display: inline-block; }
-#podium-rows .score-row.win .name { color: var(--accent, #ffc44d); font-weight: 700; }
+#podium-rows .score-row.win .name { color: var(--accent); font-weight: 700; }
 
 #pads .pad { display: flex; justify-content: space-between; gap: 10px; padding: 4px 0; font-size: 12px; }
 #pads .pad .lit { color: #3fb950; }

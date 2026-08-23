@@ -5,6 +5,7 @@ import { Game } from './game'
 import { Input } from './input'
 import { DEFAULT_RELAYS, Identity, Net } from './nostr'
 import { Renderer } from './render'
+import { Sfx, VOICES } from './sound'
 import { fetchBlockScores, fetchScores, publishScore } from './scores'
 
 const $ = <T extends HTMLElement>(id: string): T => {
@@ -72,10 +73,37 @@ $('play-guest').addEventListener('click', () => {
 
 let running: { game: Game; renderer: Renderer; input: Input; clock: BlockClock } | null = null
 
+/**
+ * One audio context for the page, built inside the Play click.
+ *
+ * It has to be created and resumed from a real user gesture or the browser
+ * hands back a suspended context that silently swallows everything. The Play
+ * button is the one click guaranteed to happen before anybody wants a sound,
+ * so it is the only place this is allowed to happen.
+ */
+let sfx: Sfx | null = null
+
+// Every voice, by name, so the sound test can render each one into an
+// OfflineAudioContext and measure the samples that come out. Twelve function
+// references; the alternative is a test that only proves the call did not throw.
+;(window as unknown as { __voices: typeof VOICES }).__voices = VOICES
+
+function ensureSfx(): Sfx {
+  if (!sfx) sfx = new Sfx()
+  sfx.resume()
+  syncSoundButton()
+  // Same reason __game is exposed: the sound test needs a handle on the live
+  // context, and "is the context actually running" is the one thing about
+  // audio you cannot check from outside the page.
+  ;(window as unknown as { __sfx: Sfx }).__sfx = sfx
+  return sfx
+}
+
 async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
   lobbyError.hidden = true
   const buttons = [...document.querySelectorAll<HTMLButtonElement>('.row button')]
   buttons.forEach((b) => (b.disabled = true))
+  const audio = ensureSfx()
   try {
     const identity = await makeIdentity()
     const room = (roomInput.value.trim() || 'lobby').toLowerCase().replace(/[^a-z0-9-]/g, '')
@@ -92,6 +120,7 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
 
     const net = new Net(relays)
     const game = new Game(identity, net, room, name, color)
+    game.sfx = audio
     await game.start()
 
     // The round clock. Starting it before the first frame means the board is
@@ -316,6 +345,45 @@ const escapeHtml = (s: string) =>
   )
 
 // ---------------------------------------------------------------- actions
+
+/**
+ * The mute button.
+ *
+ * It reports three states, not two, because "this browser gave us no audio at
+ * all" is a real outcome and showing it as un-muted would be a lie the player
+ * cannot debug.
+ */
+function syncSoundButton(): void {
+  const btn = document.getElementById('sound-toggle') as HTMLButtonElement | null
+  if (!btn) return
+  if (!sfx || !sfx.available) {
+    btn.textContent = 'No audio'
+    btn.disabled = true
+    btn.classList.remove('on')
+    return
+  }
+  btn.disabled = false
+  btn.textContent = sfx.muted ? 'Sound off' : 'Sound on'
+  btn.classList.toggle('on', !sfx.muted)
+}
+
+$('sound-toggle').addEventListener('click', () => {
+  ensureSfx().toggle()
+  syncSoundButton()
+})
+
+// M for mute, the one binding every game already has. Ignored while typing a
+// callsign, which is the only place in this page you can type.
+window.addEventListener('keydown', (e) => {
+  if (e.key !== 'm' && e.key !== 'M') return
+  const el = document.activeElement
+  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) return
+  if (!sfx) return
+  sfx.toggle()
+  syncSoundButton()
+})
+
+syncSoundButton()
 
 $('copy-link').addEventListener('click', async () => {
   const btn = $<HTMLButtonElement>('copy-link')

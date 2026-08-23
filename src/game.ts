@@ -37,6 +37,7 @@ import {
   stepTank,
 } from './sim'
 import type { Controls } from './input'
+import type { Sfx } from './sound'
 
 const TICK_MS = 100 // 10Hz state broadcast
 /** Kills in a row that earn a full repair. */
@@ -119,6 +120,13 @@ export class Game {
   displayColor: number
   /** Set when a relay subscription has produced at least one event. */
   sawTraffic = false
+  /**
+   * Audio, if the browser gave us any. Assigned by main once the lobby's Play
+   * button has resumed a context — the game never creates one itself, because
+   * a suspended AudioContext accepts every call and plays nothing, and that is
+   * a failure you only catch by having exactly one place that resumes it.
+   */
+  sfx: Sfx | null = null
 
   private seen = new Set<string>()
   private seenPrev = new Set<string>()
@@ -304,6 +312,10 @@ export class Game {
     const lateMs = performance.now() - (p.t0 + peer.offset)
     stepShell(shell, Math.max(0, Math.min(1500, lateMs)) / 1000)
     if (!shell.dead) this.shells.set(shell.id, shell)
+    // Positioned from the muzzle, not from where the shell is now: the bang
+    // happened at the gun, and panning it to the shell's fast-forwarded
+    // position puts the sound in the wrong place by up to half the board.
+    this.sfx?.remoteFire(p.x, p.y)
   }
 
   private onDeath(e: Event): void {
@@ -325,10 +337,15 @@ export class Game {
 
     if (p.k === this.identity.sessionPubkey) {
       this.kills++
+      this.sfx?.kill()
       this.onOwnKill()
     } else if (p.k) {
       const killer = this.peers.get(p.k)
       if (killer) killer.kills++
+    }
+
+    if (p.k !== this.identity.sessionPubkey && typeof p.x === 'number' && typeof p.y === 'number') {
+      this.sfx?.remoteDeath(p.x, p.y)
     }
 
     this.pushFeed(
@@ -351,8 +368,11 @@ export class Game {
     if (this.streak === STREAK_REPAIR && this.tank.hp < MAX_HP) {
       this.tank.hp = MAX_HP
       this.repairedAt = performance.now()
+      this.sfx?.repair()
+      this.sfx?.streak(this.streak)
       this.pushFeed(`${STREAK_REPAIR} in a row — hull repaired`)
     } else if (this.streak > STREAK_REPAIR) {
+      this.sfx?.streak(this.streak)
       this.pushFeed(`${this.streak} in a row`)
     }
   }
@@ -385,6 +405,7 @@ export class Game {
     this.tank.hp++
     this.lastHitAt = now
     this.repairedAt = now
+    this.sfx?.repair()
     this.pushFeed(`patched up — ${this.tank.hp}/${MAX_HP}`)
   }
 
@@ -404,6 +425,15 @@ export class Game {
       stepTank(this.tank, controls.throttle, controls.steer, controls.aim, dt)
       if (controls.fire && now >= this.tank.reloadAt) this.fire(now)
       this.regen(now)
+    }
+
+    if (this.sfx) {
+      // After the tank has moved, not before: the ears are the tank, and
+      // panning a shell against last frame's position puts it in the wrong
+      // place — subtly at a walk, obviously at full throttle.
+      this.sfx.listener.x = this.tank.x
+      this.sfx.listener.y = this.tank.y
+      this.sfx.engine(Math.abs(controls.throttle), !this.tank.dead)
     }
 
     for (const shell of this.shells.values()) {
@@ -441,6 +471,7 @@ export class Game {
       this.shells.delete(shell.id)
       this.tank.hp--
       this.lastHitAt = performance.now()
+      if (this.tank.hp > 0) this.sfx?.hit()
       if (this.tank.hp <= 0) this.die(shell.owner)
       return
     }
@@ -449,6 +480,11 @@ export class Game {
       if (peer.session === shell.owner || peer.view.dead) continue
       if (shellHits(shell, peer.view.x, peer.view.y)) {
         this.shells.delete(shell.id)
+        // Only our own shells earn a confirmation tone. Hearing a ping for
+        // somebody else's hit would read as "you hit them" and be a lie.
+        if (shell.owner === this.identity.sessionPubkey) {
+          this.sfx?.struck(peer.view.x, peer.view.y)
+        }
         return
       }
     }
@@ -462,6 +498,7 @@ export class Game {
     this.shells.set(shell.id, shell)
     const payload: ShellPayload = { id: shell.id, t0: now, x, y, a: this.tank.gun }
     this.publishAsSession(KIND_SHELL, payload)
+    this.sfx?.fire()
   }
 
   private die(killer: string | null): void {
@@ -478,6 +515,7 @@ export class Game {
       y: this.tank.y,
     }
     this.publishAsSession(KIND_DEATH, payload)
+    this.sfx?.death()
     const killerName = killer ? (this.peers.get(killer)?.name ?? 'someone') : null
     this.pushFeed(killerName ? `${killerName} killed you` : 'you self-destructed')
   }
@@ -505,6 +543,7 @@ export class Game {
     this.tank.dead = false
     this.tank.hull = Math.atan2(ARENA_H / 2 - best.y, ARENA_W / 2 - best.x)
     this.tank.gun = this.tank.hull
+    this.sfx?.respawn()
   }
 
   /**
@@ -644,6 +683,7 @@ export class Game {
       peer.kills = 0
       peer.deaths = 0
     }
+    this.sfx?.block()
     this.pushFeed(`block ${height} — new round on ${layoutName}`)
     return result
   }
