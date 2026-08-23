@@ -687,6 +687,18 @@ too far in the future (window 900000 ms)` is a sentence somebody can act on;
 "network error" is not, and inventing a friendlier version would throw away the
 only part with a number in it.
 
+Above the quote, the screen says which *way* the clock is wrong, because that is
+the first thing somebody needs and the relay always says it: `too far in the
+future` is a fast clock, `event expired` is a slow one — a NIP-40 expiration
+already spent on arrival. A reason with no direction in it gets no invented one;
+it still says what to do.
+
+The window is quoted when the relay gives it, and it is worth knowing why that
+number can be trusted. `created_at_msecs_ahead` is one of the fields a relay's
+behaviour scaling never touches — rate limits move underneath you as your
+standing changes, and the tolerance does not. **The one number this screen is
+built on is the one number that cannot be stale.**
+
 The suite checks the screen, not the flag — computed style, non-zero height, and
 the text — plus the other direction, that a session whose events are landing has
 no alarm on the page at all.

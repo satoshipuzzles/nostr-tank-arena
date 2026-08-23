@@ -480,16 +480,41 @@ function drawClockAlarm(): void {
     node.hidden = true
     return
   }
-  const ahead = /future/i.test(alarm.reason)
-  const window = alarm.reason.match(/window (\d+) ms/)
-  const by = window ? ` by more than ${Math.round(Number(window[1]) / 60000)} minutes` : ''
   node.hidden = false
   node.innerHTML =
     `<b>THIS MACHINE'S CLOCK IS WRONG</b>` +
-    `<span>Every relay is rejecting our events${
-      ahead ? `, because the clock here is ahead${by}` : ''
-    }. Nothing you do in the game will fix it — set the clock, or turn on automatic time, and this will clear itself.</span>` +
+    `<span>${clockAdvice(alarm.reason)}</span>` +
     `<code>${escapeHtml(alarm.reason)}</code>`
+}
+
+/**
+ * Turn a relay's rejection into something a person can act on.
+ *
+ * Which *way* the clock is wrong is the first thing somebody needs and the
+ * relay always says it: `created_at too far in the future` is a fast clock,
+ * `event expired` is a slow one (a NIP-40 expiration that was already spent on
+ * arrival). Telling a player only that their clock is "wrong" leaves them
+ * guessing at the one thing they came here to fix.
+ *
+ * The window is quoted when the relay gives it, and it is worth knowing *why*
+ * that number can be trusted: `created_at_msecs_ahead` is one of the fields a
+ * relay's behaviour scaling never touches. Rate limits move underneath you as
+ * your standing changes, and the tolerance does not — so the one number this
+ * screen is built on is the one number that cannot be stale.
+ */
+function clockAdvice(reason: string): string {
+  const window = reason.match(/window (\d+) ms/)
+  const by = window ? ` by more than ${Math.round(Number(window[1]) / 60_000)} minutes` : ''
+  const direction = /future/i.test(reason)
+    ? `, because the clock here is <b>ahead</b>${by}`
+    : /expired/i.test(reason)
+      ? ', because the clock here is <b>behind</b> — our events arrive already out of date'
+      : ''
+  return (
+    `Every relay is rejecting our events${direction}. ` +
+    'Nothing you do in the game will fix it — set the clock, or turn on automatic time, ' +
+    'and this will clear itself.'
+  )
 }
 
 /**

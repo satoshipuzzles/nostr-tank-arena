@@ -944,6 +944,66 @@ try {
       `gun ${r.gun.toFixed(2)} want ${r.want.toFixed(2)}`)
   }
 
+  // ------------------------------------------------- what the alarm says
+  //
+  // `test/relays.mjs` proves the alarm *arises* from real frames. This checks
+  // what it then puts in front of a person, which is a different question and
+  // the one that decides whether the alarm is any use.
+  //
+  // Which way the clock is wrong is the first thing somebody needs, and the
+  // relay always says it: `too far in the future` is a fast clock, `event
+  // expired` is a slow one. Telling a player only that their clock is "wrong"
+  // leaves them guessing at the exact thing they came here to fix.
+  //
+  // The window is quoted because `created_at_msecs_ahead` is one of the fields
+  // a relay's behaviour scaling never touches — rate limits move underneath you
+  // as your standing changes and the tolerance does not, so the one number this
+  // screen is built on is the one number that cannot be stale.
+  const alarmText = async (reason) =>
+    a.evaluate(async (r) => {
+      const net = window.__game.net
+      Object.defineProperty(net, 'clockAlarm', {
+        configurable: true,
+        get: () => ({ reason: r, streak: 5 }),
+      })
+      await new Promise((res) => setTimeout(res, 400))
+      const n = document.getElementById('alarm')
+      return {
+        display: getComputedStyle(n).display,
+        text: n.textContent.replace(/\s+/g, ' ').trim(),
+      }
+    }, reason)
+
+  const fast = await alarmText('invalid: created_at too far in the future (window 900000 ms)')
+  check('a fast clock is named as fast, with the relay\'s own window',
+    fast.display !== 'none' && /ahead/.test(fast.text) && /15 minutes/.test(fast.text),
+    fast.text.slice(0, 150))
+
+  const slow = await alarmText('invalid: event expired')
+  check('and a slow clock is named as slow rather than just "wrong"',
+    slow.display !== 'none' && /behind/.test(slow.text) && !/ahead/.test(slow.text),
+    slow.text.slice(0, 150))
+
+  // A reason we cannot read a direction out of must still say something true.
+  const vague = await alarmText('invalid: bad event')
+  check('and an unreadable reason still says what to do without inventing a cause',
+    vague.display !== 'none' &&
+      !/ahead|behind/.test(vague.text) &&
+      /set the clock/i.test(vague.text) &&
+      /invalid: bad event/.test(vague.text),
+    vague.text.slice(0, 150))
+
+  await a.evaluate(() => {
+    delete window.__game.net.clockAlarm
+  })
+  await wait(400)
+  const cleared = await a.evaluate(() => ({
+    attr: document.getElementById('alarm').hidden,
+    display: getComputedStyle(document.getElementById('alarm')).display,
+  }))
+  check('and it leaves the page entirely once the alarm clears',
+    cleared.attr && cleared.display === 'none', JSON.stringify(cleared))
+
   check('no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '))
 
   // Not a pass/fail: on a GPU this stays 'full', and under swiftshader it is
