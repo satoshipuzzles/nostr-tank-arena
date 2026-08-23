@@ -23,10 +23,11 @@
 import * as THREE from 'three'
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
-import { ARENA_H, ARENA_W, WALLS, onLayoutChange } from './arena'
+import { ARENA_H, ARENA_W, WALLS, onLayoutChange, pointInWall } from './arena'
 import type { Game, Peer } from './game'
 import { MAX_HP, RELOAD, TANK_RADIUS } from './sim'
 import { PICKUPS, hasBuff } from './pickups'
+import { Avatar } from './avatars'
 
 // Board furniture, in arena units so it stays in scale with the simulation.
 const WALL_H = 58
@@ -36,6 +37,47 @@ const RIM = 46
 /** Where the aim raycast meets the world — turret height, so pointing at a
  *  tank's turret aims at that tank rather than at the ground behind it. */
 const AIM_PLANE_Y = 22
+
+/** Field of view for the board camera, which frames the whole arena. */
+const BOARD_FOV = 40
+/** Wider inside the tank, because a 40-degree cockpit is a letterbox. */
+const COCKPIT_FOV = 76
+/**
+ * Eye height, inside the turret rather than over it.
+ *
+ * The gun is at y=28, so an eye here looks very slightly *down* the barrel
+ * rather than at the top of it — which is the whole reason the dome comes off
+ * in this view. Well under WALL_H either way: a driver who can see over the
+ * cover is not playing the same board as everybody else.
+ */
+const EYE_Y = 50
+/**
+ * How far back along the barrel the eye sits.
+ *
+ * The hull is 44 long, so this is a little way off the back of it, and that is
+ * deliberate: from inside the hull the barrel is a stub pointing straight at
+ * the camera and reads as nothing at all. From here it converges on the
+ * crosshair and the hull sits under it, which is what makes the view feel like
+ * a vehicle rather than a floating eye. `placeEye` gives it back when there is
+ * something solid in the way.
+ */
+const EYE_BACK = 40
+/** Closest the eye is ever pulled in, when a wall is behind the tank. */
+const EYE_BACK_MIN = 10
+/** How far the cockpit camera looks past the barrel, and how far it looks down. */
+const EYE_REACH = 900
+const EYE_DROP = 95
+/**
+ * Half the arc the mouse can swing the turret through in cockpit view.
+ *
+ * Wider than the field of view on purpose: the gun is allowed to leave the
+ * frame's centre and the camera follows it, so this is a limit on how far the
+ * turret can be from *the hull*, not on what you can see.
+ */
+const AIM_ARC = (105 * Math.PI) / 180
+
+/** Overhead board, or down the barrel. */
+export type ViewMode = 'board' | 'cockpit'
 
 const TAU = Math.PI * 2
 
@@ -150,6 +192,22 @@ interface TankRig {
   hull: THREE.Group
   turret: THREE.Group
   label: THREE.Sprite
+  /** The character in the hatch. Rides the turret, so the driver faces the gun. */
+  driver: THREE.Group
+  /**
+   * The turret dome and its ink outline.
+   *
+   * Held separately because they come off in cockpit view. The barrel sits at
+   * y=28 and the dome's top is at 36, so from any eye high enough to see over
+   * the dome your own gun is behind it — the first cut of the cockpit showed a
+   * screen-filling wedge of turret roof with two inches of barrel tip poking
+   * out of the far side of it. You are inside this thing; it should not be
+   * between you and the board.
+   */
+  domeParts: THREE.Mesh[]
+  /** The npub's picture, billboarded above the hatch. */
+  face: THREE.Sprite
+  avatar: Avatar
   pips: THREE.Mesh[]
   ring: THREE.Mesh
   body: THREE.MeshStandardMaterial
@@ -169,6 +227,7 @@ const DOME_GEO = new THREE.CylinderGeometry(13.5, 15, 16, 16)
 const BARREL_GEO = new RoundedBoxGeometry(36, 7, 7, 2, 3)
 const PIP_GEO = new RoundedBoxGeometry(13, 13, 13, 2, 4)
 const FLASH_GEO = new THREE.SphereGeometry(11, 10, 8)
+const TORSO_GEO = new RoundedBoxGeometry(15, 15, 17, 3, 4)
 
 /** Everything the renderer needs about one tank for one frame. */
 interface TankView {
@@ -182,6 +241,8 @@ interface TankView {
   dead: boolean
   hue: number
   name: string
+  /** kind 0 picture URL for this player, or null while it has not arrived. */
+  picture: string | null
   verified: boolean
   streak: number
   /** True for the local player, whose ring is always drawn. */
@@ -222,6 +283,7 @@ function makeTank(): TankRig {
   barrel.position.x = 26
   barrel.castShadow = true
   turret.add(dome, domeInk, barrel)
+  const domeParts = [dome, domeInk]
 
   const flash = new THREE.Mesh(
     FLASH_GEO,
@@ -230,6 +292,27 @@ function makeTank(): TankRig {
   flash.position.x = 46
   flash.visible = false
   turret.add(flash)
+
+  // The driver, and the thing that makes a hull read as somebody's tank rather
+  // than as a box. It hangs off the turret, so the character turns to look
+  // wherever the gun is pointing.
+  //
+  // The head is the npub's picture and nothing else — a sphere *and* a portrait
+  // is two heads at the same height, which is what the first cut of this drew:
+  // a grey ball sitting in front of the face it was supposed to be. So the
+  // shoulders are geometry and the head is a billboard, which is also the only
+  // version that stays legible, because the board is seen from one fixed high
+  // angle and a portrait mapped onto a sphere is edge-on from most of it.
+  const driver = new THREE.Group()
+  const torso = new THREE.Mesh(TORSO_GEO, trim)
+  torso.position.y = 6
+  torso.castShadow = true
+  const torsoInk = new THREE.Mesh(TORSO_GEO, INK)
+  torsoInk.position.y = 6
+  torsoInk.scale.setScalar(1.1)
+  driver.add(torso, torsoInk)
+  driver.position.set(-9, 8, 0)
+  turret.add(driver)
 
   bob.add(hull, turret)
 
@@ -251,19 +334,51 @@ function makeTank(): TankRig {
   root.add(ring)
 
   const label = new THREE.Sprite(new THREE.SpriteMaterial({ transparent: true, depthTest: false }))
-  label.scale.set(168, 42, 1)
-  label.position.y = 112
+  label.scale.set(152, 38, 1)
+  // The stack, bottom to top: hatch, face, hull pips, name. 133 is the ceiling —
+  // `framesBoard` only guarantees everything below FENCE_H + 40 stays in frame,
+  // so a plate any higher than this clips on a tank parked in a corner.
+  label.position.y = 114
   root.add(label)
+
+  const avatar = new Avatar()
+  const face = new THREE.Sprite(
+    new THREE.SpriteMaterial({ map: avatar.texture, transparent: true }),
+  )
+  // Big for the shoulders under it, on purpose. This is a toy, and a head you
+  // can recognise across a television is worth more than one in proportion.
+  face.scale.set(30, 30, 1)
+  face.position.y = 22
+  driver.add(face)
 
   const pips: THREE.Mesh[] = []
   for (let i = 0; i < MAX_HP; i++) {
     const pip = new THREE.Mesh(PIP_GEO, toy(0xffffff))
-    pip.position.set((i - (MAX_HP - 1) / 2) * 19, 74, 0)
+    // Above the face, which now occupies everything from the hatch up to ~75.
+    pip.position.set((i - (MAX_HP - 1) / 2) * 19, 86, 0)
     root.add(pip)
     pips.push(pip)
   }
 
-  return { root, bob, hull, turret, label, pips, ring, body, trim, labelKey: '', recoil: 0, flash, sink: 0 }
+  return {
+    root,
+    bob,
+    hull,
+    turret,
+    label,
+    driver,
+    domeParts,
+    face,
+    avatar,
+    pips,
+    ring,
+    body,
+    trim,
+    labelKey: '',
+    recoil: 0,
+    flash,
+    sink: 0,
+  }
 }
 
 /**
@@ -459,6 +574,24 @@ export class Renderer {
   private raycaster = new THREE.Raycaster()
   /** Scratch camera used to test a candidate framing without disturbing the real one. */
   private probe = new THREE.PerspectiveCamera()
+  private view: ViewMode = 'board'
+  /** Where the cockpit camera sits and looks this frame, before shake. */
+  private eye = new THREE.Vector3()
+  private gaze = new THREE.Vector3()
+  /**
+   * The local tank's hull heading and position as of the last frame drawn.
+   *
+   * `toWorld` needs both and is called from a mousemove handler that has no
+   * game in hand, so the draw loop leaves them here.
+   */
+  private youHull = 0
+  private youAt = new THREE.Vector2(ARENA_W / 2, ARENA_H / 2)
+  /**
+   * Where a real npub's kind 0 picture comes from. Injected rather than
+   * imported: the renderer has no business knowing what a relay is, and the
+   * default keeps every avatar on its initials disc if nobody wires it up.
+   */
+  private pictures: (pubkey: string | null) => string | null = () => null
   /**
    * Everything the board is made of, in one group.
    *
@@ -484,7 +617,7 @@ export class Renderer {
     this.scene.background = skyTexture()
     this.scene.fog = new THREE.Fog(0xd4eefb, 4400, 9000)
 
-    this.camera = new THREE.PerspectiveCamera(40, 1, 60, 8000)
+    this.camera = new THREE.PerspectiveCamera(BOARD_FOV, 1, 60, 8000)
     this.scene.add(this.camera)
 
     this.scene.add(this.board)
@@ -643,14 +776,52 @@ export class Renderer {
     }
 
     this.home.copy(this.target).addScaledVector(dir, hi)
-    this.camera.position.copy(this.home)
-    this.camera.lookAt(this.target)
+    // In cockpit the camera is somewhere else entirely and `draw` will place it
+    // this frame. `home` is still computed, so switching back is instant.
+    if (this.view === 'board') {
+      this.camera.position.copy(this.home)
+      this.camera.lookAt(this.target)
+    }
+  }
+
+  /**
+   * Overhead board, or down the barrel.
+   *
+   * Two things change besides the position. The field of view widens, because
+   * the framing fov is chosen to fit a 1600x1200 board on screen and is far too
+   * tight to sit inside; and the near plane comes in from 60 to 3, because your
+   * own barrel ends about 45 units from your eye and at the board's near plane
+   * it is simply not drawn.
+   */
+  setView(view: ViewMode): void {
+    if (view === this.view) return
+    this.view = view
+    const cockpit = view === 'cockpit'
+    this.camera.fov = cockpit ? COCKPIT_FOV : BOARD_FOV
+    this.camera.near = cockpit ? 3 : 60
+    this.camera.updateProjectionMatrix()
+    if (!cockpit) {
+      this.camera.position.copy(this.home)
+      this.camera.lookAt(this.target)
+    }
+  }
+
+  get viewMode(): ViewMode {
+    return this.view
+  }
+
+  /** Hand the renderer a way to look up profile pictures by pubkey. */
+  setPictureSource(fn: (pubkey: string | null) => string | null): void {
+    this.pictures = fn
   }
 
   /** True when every corner of the board is inside the frustum at this distance. */
   private framesBoard(dir: THREE.Vector3, dist: number): boolean {
     const probe = this.probe
-    probe.fov = this.camera.fov
+    // The board fov, not the live one: this answers "how far back does the
+    // overhead camera have to be", and asking it through a 76-degree cockpit
+    // lens would pull `home` in and frame nothing on the way back.
+    probe.fov = BOARD_FOV
     probe.aspect = this.camera.aspect
     probe.near = this.camera.near
     probe.far = this.camera.far
@@ -698,12 +869,43 @@ export class Renderer {
       ((clientX - r.left) / r.width) * 2 - 1,
       -((clientY - r.top) / r.height) * 2 + 1,
     )
+    if (this.view === 'cockpit') return this.cockpitAim(ndc.x)
     this.raycaster.setFromCamera(ndc, this.camera)
     const hit = new THREE.Vector3()
     if (!this.raycaster.ray.intersectPlane(this.aimPlane, hit)) {
       return { x: this.target.x, y: this.target.z }
     }
     return { x: hit.x, y: hit.z }
+  }
+
+  /**
+   * Where the cursor points when you are sitting in the turret.
+   *
+   * The horizontal plane the board camera raycasts against is useless here: an
+   * eye at height 50 looking a few degrees below level meets a plane at height
+   * 22 hundreds of metres away, and meets it *behind* the camera the moment you
+   * look up. So the cursor is read as an angle instead of a point.
+   *
+   * That angle is measured **from the hull, never from the camera.** The
+   * cockpit camera yaws with the gun, so measuring the cursor against the
+   * camera's own yaw is a feedback loop with no fixed point: a cursor held even
+   * slightly off centre turns the turret, which turns the camera, which leaves
+   * the cursor exactly as far off centre as it was. The turret spins until you
+   * re-centre the mouse. The hull does not move because you moved the mouse,
+   * which is what makes it the stable reference — and it is also the honest
+   * one, because a real turret's traverse is a bearing relative to the vehicle.
+   *
+   * The far distance is arbitrary; `Input` only takes an `atan2` of it. It is
+   * large enough that the tank's own movement between two mouse events does not
+   * visibly bend the angle.
+   */
+  private cockpitAim(ndcX: number): { x: number; y: number } {
+    const offset = Math.max(-1, Math.min(1, ndcX)) * AIM_ARC
+    const angle = this.youHull + offset
+    return {
+      x: this.youAt.x + Math.cos(angle) * 4000,
+      y: this.youAt.y + Math.sin(angle) * 4000,
+    }
   }
 
   // -------------------------------------------------------------- the frame
@@ -720,6 +922,10 @@ export class Renderer {
     const now = performance.now()
 
     this.syncPeers(game)
+    // Left here for `toWorld`, which runs from a mousemove handler with no game
+    // in hand and needs the hull to measure the cockpit aim arc against.
+    this.youHull = game.tank.hull
+    this.youAt.set(game.tank.x, game.tank.y)
     const maxHp = game.maxHp
     this.applyTank(this.you, dt, now, {
       x: game.tank.x,
@@ -731,6 +937,7 @@ export class Renderer {
       dead: game.tank.dead,
       hue: game.displayColor,
       name: game.name,
+      picture: this.pictures(game.identity.isGuest ? null : game.identity.pubkey),
       verified: true,
       streak: game.streak,
       mine: true,
@@ -749,6 +956,7 @@ export class Renderer {
         dead: peer.view.dead,
         hue: peer.displayColor,
         name: peer.name,
+        picture: this.pictures(peer.pubkey),
         verified: peer.pubkey !== null,
         streak: peer.streak,
         mine: localSessions?.has(peer.session) ?? false,
@@ -763,7 +971,24 @@ export class Renderer {
     // Shield bubble and overdrive trail. Both have to be legible to the other
     // three players, not just to you — knowing who is currently hard to kill is
     // most of what makes a pickup worth contesting.
-    this.shield.visible = hasBuff(game.buffs, 'shieldUntil', now) && !game.tank.dead
+    // Everything you are wearing comes off in the cockpit. The name plate and
+    // the hull pips are sprites a few units from the near plane and would fill
+    // the screen; the shield bubble is a translucent sphere the camera sits
+    // *inside*, which is a blue wash over the whole board rather than a bubble.
+    // The HUD already says all three things in words.
+    const cockpit = this.view === 'cockpit'
+    if (cockpit) {
+      this.you.label.visible = false
+      this.you.driver.visible = false
+      this.you.ring.visible = false
+      for (const part of this.you.domeParts) part.visible = false
+      for (const pip of this.you.pips) pip.visible = false
+    }
+    // No `else`: `applyTank` runs before this every frame and has already put
+    // every one of them back the way board view wants them.
+
+    this.shield.visible =
+      !cockpit && hasBuff(game.buffs, 'shieldUntil', now) && !game.tank.dead
     if (this.shield.visible) {
       this.shield.position.set(game.tank.x, 26, game.tank.y)
       this.shield.scale.setScalar(1 + Math.sin(now / 180) * 0.04)
@@ -792,6 +1017,8 @@ export class Renderer {
         life: 1.0,
       })
     }
+
+    if (cockpit) this.placeEye(game)
 
     this.confetti.update(dt)
     this.applyShake(dt)
@@ -879,6 +1106,12 @@ export class Renderer {
     flashMat.opacity = rig.recoil
     rig.flash.visible = rig.recoil > 0.02
     rig.flash.scale.setScalar(0.7 + rig.recoil * 0.8)
+
+    // Cheap on repeat: `set` compares a key before it touches a canvas.
+    rig.avatar.set(name, v.picture, hue)
+    // The face is a child of `driver`, so hiding the driver hides it too.
+    rig.driver.visible = !dead
+    for (const part of rig.domeParts) part.visible = true
 
     const key = `${name}|${hue}|${verified}`
     if (rig.labelKey !== key) {
@@ -1095,18 +1328,61 @@ export class Renderer {
   }
 
   /** Decaying camera shake. Never moves where the camera is looking. */
+  /**
+   * Put the camera in the hatch, looking down the barrel.
+   *
+   * Behind the turret's centre rather than at it, so your own gun is in frame —
+   * it is the only part of the tank you can see from in here and it is what
+   * makes the view read as a cockpit instead of as a floating eye.
+   *
+   * The eye rides `rig.sink`, so going down tips the view into the board the
+   * same way the hull does. It deliberately does *not* ride the idle bob: a
+   * two-unit sine on the hull is charm, and the same sine on the camera is
+   * motion sickness.
+   */
+  private placeEye(game: Game): void {
+    const t = game.tank
+    const dirX = Math.cos(t.gun)
+    const dirZ = Math.sin(t.gun)
+    const height = EYE_Y + this.you.sink
+
+    // Reverse into a wall and the eye ends up inside it, looking out through
+    // the back face at the board — cover you cannot see past is most of what
+    // makes this arena work, and a camera that ignores it is not a smaller
+    // problem than a bad frame rate. So walk it in until it is in the open.
+    // Stepping rather than raycasting because the answer only has to be right
+    // to within a few units and this runs every frame.
+    let back = EYE_BACK
+    while (back > EYE_BACK_MIN) {
+      const x = t.x - dirX * back
+      const y = t.y - dirZ * back
+      if (!pointInWall(x, y) && x > 8 && y > 8 && x < ARENA_W - 8 && y < ARENA_H - 8) break
+      back -= 6
+    }
+
+    this.eye.set(t.x - dirX * back, height, t.y - dirZ * back)
+    this.gaze.set(t.x + dirX * EYE_REACH, height - EYE_DROP, t.y + dirZ * EYE_REACH)
+  }
+
   private applyShake(dt: number): void {
+    const cockpit = this.view === 'cockpit'
+    const home = cockpit ? this.eye : this.home
+    const look = cockpit ? this.gaze : this.target
     if (this.shake <= 0.01) {
-      this.camera.position.copy(this.home)
+      this.camera.position.copy(home)
+      if (cockpit) this.camera.lookAt(look)
       return
     }
     this.shake = Math.max(0, this.shake - dt * 42)
+    // Half as much inside the tank: the same displacement is a nudge from 3000
+    // units away and a punch in the face from the driver's seat.
+    const amount = cockpit ? this.shake : this.shake * 2
     this.camera.position.set(
-      this.home.x + (Math.random() - 0.5) * this.shake * 2,
-      this.home.y + (Math.random() - 0.5) * this.shake * 2,
-      this.home.z + (Math.random() - 0.5) * this.shake * 2,
+      home.x + (Math.random() - 0.5) * amount,
+      home.y + (Math.random() - 0.5) * amount,
+      home.z + (Math.random() - 0.5) * amount,
     )
-    this.camera.lookAt(this.target)
+    this.camera.lookAt(look)
   }
 
   /**
@@ -1135,6 +1411,8 @@ export class Renderer {
   }
 
   private disposeRig(rig: TankRig): void {
+    rig.avatar.dispose()
+    rig.face.material.dispose()
     ;(rig.label.material as THREE.SpriteMaterial).map?.dispose()
     rig.label.material.dispose()
     rig.body.dispose()

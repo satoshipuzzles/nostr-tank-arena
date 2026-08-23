@@ -812,3 +812,41 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
 .sn-name { font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sn-won { font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; }
 .seasoncard .fine { margin-top: 8px; }
+
+/* The cockpit crosshair.
+   Dead centre is exactly where the gun points, not an approximation of it: in
+   cockpit view the camera's yaw *is* the gun angle, so the pixel at the middle
+   of the screen and the end of the barrel are the same ray. Fixed rather than
+   absolute so it does not inherit any HUD padding, and `pointer-events: none`
+   so it never eats a click meant for the canvas.
+   `[hidden] { display: none !important }` at the top of this file is what keeps
+   `display: grid` here from pinning it on screen in board view. */
+#crosshair {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  z-index: 3;
+}
+#crosshair i {
+  position: relative;
+  width: 26px;
+  height: 26px;
+  border: 2px solid rgba(255, 255, 255, 0.82);
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(20, 26, 38, 0.72), inset 0 0 0 1px rgba(20, 26, 38, 0.72);
+}
+#crosshair i::before,
+#crosshair i::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  width: 2px;
+  height: 9px;
+  margin-left: -1px;
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: 0 0 0 1px rgba(20, 26, 38, 0.72);
+}
+#crosshair i::before { top: -13px; }
+#crosshair i::after { bottom: -13px; }

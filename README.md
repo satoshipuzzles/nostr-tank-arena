@@ -91,6 +91,62 @@ fighting it.
 
 The arena FPS is the next build. This one proves the netcode stack first.
 
+## Two views, one camera
+
+`V`, or the **View** button, swaps between the overhead board and a cockpit
+inside your own turret. It is remembered across sessions and across a rematch:
+somebody who plays in the cockpit wants to be in the cockpit next time without
+hunting for the button.
+
+Three things had to change besides where the camera sits.
+
+- **The field of view opens from 40° to 76°, and the near plane comes in from 60
+  to 3.** The board fov is chosen to fit a 1600×1200 arena on screen and is a
+  letterbox from inside a tank. The near plane matters more: your own barrel ends
+  about 45 units from your eye, and at the board's near plane it is simply not
+  drawn. That failure renders perfectly — you get a smooth, correct, empty view
+  with no tank attached to it.
+- **The turret dome comes off.** The gun sits at y=28 and the dome's roof at 36,
+  so from any eye high enough to see over the dome your own barrel is behind it.
+  The first cut of this was a screen-filling wedge of turret roof with two inches
+  of barrel tip poking out of the far side. You are inside this thing; it should
+  not be between you and the board. The name plate, the hull pips and the shield
+  bubble come off for the same reason — the last one is a translucent sphere the
+  camera sits *inside*, which is a blue wash over the whole screen rather than a
+  bubble — and the HUD already says all three in words.
+- **The eye is pulled in when there is a wall behind you.** It rides a little way
+  off the back of the hull, which is what makes the barrel converge on the
+  crosshair instead of pointing straight at the camera as a stub. Reverse into
+  cover and that puts the camera inside the wall, looking out through its back
+  face at everything the wall exists to hide. `placeEye` walks it forward until
+  it is in the open.
+
+### Aim is a bearing off the hull, never off the camera
+
+This is the one that is not obvious, and it is a bug that renders beautifully.
+
+In cockpit view the camera yaws with the gun. So reading the cursor's horizontal
+offset against the *camera's* yaw is a feedback loop with no fixed point: a
+cursor a little off centre turns the turret, which turns the camera, which leaves
+the cursor exactly as far off centre as it was. The turret spins at its full slew
+rate while the mouse sits perfectly still.
+
+The cursor is therefore read as an angle from the **hull**, which does not move
+because you moved the mouse. Screen centre is dead ahead of the vehicle, the
+edges are ±105°, and the camera follows the gun wherever inside that arc it ends
+up. That is also the honest model: a real turret's traverse is a bearing relative
+to the vehicle, not relative to where the gunner happens to be looking.
+
+The board camera's flat-plane raycast is no use here either. An eye at height 50
+looking a few degrees below level meets the aim plane at height 22 hundreds of
+metres away, and meets it *behind the camera* the moment you look up.
+
+Cockpit is single-player only, and the button says so rather than going quiet.
+There is one camera and a couch match has two people looking at it; the board is
+genuinely a shared picture and a cockpit is one player's eyes. Split-screen is
+the real fix and it is a bigger change than this one.
+
+
 ## Play
 
 ```bash
@@ -666,6 +722,42 @@ down and is emphatically not proof of a fake. Those stay grey and unverified
 rather than being marked wrong. Only a domain that actively names a *different*
 key gets the strike-through.
 
+### The picture is the character
+
+Every tank carries a driver, and the driver's head is your kind 0 picture: the
+shoulders are geometry, the head is the portrait, ringed in your player colour
+and outlined in the same near-black the tanks wear. It rides the turret, so the
+character turns to look wherever the gun is pointing.
+
+Head and portrait are the same object on purpose. Drawing a sphere *and* a
+billboard puts two heads at the same height, which is what the first cut did — a
+grey ball parked in front of the face it was meant to be. A billboard rather than
+a texture on geometry, because the board is seen from one fixed high angle and a
+portrait mapped onto a sphere is edge-on from most of it.
+
+The picture goes through a 2D canvas before it reaches WebGL, and both halves of
+that are load-bearing:
+
+- The `<img>` is loaded with `crossOrigin = 'anonymous'`. Without it the draw
+  succeeds, the canvas is silently *tainted*, and the failure surfaces later as a
+  `SecurityError` thrown out of `texImage2D` — inside the render loop, one frame
+  after the picture arrived.
+- With it, a host that sends no CORS headers fails the load outright. Profile
+  pictures live on whatever host their owner chose and a good number of them send
+  no headers at all. That is not a broken profile and must not look like one, so
+  every avatar is painted as a coloured initials disc **first** and only upgrades
+  itself if the fetch works. Nothing ever waits on a picture to draw a frame.
+
+The initials skip the `npub1` prefix, because "NP" for all four players is worse
+than useless. A failed load is cached exactly like a successful one, so a host
+with no headers is asked once per session rather than once per respawn. And the
+texture object is created once and repainted in place — swapping the map on a
+live material every time a picture lands leaks a texture per tank per round.
+
+A guest key has no npub and so is given no picture at all, only the disc. That is
+deliberate: a guest is genuinely anonymous and dressing one up as somebody is the
+wrong signal to send in a game whose whole scoreboard is signed.
+
 ## When it is your clock, the game says so
 
 Every other warning in this game is about somebody else's machine — a relay
@@ -1010,6 +1102,42 @@ Headless Chrome needs `--use-gl=angle --use-angle=swiftshader
 --enable-unsafe-swiftshader` to produce a context at all; the flags are in the
 test. Software rasterisation is slow enough that the game visibly simulates in
 slow motion, which is what the adaptive quality drop above is for.
+
+### The cockpit, and an assertion that had to stop being a count
+
+`npm run test:cockpit` covers the view toggle and the faces. Four of its checks
+are ordinary — the camera really is on the tank rather than over the board, the
+near plane is in front of the eye, the crosshair's *computed* style rather than
+its `hidden` attribute, everything that comes off in the cockpit goes back on.
+Two are worth writing down.
+
+**The turret has to stop, and it has to stop at the right angle.** Hold the mouse
+well off centre and leave it there. The first version of this counted degrees
+travelled over a fixed 1.4 seconds and expected a small number — and it passed
+against a build with the camera-relative feedback loop deliberately put back,
+because the turret slews at a fixed rate and 1.4 seconds of swiftshader frames is
+not long enough for the *working* build to arrive either. Both cases travelled 48
+degrees. A window that cannot contain the behaviour cannot report on it.
+
+So it polls until the angle stops moving, and then asserts the angle it stopped
+at against the arc the cursor commanded. That is the quantity that differs
+between the two. "The turret responded to the mouse" is true of the bug as well
+as the fix, and an assertion consistent with both cannot carry the claim. With
+the loop put back the guard now reports a bearing of −131° that never settles;
+with it removed, 78.8° against 78.8° asked for.
+
+**The faces are driven through the real lookup, not handed to the component.**
+The first version called `Avatar.set()` directly and read the canvas — and passed
+against a canvas the draw loop had already repainted from the game's own identity
+on the very next frame. Handing a component its input tests the component; it
+cannot test whether anything ever hands it that input. It now installs a picture
+source on the renderer and lets the frame loop carry it down, which is the wiring
+that can actually be missing.
+
+What it reads off the canvas is a spread of luminance, not an average colour: a
+flat fill is near zero and white initials on a coloured disc are not. An average
+cannot tell a rendered glyph from a blank disc, and a blank disc is exactly what
+a broken fallback looks like.
 
 ### Measuring the sound, rather than trusting it
 
