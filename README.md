@@ -639,6 +639,7 @@ src/main.ts      lobby, HUD, game loop
 test/two-player.mjs  headless two-browser smoke test against live relays
 test/sound.mjs       taps the master bus and measures what each sound emits
 test/controls.mjs    hands the page a fake gamepad and checks WASD survives it
+test/relays.mjs      four fake relays that misbehave on cue, on localhost
 test/couch.mjs       two pads, two players, one tab
 test/shot.mjs        photographs a pinned block, because pixels are not the DOM
 ```
@@ -651,7 +652,7 @@ npm run test:live
 npm run test:sound
 npm run test:controls
 npm run test:couch
-npm run test:controls
+npm run test:relays
 ```
 
 Two real browsers, two guest npubs, one room, live public relays. It waits for
@@ -804,6 +805,69 @@ enough. At swiftshader's frame rate the sim runs at roughly a third of
 wall-clock, and a short hold leaves the signal the same size as the jitter — a
 working keyboard measured 37px against a 61px baseline, which is a coin flip
 rather than a check.
+
+### Three ways a publish fails, and only one of them is the relay's fault
+
+`npm run test:relays` stands up fake relays on localhost that each fail on
+purpose, because the behaviour under test is what the client does when a relay
+is unhappy — and you cannot ask a real relay to start rate-limiting on cue, or
+to accept an event and then never acknowledge it.
+
+`publish()` used to treat every rejected promise identically and mute a relay
+for the rest of the session after fifteen in a row, on the reasoning that a run
+of refusals "is a policy, not a bad minute". That is right for one of the three
+things a rejected promise can mean:
+
+| kind | what happened | mute? |
+|---|---|---|
+| `refused` | `OK false` — rate cap, PoW, allowlist, web of trust | **yes** |
+| `no-verdict` | nothing came back: publish timeout, dropped socket | no |
+| `malformed` | `invalid: ...` — the event was bad | no |
+
+**`no-verdict` is not a refusal, because refusing is a frame and silence is not
+one.** purplerelay.com was measured timing out on hundreds of publishes in a
+row while a separate subscriber confirmed it was still forwarding 246 of 251 of
+them. Muting it threw away a working relay for the rest of the session because
+the acknowledgement was slow.
+
+**`malformed` is our bug, not the relay's.** A clock far enough behind makes
+every NIP-40 `expiration` arrive already spent, so every relay answers
+`invalid: event expired` — and the old code would have muted the entire set
+over a local clock problem, one relay at a time, in about two seconds each.
+
+Muting is also no longer permanent. A muted relay sits out sixty seconds and is
+then retried; the wait doubles each time, capped at fifteen minutes. A relay
+with a real policy costs fifteen wasted events per attempt and then goes quiet
+for longer and longer, while one that was reloading when we met it comes back.
+
+Alongside that, a `ledger` that never expires. `trouble` is deliberately
+forgetful — a complaint ages out after twenty seconds so the HUD reflects now —
+but ticks outrun everything else about 150:1, so the successful publish that
+clears a complaint is always a few hundred milliseconds away while a pickup wave
+is thirty-four seconds long. Anything sampling at the end of a round saw a
+healthy board and no explanation. The ledger keeps per-relay counts by kind for
+the whole session.
+
+Confirmed red before being trusted. Against the previous `nostr.ts`, five checks
+fail — the `invalid`-rejecting relay and the silent one are both muted, the
+client stops publishing to them, and a mute is never retried.
+
+Two things the suite is careful about:
+
+- **The fake relays count what they receive**, server-side. "Not muted" has to
+  mean events are still arriving, not merely that a URL is absent from a list
+  the client keeps about itself.
+- **The ledger checks are skipped when the build has no ledger**, so the suite
+  still reports something meaningful when pointed at the older bundle. The
+  behaviour it is really testing — which relays get muted — is observable
+  either way, and a suite that only crashes on old code proves the API changed
+  rather than that the behaviour did.
+
+One blind spot, stated rather than hidden: classification is string matching,
+because a rejected promise carries nothing else. A relay that answers a bad
+signature with something generic — `relay.fountain.fm` says `error: unknown
+error` — reads as `refused` when it is really `malformed`, and costs itself
+strikes it did not earn.
 
 ## Tuning
 

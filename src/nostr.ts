@@ -121,13 +121,101 @@ export class Identity {
   }
 }
 
+/**
+ * Why a publish failed, which is three different questions wearing one coat.
+ *
+ * The distinction is the whole point of this file's last revision. `publish()`
+ * used to treat every rejected promise the same and mute a relay for the rest
+ * of the session after fifteen in a row, on the reasoning that a run of
+ * refusals "is a policy, not a bad minute". That reasoning is sound for an
+ * `OK false` frame and false for the other two:
+ *
+ *   * `refused` — the relay sent `["OK", id, false, "..."]`. It looked at the
+ *     event and said no. Rate cap, proof of work, an allowlist, a web of trust.
+ *     A run of these really is a policy, and muting is right.
+ *
+ *   * `no-verdict` — no answer at all: the client's publish timeout expired, or
+ *     the socket dropped. The relay has not refused anything, because refusing
+ *     is a *frame* and silence is not one. purplerelay.com was measured timing
+ *     out on hundreds of publishes while a separate subscriber confirmed it was
+ *     still forwarding 246 of 251 of them. Muting on this throws away a working
+ *     relay because the acknowledgement was slow.
+ *
+ *   * `malformed` — the relay says the event itself is bad (`invalid: ...`),
+ *     which is almost always *our* fault, not the relay's. A clock far enough
+ *     behind makes every NIP-40 `expiration` arrive already spent and every
+ *     relay answer `invalid: event expired`. Striking the relays for that would
+ *     mute the entire set over a local clock problem.
+ */
+export type FailureKind = 'refused' | 'no-verdict' | 'malformed'
+
+/**
+ * Sort a failure into one of the three.
+ *
+ * String matching, because that is all a rejected promise carries: nostr-tools
+ * gives us either the relay's own OK message or its own timeout text. One known
+ * blind spot, stated rather than hidden — a relay that answers a bad signature
+ * with something generic (`relay.fountain.fm` says `error: unknown error`)
+ * reads as `refused` when it is really `malformed`. It costs that relay strikes
+ * it did not earn, and there is nothing in the frame to tell the difference.
+ */
+export function classifyFailure(reason: string): FailureKind {
+  const r = reason.toLowerCase()
+  if (
+    r.includes('timed out') ||
+    r.includes('timeout') ||
+    r.includes('websocket') ||
+    r.includes('connection') ||
+    r.includes('socket') ||
+    r.includes('closed')
+  ) {
+    return 'no-verdict'
+  }
+  if (r.startsWith('invalid:') || r.startsWith('error: invalid')) return 'malformed'
+  return 'refused'
+}
+
+// Exposed the same way and for the same reason as `__game` and `__sfx`: the
+// classifier is pure string matching against messages relays actually send, and
+// string matching is exactly the kind of thing that rots silently. This lets
+// test/relays.mjs check the whole table directly, including the frames the fake
+// relays do not produce. Attached here rather than in main.ts to keep this
+// change inside one file.
+if (typeof window !== 'undefined') {
+  ;(window as unknown as { __classifyFailure: typeof classifyFailure }).__classifyFailure =
+    classifyFailure
+}
+
 /** What a relay has been saying about our publishes lately. */
 export interface RelayTrouble {
   url: string
   /** The relay's own words from the OK frame, e.g. "rate-limited: slow down". */
   reason: string
+  kind: FailureKind
   count: number
   at: number
+}
+
+/**
+ * A per-relay tally that never expires.
+ *
+ * `trouble` is for the HUD and is deliberately forgetful — a complaint ages out
+ * after twenty seconds so the status line reflects now rather than the whole
+ * session. That makes it useless for answering "what happened during that
+ * round": ticks outrun everything else roughly 150:1, so the successful publish
+ * that clears the complaint is always a few hundred milliseconds away, while a
+ * pickup wave is thirty-four seconds long. This one keeps the count.
+ */
+export interface RelayLedger {
+  url: string
+  accepted: number
+  refused: number
+  noVerdict: number
+  malformed: number
+  /** Times this relay has been muted, so a flapping relay is distinguishable. */
+  mutes: number
+  lastReason: string
+  lastAt: number
 }
 
 export class Net {
@@ -159,9 +247,23 @@ export class Net {
    * refusing to take our events says nothing about whether it will forward
    * somebody else's.
    */
-  private muted = new Set<string>()
+  private muted = new Map<string, { until: number; span: number }>()
   private strikes = new Map<string, number>()
   private static readonly MUTE_AFTER = 15
+  /**
+   * How long a muted relay sits out before it gets another chance.
+   *
+   * Muting used to be permanent for the session, which is too strong even for a
+   * genuine refusal: a rate cap is a statement about the last minute, not about
+   * the next hour, and a relay that was reloading when we met it is written off
+   * until the tab closes. The wait doubles each time so a relay with a real
+   * policy costs fifteen wasted events per attempt and then goes quiet for
+   * longer and longer, while one that was briefly unhappy comes straight back.
+   */
+  private static readonly MUTE_MS = 60_000
+  private static readonly MUTE_MS_MAX = 15 * 60_000
+  /** Per-relay counts that survive the whole session. */
+  readonly ledger = new Map<string, RelayLedger>()
 
   constructor(relays: string[] = DEFAULT_RELAYS) {
     this.relays = relays
@@ -186,6 +288,8 @@ export class Net {
    * mystery about the netcode.
    */
   publish(event: Event): void {
+    const now = Date.now()
+    for (const [url, m] of this.muted) if (now >= m.until) this.muted.delete(url)
     const targets = this.relays.filter((url) => !this.muted.has(url))
     if (!targets.length) return
     const results = this.pool.publish(targets, event)
@@ -195,6 +299,7 @@ export class Net {
       p.then(
         () => {
           this.strikes.set(url, 0)
+          this.entry(url).accepted++
           const known = this.trouble.get(url)
           // One clean publish is not proof the relay is happy, but a run of
           // them is: let an old complaint age out rather than sticking forever.
@@ -203,30 +308,61 @@ export class Net {
         (err: unknown) => {
           this.rejected++
           const reason = (err instanceof Error ? err.message : String(err)).slice(0, 120)
+          const kind = classifyFailure(reason)
           const known = this.trouble.get(url)
           this.trouble.set(url, {
             url,
             reason,
+            kind,
             count: known && known.reason === reason ? known.count + 1 : 1,
             at: Date.now(),
           })
+          const led = this.entry(url)
+          led.lastReason = reason
+          led.lastAt = Date.now()
+          if (kind === 'refused') led.refused++
+          else if (kind === 'no-verdict') led.noVerdict++
+          else led.malformed++
+
+          // Only an actual refusal counts toward giving up on a relay. Silence
+          // is not a verdict, and our own bad event is not the relay's fault.
+          if (kind !== 'refused') return
           const strikes = (this.strikes.get(url) ?? 0) + 1
           this.strikes.set(url, strikes)
-          if (strikes >= Net.MUTE_AFTER) this.muted.add(url)
+          if (strikes >= Net.MUTE_AFTER) this.mute(url)
         },
       )
     })
   }
 
-  /** Relays we gave up publishing to this session. */
+  private entry(url: string): RelayLedger {
+    let led = this.ledger.get(url)
+    if (!led) {
+      led = { url, accepted: 0, refused: 0, noVerdict: 0, malformed: 0, mutes: 0, lastReason: '', lastAt: 0 }
+      this.ledger.set(url, led)
+    }
+    return led
+  }
+
+  private mute(url: string): void {
+    const prev = this.muted.get(url)
+    const span = Math.min(prev ? prev.span * 2 : Net.MUTE_MS, Net.MUTE_MS_MAX)
+    this.muted.set(url, { until: Date.now() + span, span })
+    this.strikes.set(url, 0)
+    this.entry(url).mutes++
+  }
+
+  /** Relays we are not publishing to right now. */
   get mutedRelays(): string[] {
-    return [...this.muted]
+    const now = Date.now()
+    return [...this.muted].filter(([, m]) => now < m.until).map(([url]) => url)
   }
 
   /** A one-line summary for the HUD, or '' when every relay is taking events. */
   troubleSummary(): string {
-    if (this.muted.size) {
-      const hosts = [...this.muted].map((u) => {
+    const stillMuted = this.mutedRelays
+    if (stillMuted.length) {
+      const hosts = stillMuted.map((u) => {
         try {
           return new URL(u).host
         } catch {
@@ -238,6 +374,9 @@ export class Net {
     const recent = [...this.trouble.values()].filter((t) => Date.now() - t.at < 20_000)
     if (!recent.length) return ''
     const worst = recent.sort((a, b) => b.count - a.count)[0]
+    // A relay that has not answered has not refused anything, and saying it did
+    // sends whoever reads the HUD looking for a policy that does not exist.
+    const verb = worst.kind === 'no-verdict' ? 'not answering' : worst.reason
     const host = (() => {
       try {
         return new URL(worst.url).host
@@ -246,10 +385,19 @@ export class Net {
       }
     })()
     const others = recent.length > 1 ? ` (+${recent.length - 1} more)` : ''
-    return `${host}: ${worst.reason}${others}`
+    return `${host}: ${verb}${others}`
   }
 
-  /** Share of publishes a relay refused. Above a few percent is a real problem. */
+  /**
+   * Share of publishes that failed, over the whole session and every relay.
+   *
+   * Read `ledger` instead when the question is about a particular relay. This
+   * number hides two things by construction: a muted relay stops contributing
+   * to both halves of the fraction, so one that died in the first seconds of a
+   * long run shows up as a fraction of a percent; and a relay refusing half of
+   * everything never accumulates fifteen consecutive strikes, so it never mutes
+   * and never appears anywhere else either.
+   */
   rejectRate(): number {
     return this.published ? this.rejected / this.published : 0
   }
