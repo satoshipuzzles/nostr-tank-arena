@@ -229,6 +229,7 @@ try {
     // right and down is a tank that ends up right and down of where it started.
     const before = await page.evaluate(() => ({ x: window.__game.tank.x, y: window.__game.tank.y }))
     await page.touchscreen.touchStart(120, 250)
+    // +60 across and +50 down: the `want` angle the hull check below uses.
     await page.touchscreen.touchMove(180, 300)
     const stickDrawn = await page.evaluate(() => document.querySelectorAll('#touch .tstick').length)
     check('a thumb on the left half raises a stick under it', stickDrawn === 1, `${stickDrawn} sticks`)
@@ -238,19 +239,31 @@ try {
       const now = await page.evaluate(() => ({ x: window.__game.tank.x, y: window.__game.tank.y }))
       return Math.hypot(now.x - before.x, now.y - before.y) > 12 ? now : null
     })
-    await page.touchscreen.touchEnd()
     check('and dragging it drives the tank', moved !== null,
       moved ? `moved ${Math.round(Math.hypot(moved.x - before.x, moved.y - before.y))} units` : 'never moved')
-    if (moved) {
-      // Direction, not just motion. A tank that drifts because something else
-      // pushed it would pass "did it move" and fail the only question that
-      // matters, which is whether it went where the thumb went.
-      check(
-        '...in the direction the thumb went, not merely somewhere',
-        moved.x > before.x && moved.y > before.y,
-        `thumb went down-right; tank went ${(moved.x - before.x).toFixed(0)},${(moved.y - before.y).toFixed(0)}`,
-      )
-    }
+    // Direction, not just motion — a tank drifting for some other reason would
+    // pass "did it move" and fail the only question that matters.
+    //
+    // Asserted on the *hull angle*, not on the displacement, and that is not a
+    // weakening. Where the tank ends up depends on the walls between it and
+    // there: the map is pinned but the spawn is not, and a tank spawned in the
+    // bottom-right corner cannot travel down-right however hard the thumb is
+    // pushed. This failed exactly that way once. Which way the hull turns is
+    // the input's answer and nothing else's.
+    const want = Math.atan2(50, 60) // the drag below, in screen space
+    const turned = await until(async () => {
+      const hull = await page.evaluate(() => window.__game.tank.hull)
+      let d = hull - want
+      while (d > Math.PI) d -= 2 * Math.PI
+      while (d < -Math.PI) d += 2 * Math.PI
+      return Math.abs(d) < 0.4 ? hull : null
+    })
+    check(
+      '...and the hull turns toward the thumb rather than merely drifting',
+      turned !== null,
+      turned === null ? 'never came round' : `hull ${turned.toFixed(2)} against ${want.toFixed(2)}`,
+    )
+    await page.touchscreen.touchEnd()
     const cleared = await page.evaluate(() => document.querySelectorAll('#touch .tstick').length)
     check('lifting the thumb takes the stick away', cleared === 0, `${cleared} left on screen`)
 
