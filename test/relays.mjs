@@ -63,6 +63,15 @@ const check = (name, ok, detail = '') => {
   if (!ok) failures.push(name)
 }
 const wait = (ms) => new Promise((r) => setTimeout(r, ms))
+/** Poll until it holds. See the tick check for why no fixed window works here. */
+async function until(fn, ms = 12_000, step = 200) {
+  const deadline = Date.now() + ms
+  for (;;) {
+    if (await fn()) return true
+    if (Date.now() > deadline) return false
+    await wait(step)
+  }
+}
 
 // --------------------------------------------------------------- fake relays
 //
@@ -104,6 +113,15 @@ const BEHAVIOURS = {
     ok: false,
     msg: 'rate-limited: publishing too fast (limit 6000 events/min); slow down or AUTH for higher limits',
   }),
+  // newlay as cowboy measured it half an hour ago, with the exemption applied:
+  // the four ephemeral netcode kinds are through the web-of-trust gate, and the
+  // durable pickup claim is still behind it. Accepting ten events a second while
+  // refusing one kind forever is the exact shape no counter in `nostr.ts` could
+  // see, because a per-relay strike streak is reset by every tick that lands.
+  wotexempt: (e) =>
+    e.kind === 30078
+      ? { ok: false, msg: "restricted: not in this relay's web of trust" }
+      : { ok: true, msg: '' },
   silent: () => null, // accept the frame, answer nothing, ever
 }
 
@@ -119,7 +137,7 @@ const servers = []
  */
 function startBucketRelay(perMin) {
   const wss = new WebSocketServer({ port: 0 })
-  const state = { behaviour: 'bucket', received: 0, accepted: 0, connections: 0, perMin }
+  const state = { behaviour: 'bucket', received: 0, accepted: 0, connections: 0, byKind: {}, perMin }
   let tokens = perMin
   let last = Date.now()
   // Lets a test raise the cap mid-run, which is the only way to check that the
@@ -137,6 +155,7 @@ function startBucketRelay(perMin) {
       if (msg[0] === 'REQ') return ws.send(JSON.stringify(['EOSE', msg[1]]))
       if (msg[0] !== 'EVENT') return
       state.received++
+      state.byKind[msg[1].kind] = (state.byKind[msg[1].kind] ?? 0) + 1
       const now = Date.now()
       tokens = Math.min(state.perMin, tokens + ((now - last) / 60_000) * state.perMin)
       last = now
@@ -160,6 +179,10 @@ function startRelay(behaviour, opts = {}) {
   const wss = new WebSocketServer(opts.port ? { port: opts.port } : { port: 0 })
   const state = {
     behaviour, received: 0, accepted: 0, connections: 0,
+    // Per kind, because "received 40 events" cannot answer the only question a
+    // kind-scoped policy raises: did the client stop sending the *one* kind
+    // this relay refuses, and keep sending the rest.
+    byKind: {},
     closeSubs: !!opts.closeSubs,
     // Every REQ filter this relay was sent, so a test can see what the client
     // asked for rather than only what it did with the answer.
@@ -207,7 +230,8 @@ function startRelay(behaviour, opts = {}) {
       }
       if (msg[0] === 'EVENT') {
         state.received++
-        const verdict = BEHAVIOURS[state.behaviour]()
+        state.byKind[msg[1].kind] = (state.byKind[msg[1].kind] ?? 0) + 1
+        const verdict = BEHAVIOURS[state.behaviour](msg[1])
         if (!verdict) return // silence, on purpose
         ws.send(JSON.stringify(['OK', msg[1].id, verdict.ok, verdict.msg]))
       }
@@ -1378,6 +1402,139 @@ try {
       'still listed after it came up',
     )
     await gonePage.close()
+  }
+
+  // ------------------------------- one refused kind must not cost the others
+  //
+  // The gap cowboy found in the exemption, from this side of the wire. A relay
+  // that takes 21000-21003 and refuses 30078 is not misbehaving and is not
+  // useless — it is most of a working relay, and the old client's only two
+  // settings were "keep sending forever" and "give up on the relay entirely."
+  // Forever is what it did, because `strikes` is per relay and every tick that
+  // lands resets it, so fifteen consecutive refusals never happen while the
+  // game is running. Each of those refusals is a debit on a relay that scores
+  // behaviour, and the throttle it buys lands on the exempt kinds.
+  //
+  // Only two relays here, both of which accept the netcode kinds, so nothing
+  // gets muted wholesale and the HUD sentence under test is the only thing
+  // that can be on the screen.
+  const wot = startRelay('wotexempt')
+  const alsoGood = startRelay('good')
+  const wotPage = await openAgainst([wot.url, alsoGood.url], 'wot')
+  check('a session against a relay that exempts only the tick kinds starts', wotPage !== null)
+
+  if (wotPage) {
+    // A background tab has its animation frames throttled to about one a
+    // second, and this game publishes its tick from inside the frame loop. Every
+    // earlier page in this file measures totals over long windows and never
+    // noticed; the check below is a *rate* and it read 2 ticks in five seconds
+    // until this line went in.
+    await wotPage.bringToFront()
+    // Let the tick stream establish itself first: the point of the fix is that
+    // a refused claim does not disturb traffic that is already flowing.
+    await wait(3000)
+    const beforeHud = await wotPage.evaluate(() => window.__game.net.troubleSummary())
+    check(
+      'nothing is wrong before a claim is ever published',
+      !/pickup/i.test(beforeHud),
+      JSON.stringify(beforeHud),
+    )
+    const ticksBefore = wot.byKind[21000] ?? 0
+
+    // Real signed claims down the real socket, so the relay's `restricted:`
+    // frame is classified by the same code a live game runs. Eight of them —
+    // comfortably more than the three-strike threshold, so a client that never
+    // stopped would show it.
+    const CLAIMS = 8
+    await wotPage.evaluate(async (n) => {
+      const g = window.__game
+      for (let i = 0; i < n; i++) {
+        const now = Math.floor(Date.now() / 1000)
+        const ev = g.identity.signAsSession({
+          kind: 30078,
+          created_at: now,
+          tags: [
+            ['d', `kindmute-probe-${i}-${g.identity.sessionPubkey}`],
+            ['t', `tankarena-${g.room}`],
+            ['expiration', String(now + 600)],
+          ],
+          content: JSON.stringify({ p: `probe-${i}`, kind: 'shield' }),
+        })
+        await g.net.publish(ev)
+      }
+    }, CLAIMS)
+    await wait(2500)
+
+    const claimsAtWot = wot.byKind[30078] ?? 0
+    const claimsAtGood = alsoGood.byKind[30078] ?? 0
+    // The quantity that changes. A counter of refusals would move either way —
+    // it climbs whether the client learned or not. What only a client that
+    // learned produces is a *stalled* count: three offered, five withheld.
+    check(
+      'the client stops offering a kind the relay keeps refusing',
+      claimsAtWot === 3,
+      `${claimsAtWot} of ${CLAIMS} claims reached it — expected to stop after 3`,
+    )
+    check(
+      '...and the relay that accepts them still gets all of them',
+      claimsAtGood === CLAIMS,
+      `${claimsAtGood} of ${CLAIMS}`,
+    )
+
+    const wotState = await wotPage.evaluate(() => ({
+      muted: window.__game.net.mutedRelays,
+      kindMutes: window.__game.net.kindMutes ?? [],
+      hud: window.__game.net.troubleSummary(),
+    }))
+    check(
+      'the relay itself is NOT muted — one refused kind is not a bad relay',
+      !wotState.muted.includes(wot.url),
+      wotState.muted.includes(wot.url) ? 'MUTED — lost the netcode over one kind' : 'still publishing',
+    )
+    check(
+      'the kind it refuses is recorded against it, not just counted',
+      wotState.kindMutes.some((m) => m.url === wot.url && m.kind === 30078),
+      JSON.stringify(wotState.kindMutes),
+    )
+    // Named by symptom. A player whose pads keep reappearing is looking at a
+    // game that disagrees with the room, and "30078 restricted" is not a
+    // sentence that tells them so.
+    check(
+      'and the HUD says what the player can actually see going wrong',
+      /pickups are not syncing/i.test(wotState.hud),
+      JSON.stringify(wotState.hud),
+    )
+
+    // The other direction, and it is not academic — the first version of this
+    // fix failed it. A relay that refuses *everything* has no kind policy, it
+    // simply does not want us, and withholding its kinds one at a time stops it
+    // ever reaching fifteen consecutive strikes. Three relays that used to be
+    // muted outright silently stopped being.
+    const blanket = await page.evaluate(() => ({
+      kindMutes: window.__game.net.kindMutes ?? [],
+      muted: window.__game.net.mutedRelays,
+    }))
+    check(
+      'a relay that refuses everything is muted outright, not kind by kind',
+      !blanket.kindMutes.some((m) => m.url === blocked.url) && blanket.muted.includes(blocked.url),
+      `${JSON.stringify(blanket.kindMutes.map((m) => m.url))} vs muted ${blanket.muted.includes(blocked.url)}`,
+    )
+
+    // The half that matters most: the exempt kinds are unaffected. This is the
+    // whole reason not to mute the relay, and the reason the withholding has to
+    // be per kind rather than per socket.
+    // Polled rather than sampled once. Under swiftshader the frame loop runs at
+    // a fraction of real time and the fraction depends on what else is on the
+    // machine, so any fixed window is a guess that stops containing the
+    // behaviour on a loaded laptop. What is being asserted is that the stream
+    // did not *stop*, and twenty ticks is well under a second of a healthy one.
+    const ticked = await until(() => (wot.byKind[21000] ?? 0) - ticksBefore > 20, 20_000)
+    check(
+      'the tick stream to that relay is untouched',
+      ticked,
+      `${(wot.byKind[21000] ?? 0) - ticksBefore} ticks after the claims were refused`,
+    )
+    await wotPage.close()
   }
 
 } catch (err) {
