@@ -1,4 +1,4 @@
-import { KIND_STATE } from './protocol'
+import { KIND_CLAIM, KIND_DEATH, KIND_SESSION, KIND_SHELL, KIND_STATE } from './protocol'
 import {
   SimplePool,
   finalizeEvent,
@@ -598,6 +598,21 @@ function boundedIdSet(): { have(id: string): boolean } {
   }
 }
 
+/**
+ * What a player *sees* when a relay stops taking one of these.
+ *
+ * The netcode kinds share a symptom because they share a consequence: a room
+ * that cannot hear you. The claim has its own, and it is the one worth naming
+ * separately, because a pad that reappears after you drove over it reads as a
+ * game bug rather than a network one.
+ */
+function kindSymptom(kind: number): string {
+  if (kind === KIND_CLAIM) return 'pickups are not syncing'
+  if (kind === KIND_STATE || kind === KIND_SHELL || kind === KIND_DEATH || kind === KIND_SESSION)
+    return 'other players cannot see you'
+  return `kind ${kind} is not being stored`
+}
+
 export class Net {
   /**
    * Reconnecting, which it was not, and that made the read path one-way.
@@ -692,6 +707,29 @@ export class Net {
   private muted = new Map<string, { until: number; span: number }>()
   /** How long the next mute lasts, per relay. Outlives the prune in `publish`. */
   private muteSpan = new Map<string, number>()
+  /**
+   * Relays that will not take one particular kind, and what they said.
+   *
+   * Muting a whole relay is the wrong instrument for the case this game
+   * actually hits. `rejectRate`'s own comment named the hole: "a relay refusing
+   * half of everything never accumulates fifteen consecutive strikes, so it
+   * never mutes and never appears anywhere else either." That is not a corner
+   * case here, it is the configuration cowboy just finished measuring on
+   * newlay — kinds 21000-21003 exempted from the web-of-trust gate and 30078
+   * still behind it. The tick stream is accepted ten times a second, so
+   * `strikes` is reset to zero constantly, and the pickup claim is refused
+   * forever without one counter in this file ever reaching two.
+   *
+   * That silence is not free. On a relay that scores behaviour, each refusal is
+   * a debit, and the throttle it eventually earns lands on the *exempt* kinds,
+   * because the exemption clears the gate the claim failed and not the penalty
+   * it booked on the way past. So the netcode pays for a claim that was never
+   * going to land. Learning "this relay does not take this kind" after three
+   * tries and keeping the other kinds flowing is the whole of the fix.
+   */
+  private kindMuted = new Map<string, { until: number; reason: string }>()
+  /** Consecutive kind-scoped refusals, per relay *and kind*. */
+  private kindStrikes = new Map<string, number>()
   /** Relays that closed our subscription rather than serving it. */
   private closedSubs = new Map<string, string>()
   /**
@@ -803,6 +841,26 @@ export class Net {
   private static readonly PACE_MARGIN = 0.9
   private strikes = new Map<string, number>()
   private static readonly MUTE_AFTER = 15
+  /**
+   * Refusals of one kind at one relay before we stop offering it.
+   *
+   * Far shorter than `MUTE_AFTER` because it is a far narrower claim. Fifteen
+   * is a threshold for "give up on this relay entirely", which throws away the
+   * read path's redundancy and every other kind besides; three is enough to
+   * separate a policy from a coincidence when the only thing being given up is
+   * one kind at one relay, and every other kind keeps its socket.
+   */
+  private static readonly KIND_MUTE_AFTER = 3
+  /**
+   * How long a kind sits out at a relay before it is offered again.
+   *
+   * A kind policy is configuration, not weather — it does not change in the
+   * ninety seconds a round lasts. Long enough that a round is not spent
+   * re-earning the same refusal, short enough that an operator who flips the
+   * setting mid-session (which is exactly what happened to this relay today)
+   * gets picked up without a reload.
+   */
+  private static readonly KIND_MUTE_MS = 5 * 60_000
   /**
    * How long a muted relay sits out before it gets another chance.
    *
@@ -963,6 +1021,25 @@ export class Net {
     )
   }
 
+  /**
+   * Kinds this relay has told us, repeatedly, that it will not store.
+   *
+   * Exposed because a diagnostic nothing reads is not a diagnostic. The HUD
+   * says it out loud: a player whose pickups have stopped syncing is looking at
+   * a game that behaves differently from everybody else's, and "the relay will
+   * not take pickup claims" is the sentence that explains it.
+   */
+  get kindMutes(): { url: string; kind: number; reason: string }[] {
+    const now = Date.now()
+    const out: { url: string; kind: number; reason: string }[] = []
+    for (const [key, m] of this.kindMuted) {
+      if (now >= m.until) continue
+      const cut = key.lastIndexOf('|')
+      out.push({ url: key.slice(0, cut), kind: Number(key.slice(cut + 1)), reason: m.reason })
+    }
+    return out
+  }
+
   /** Relays that declined our filter, in their own words. Safe to quote. */
   get deafRelays(): { url: string; reason: string }[] {
     return [...this.closedSubs].map(([url, reason]) => ({ url, reason }))
@@ -1033,8 +1110,13 @@ export class Net {
     }
     const probing = this.clockAlarm !== null
     if (probing) this.lastMalformedProbeAt = now
+    const kindKey = (url: string) => `${url}|${event.kind}`
+    for (const [key, m] of this.kindMuted) if (now >= m.until) this.kindMuted.delete(key)
     const live = this.relays.filter(
-      (url) => !this.muted.has(url) && (!disposable || this.paceAllows(url, now)),
+      (url) =>
+        !this.muted.has(url) &&
+        !this.kindMuted.has(kindKey(url)) &&
+        (!disposable || this.paceAllows(url, now)),
     )
     // One relay per probe, rotating, so the -4 is spread instead of multiplied.
     const targets = probing && live.length
@@ -1071,6 +1153,10 @@ export class Net {
       return p.then(
         () => {
           this.strikes.set(url, 0)
+          // An acquittal has to come from a charge that could have convicted:
+          // this relay took *this kind*, so whatever it refused before was not
+          // a standing policy against it.
+          this.kindStrikes.delete(kindKey(url))
           this.entry(url).accepted++
           outcome.accepted++
           acceptedBy.add(url)
@@ -1086,6 +1172,7 @@ export class Net {
             // `duplicate:` — the relay has the event. It arrives as a rejected
             // promise and is not a failure, so it is not counted as one.
             this.strikes.set(url, 0)
+            this.kindStrikes.delete(kindKey(url))
             this.entry(url).accepted++
             outcome.accepted++
             acceptedBy.add(url)
@@ -1151,6 +1238,52 @@ export class Net {
           if (limit !== null && this.startPacing(url, limit)) {
             this.strikes.set(url, 0)
             return
+          }
+
+          // A refusal aimed at *what we sent* rather than at *how fast we are
+          // sending it*. Only these get to condemn a kind.
+          //
+          // The prefix is doing real work here and the exclusions are the
+          // point. `rate-limited:` is about pace and belongs to the pacer, and
+          // `pow:` is a property of the connection or the key — on newlay it is
+          // a behaviour throttle that lands on whichever kind happens to be in
+          // flight, which is usually the tick. Kind-muting on either would let
+          // a transient, kind-blind condition switch off the netcode's own
+          // kind for five minutes. So they are left to the per-relay strike
+          // path, which is slower on purpose and reversible on the next
+          // acceptance.
+          //
+          // The trade this accepts: a relay that refuses a kind under some
+          // other wording keeps costing us until `MUTE_AFTER` — and if it is
+          // accepting our other kinds, that is never. That is the same hole
+          // this fix narrows rather than closes, and it is narrowed where it is
+          // measurable: `restricted:` is what newlay's web-of-trust gate
+          // actually says.
+          //
+          // And the prefix is only half of it. The other half is that this
+          // relay is *otherwise taking our events* — measured, because the
+          // first version of this got it wrong: the twelve-relay suite has
+          // fakes that refuse everything with `blocked:` and `restricted:`, and
+          // withholding one kind at a time from those stopped them ever
+          // reaching fifteen consecutive strikes, so three relays that used to
+          // be muted outright never were. Same bug this fix exists to close,
+          // pointed the other way.
+          //
+          // "Selective" is the whole claim: a relay that has accepted something
+          // from us and refuses this one kind has a kind policy. A relay that
+          // has accepted nothing has no policy about kinds, it just does not
+          // want us, and that is what `MUTE_AFTER` is for.
+          const kindScoped =
+            /^(restricted|blocked|auth-required):/i.test(reason.trim()) &&
+            (this.ledger.get(url)?.accepted ?? 0) > 0
+          if (kindScoped) {
+            const k = kindKey(url)
+            const kindHits = (this.kindStrikes.get(k) ?? 0) + 1
+            this.kindStrikes.set(k, kindHits)
+            if (kindHits >= Net.KIND_MUTE_AFTER) {
+              this.kindStrikes.delete(k)
+              this.kindMuted.set(k, { until: Date.now() + Net.KIND_MUTE_MS, reason })
+            }
           }
 
           const strikes = (this.strikes.get(url) ?? 0) + 1
@@ -1400,6 +1533,23 @@ export class Net {
         }
       })
       return `not publishing to ${hosts.join(', ')} — it refuses our events`
+    }
+    // Named by what the player can see going wrong, not by the kind number.
+    // A relay that will not store claims produces a game where pads come back
+    // after you take them, and "30078 restricted" is not that sentence.
+    const mutes = this.kindMutes
+    if (mutes.length) {
+      const symptoms = new Set(mutes.map((m) => kindSymptom(m.kind)))
+      const hosts = new Set(
+        mutes.map((m) => {
+          try {
+            return new URL(m.url).host
+          } catch {
+            return m.url
+          }
+        }),
+      )
+      return `${[...symptoms].join(' and ')} at ${[...hosts].join(', ')} — it will not store them`
     }
     const recent = [...this.trouble.values()].filter((t) => Date.now() - t.at < 20_000)
     if (!recent.length) return ''
