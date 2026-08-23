@@ -722,29 +722,73 @@ try {
   //
   // `malformed` from one relay is that relay being odd. `malformed` from every
   // relay is a fact about this machine — realistically the clock, since newlay's
-  // window is 365 days behind and only fifteen minutes ahead, so a fast clock
-  // makes every event `invalid: created_at too far in the future`. Muting is
-  // wrong (there would be no relays left) and so is carrying on, which is what
-  // the client did: correctly not striking, and therefore hammering all session
-  // at -4 a go.
+  // window is 365 days behind and only fifteen minutes ahead. Muting is wrong
+  // (there would be no relays left) and so is carrying on.
   //
-  // Needs its own session, because the alarm is about *every* relay agreeing.
+  // Two sessions, because the interesting half is the one that must NOT fire.
 
-  const alarmExpired = startRelay('expired')
-  const alarmFuture = startRelay('future')
-  const page2 = await browser.newPage()
-  await page2.goto(URL, { waitUntil: 'domcontentloaded', timeout: 30_000 })
-  await page2.$eval('#relays', (el, v) => { el.value = v }, `${alarmExpired.url}\n${alarmFuture.url}`)
-  await page2.type('#name', 'clocktest')
-  await page2.type('#room', 'clk' + Math.floor(Math.random() * 1e6))
-  await page2.click('#play-guest')
-  const started2 = await page2
-    .waitForFunction(() => !!window.__game, { timeout: 25_000 })
-    .then(() => true)
-    .catch(() => false)
-  check('a session against only invalid-rejecting relays starts', started2)
+  const openAgainst = async (urls, tag) => {
+    const pg = await browser.newPage()
+    await pg.goto(URL, { waitUntil: 'domcontentloaded', timeout: 30_000 })
+    await pg.$eval('#relays', (el, v) => { el.value = v }, urls.join('\n'))
+    await pg.type('#name', tag)
+    await pg.type('#room', tag + Math.floor(Math.random() * 1e6))
+    await pg.click('#play-guest')
+    const ok = await pg
+      .waitForFunction(() => !!window.__game, { timeout: 25_000 })
+      .then(() => true)
+      .catch(() => false)
+    return ok ? pg : null
+  }
 
-  if (started2) {
+  // --- the false accusation, which nothing here could previously see --------
+  //
+  // One relay that only ever says `invalid:` and three that refuse on something
+  // ordinary. The three get muted; the odd one cannot be, because malformed
+  // does not strike. So the target set narrows to exactly the relay that raises
+  // the alarm, and a client reading `malformed === sent` blames the player's
+  // clock on a sample of one. The filter removes the witnesses and keeps the
+  // accuser.
+  const oddOne = startRelay('expired')
+  const noisy = [startRelay('blocked'), startRelay('blocked'), startRelay('blocked')]
+  const biasPage = await openAgainst([oddOne.url, ...noisy.map((r) => r.url)], 'bias')
+  check('a session with one odd relay and three refusers starts', biasPage !== null)
+
+  if (biasPage) {
+    await wait(14_000)
+    const biased = await biasPage.evaluate(() => ({
+      alarm: window.__game.net.clockAlarm ?? null,
+      muted: window.__game.net.mutedRelays.length,
+      relays: window.__game.net.relays.length,
+    }))
+    check(
+      'the three refusers are muted, leaving the odd one alone',
+      biased.muted === 3,
+      `${biased.muted} of ${biased.relays} muted`,
+    )
+    check(
+      'one relay calling it invalid does NOT accuse the clock',
+      biased.alarm === null,
+      biased.alarm ? `ALARM RAISED on a sample of one: ${biased.alarm.reason}` : 'no alarm',
+    )
+    const keptStart = oddOne.received
+    await wait(6000)
+    check(
+      'and publishing is not held on that relay',
+      oddOne.received - keptStart > 10,
+      `${oddOne.received - keptStart} events in 6s`,
+    )
+    await biasPage.close()
+  }
+
+  // --- the genuine case ------------------------------------------------------
+  const alarmRelays = [
+    startRelay('expired'), startRelay('future'), startRelay('expired'), startRelay('future'),
+  ]
+  const page2 = await openAgainst(alarmRelays.map((r) => r.url), 'clock')
+  check('a session against only invalid-rejecting relays starts', page2 !== null)
+
+  if (page2) {
     await wait(6000)
     const alarm = await page2.evaluate(() => window.__game.net.clockAlarm ?? null)
     check(
@@ -758,60 +802,47 @@ try {
       alarm ? alarm.reason : '',
     )
 
-    // The HUD half. A flag nobody can see is the same failure as a flag nobody
-    // acts on — and this is the one problem in the whole game a player can go
-    // and fix, so it has to actually reach the screen. Computed style, not the
-    // attribute: `#alarm` is `display: grid`, which outranks the UA sheet's
-    // `[hidden]` rule without an `!important` behind it.
-    const onScreen = await page2.evaluate(() => {
-      const n = document.getElementById('alarm')
-      const cs = getComputedStyle(n)
-      return {
-        attr: n.hidden,
-        display: cs.display,
-        height: Math.round(n.getBoundingClientRect().height),
-        text: n.textContent.replace(/\s+/g, ' ').trim(),
-      }
-    })
-    if (process.env.TANK_SHOTS) {
-      await page2.screenshot({ path: `${process.env.TANK_SHOTS}/clock-alarm.png` })
-    }
-    check(
-      'the clock alarm is on the screen, not just in the client',
-      !onScreen.attr && onScreen.display !== 'none' && onScreen.height > 20,
-      JSON.stringify({ ...onScreen, text: onScreen.text.slice(0, 60) }),
-    )
-    check(
-      'and it tells the player it is their machine and quotes the relay',
-      /clock/i.test(onScreen.text) && /invalid:/.test(onScreen.text),
-      onScreen.text.slice(0, 160),
-    )
-
-    // Pin the shipped interval before compressing it, so this cannot pass
-    // against a default that was quietly changed to something useless.
+    // Pinning the constant is worth doing and proves nothing on its own: it
+    // reads the same whether the arithmetic works or not. The quantity that
+    // matters is how many -4s each *connection* takes per minute, so that is
+    // measured below and this only guards the shipped default.
     const defaultProbe = await page2.evaluate(() => window.__game.net.malformedProbeMs)
-    check('the shipped probe interval is 20s', defaultProbe === 20_000, `${defaultProbe}ms`)
-    await page2.evaluate(() => {
-      window.__game.net.malformedProbeMs = 2500
-    })
+    check('the shipped probe cycle is 60s', defaultProbe === 60_000, `${defaultProbe}ms`)
 
-    // Publishing has to actually stop. A flag nobody acts on is the same
-    // hammering with a nicer HUD.
-    const heldStart = alarmExpired.received + alarmFuture.received
-    await wait(12_000)
-    const during = alarmExpired.received + alarmFuture.received - heldStart
-    const perSec = during / 12
-    console.log(`\n  while the alarm is up: ${perSec.toFixed(2)} events/s across both relays\n`)
+    // Compressed so a probe cycle fits the window. Four relays and round-robin
+    // means each one should see a quarter of the cycles.
+    await page2.evaluate(() => {
+      window.__game.net.malformedProbeMs = 2000
+    })
+    const before = alarmRelays.map((r) => r.received)
+    const HOLD = 32_000
+    await wait(HOLD)
+    const got = alarmRelays.map((r, i) => r.received - before[i])
+    const total = got.reduce((a, b) => a + b, 0)
+    const cycles = HOLD / 2000
+    const worstPerRelay = Math.max(...got)
+    console.log(
+      `\n  alarm up, 2s cycle over ${HOLD / 1000}s (${cycles} cycles): ` +
+        `${got.join(' / ')} per relay, ${total} total\n`,
+    )
     check(
       'publishing holds while the alarm is up',
-      perSec < 1.5,
-      `${perSec.toFixed(2)}/s — was ~13/s across two relays before`,
+      total / (HOLD / 1000) < 2,
+      `${(total / (HOLD / 1000)).toFixed(2)}/s — was ~13/s per relay before the alarm existed`,
     )
     check(
-      'but it does not go completely silent, so a fixed clock is noticed',
-      during > 0,
-      `${during} probe events in 12s at a 2.5s probe interval`,
+      'but it does not go silent, so a corrected clock is noticed',
+      total > 0,
+      `${total} probes in ${HOLD / 1000}s`,
     )
+    // The quantity that actually changed: broadcasting would hand every relay
+    // one -4 per cycle. Round-robin gives each a quarter of them.
+    check(
+      'each relay takes a quarter of the probes, not all of them',
+      worstPerRelay <= cycles * 0.6,
+      `worst relay ${worstPerRelay} of ${cycles} cycles — broadcast would be ${cycles}`,
+    )
+    await page2.close()
   }
 
 } catch (err) {

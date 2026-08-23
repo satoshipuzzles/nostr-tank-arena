@@ -498,7 +498,9 @@ export class Net {
    * cannot observe a probe at all, and would report "publishing has stopped"
    * about a mechanism it never gave a chance to run.
    */
-  private malformedProbeMs = 20_000
+  private malformedProbeMs = 60_000
+  /** Which relay gets the next probe. Rotates, so no single one is hammered. */
+  private malformedProbeAt = 0
   /**
    * How long a paced relay must go without refusing before we try it faster.
    *
@@ -610,19 +612,37 @@ export class Net {
     // published exactly once — goes regardless of the pace, because skipping it
     // to save a rate limit would trade a throttle for a divergence.
     const disposable = event.kind === KIND_STATE
-    // Every relay calling our events invalid is not something more publishing
-    // fixes, and on newlay each attempt books a -4. Hold, and let one through
-    // now and then so a corrected clock is noticed without a reload.
+    // While the alarm is up, hold — but probe one relay per cycle rather than
+    // all of them.
+    //
+    // The first version broadcast to every relay every twenty seconds, which is
+    // the pace probe's bug again at twice the price. newlay credits recovery
+    // per *clean* minute and the created_at gate books -4 rather than a rate
+    // hit's -2, so three probes a minute is -12/min against a recovery that
+    // never accrues: floored in three and a half minutes and pinned there. The
+    // cruelty is the timing — the alarm exists because the clock is the one
+    // thing a player can go and fix, and this made fixing it cost twenty-five
+    // minutes of 0.1x multiplier afterwards.
+    //
+    // A cycle of M minutes nets 2(M-1) - 4, so M must be at least four to come
+    // out positive. Round-robin gets that without slowing detection: any single
+    // acceptance clears the streak, so one relay per minute finds a corrected
+    // clock exactly as fast as all four would, at a quarter of the cost each.
     if (this.clockAlarm && now - this.lastMalformedProbeAt < this.malformedProbeMs) {
       return Promise.resolve({
         sent: 0, accepted: 0, refused: 0, malformed: 0, unclear: 0,
         unanimouslyRefused: false, definitelyNowhere: true, reason: this.lastMalformedReason,
       })
     }
-    if (this.clockAlarm) this.lastMalformedProbeAt = now
-    const targets = this.relays.filter(
+    const probing = this.clockAlarm !== null
+    if (probing) this.lastMalformedProbeAt = now
+    const live = this.relays.filter(
       (url) => !this.muted.has(url) && (!disposable || this.paceAllows(url, now)),
     )
+    // One relay per probe, rotating, so the -4 is spread instead of multiplied.
+    const targets = probing && live.length
+      ? [live[this.malformedProbeAt++ % live.length]]
+      : live
     const outcome: PublishOutcome = {
       sent: targets.length,
       accepted: 0,
@@ -713,9 +733,29 @@ export class Net {
       outcome.unanimouslyRefused = outcome.refused === outcome.sent && outcome.sent > 0
       outcome.definitelyNowhere =
         outcome.sent === 0 || outcome.refused + outcome.malformed === outcome.sent
-      // Every relay we asked said the event itself was bad. One relay doing
-      // that is the relay; all of them is this machine.
-      if (outcome.sent > 0 && outcome.malformed === outcome.sent) {
+      // Every relay we asked said the event itself was bad — but "every relay
+      // we asked" is not the same as "every relay", and the difference is
+      // biased in exactly the wrong direction.
+      //
+      // A relay that only ever answers `invalid:` can never be muted, by
+      // design: malformed does not strike, because our own bad event is not the
+      // relay's fault. Relays that *refuse* us do get muted. So the mute filter
+      // systematically removes the relays that would contradict the alarm and
+      // keeps the one raising it — the odd relay is the survivor by
+      // construction. One relay configured with a lower `max_event_tags` than
+      // the tick needs, three muted on something ordinary, and the screen tells
+      // the player their clock is wrong when it is fine.
+      //
+      // So: at least two distinct relays have to agree, and at least half the
+      // configured list has to have been asked. If we cannot see the others we
+      // cannot tell, and "cannot tell" is not "blame the machine".
+      // A probe asks exactly one relay, so it can never satisfy this. That is
+      // deliberate: a probe should be able to *clear* the alarm and never to
+      // deepen it, or the thing that holds publishing down would also be the
+      // thing feeding itself.
+      const enoughAgree = outcome.sent >= 2 && outcome.malformed === outcome.sent
+      const enoughVisible = outcome.sent * 2 >= this.relays.length
+      if (enoughAgree && enoughVisible) {
         this.allMalformedStreak++
       } else if (outcome.accepted > 0 || outcome.refused > 0) {
         // Anything the relays engaged with normally clears it. Silence does

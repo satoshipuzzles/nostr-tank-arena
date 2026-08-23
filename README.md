@@ -1133,8 +1133,41 @@ reading the lobby.
 
 So five consecutive publishes that every asked relay calls invalid raise
 `net.clockAlarm`, publishing holds, and the relay's own words go on the screen.
-One event is let through every twenty seconds so a corrected clock is noticed
-without a reload — it is the only failure in this game a player can go and fix.
+It is the only failure in this game a player can go and fix.
+
+**Two distinct relays have to agree, and half the list has to be visible.**
+"Every relay we asked" is not "every relay", and the difference is biased in
+exactly the wrong direction: a relay that only ever answers `invalid:` can never
+be muted — malformed does not strike, because our own bad event is not the
+relay's fault — while relays that *refuse* us do get muted. So the filter
+systematically removes the relays that would contradict the alarm and keeps the
+one raising it. The odd relay is the survivor by construction.
+
+One relay configured with a lower `max_event_tags` than the tick needs, three
+muted on something ordinary, and the screen tells the player their clock is
+wrong when it is fine — while publishing stops. If you cannot see the others you
+cannot tell, and "cannot tell" is not "blame the machine".
+
+**The probe goes to one relay per cycle, not all of them.** The first version
+broadcast every twenty seconds, which is the pace probe's bug at twice the
+price: the `created_at` gate books −4 rather than a rate hit's −2, so three
+probes a minute is −12/min against a recovery that never accrues. Floored in
+three and a half minutes and pinned there — and the cruelty is the timing, since
+the player then fixes their clock and meets twenty-five minutes of 0.1×
+multiplier on the way out. A cycle of M minutes nets `2(M−1) − 4`, so M must be
+at least four.
+
+Round-robin gets that without slowing detection, because any single acceptance
+clears the streak: one relay a minute finds a corrected clock exactly as fast as
+all four would, at a quarter of the cost each. A probe asks one relay and so can
+never satisfy the two-relay rule, which is deliberate — a probe should be able
+to clear the alarm and never to deepen it.
+
+```
+                    per relay over 16 cycles   total
+broadcast                 16 / 16 / 16 / 16       64
+round-robin                  4 / 4 / 4 / 4        16
+```
 
 ```
                           events/s across two invalid-rejecting relays
