@@ -1079,39 +1079,44 @@ try {
   // a relay's behaviour scaling never touches — rate limits move underneath you
   // as your standing changes and the tolerance does not, so the one number this
   // screen is built on is the one number that cannot be stale.
-  const alarmText = async (reason) =>
-    a.evaluate(async (r) => {
+  const alarmText = async (direction, reason, agreed = 3) =>
+    a.evaluate(async ([d, r, n]) => {
       const net = window.__game.net
       Object.defineProperty(net, 'clockAlarm', {
         configurable: true,
-        get: () => ({ reason: r, streak: 5 }),
+        get: () => ({ reason: r, streak: 5, direction: d, agreed: n }),
       })
       await new Promise((res) => setTimeout(res, 400))
-      const n = document.getElementById('alarm')
+      const el = document.getElementById('alarm')
       return {
-        display: getComputedStyle(n).display,
-        text: n.textContent.replace(/\s+/g, ' ').trim(),
+        display: getComputedStyle(el).display,
+        text: el.textContent.replace(/\s+/g, ' ').trim(),
       }
-    }, reason)
+    }, [direction, reason, agreed])
 
-  const fast = await alarmText('invalid: created_at too far in the future (window 900000 ms)')
-  check('a fast clock is named as fast, with the relay\'s own window',
-    fast.display !== 'none' && /ahead/.test(fast.text) && /15 minutes/.test(fast.text),
+  const fast = await alarmText('ahead', 'invalid: created_at too far in the future (window 900000 ms)')
+  check('a fast clock is named as fast, with the relay\'s window when it gives one',
+    fast.display !== 'none' && /AHEAD/.test(fast.text) && /15 minutes/.test(fast.text),
     fast.text.slice(0, 150))
 
-  const slow = await alarmText('invalid: event expired')
+  // The one that matters, and the one the old code got wrong in production.
+  // Three of the four relays this game ships with say `created_at too late` —
+  // which contains neither "future" nor "expired", so reading direction off the
+  // words silently produced no direction at all. Counted rather than read now.
+  const strfry = await alarmText('ahead', 'invalid: created_at too late')
+  check('and a wording with neither keyword in it is still named as fast',
+    strfry.display !== 'none' && /AHEAD/.test(strfry.text) && !/behind/i.test(strfry.text),
+    strfry.text.slice(0, 150))
+  check('without inventing a number the relay never gave',
+    !/\d+ minutes/.test(strfry.text), strfry.text.slice(0, 150))
+
+  const slow = await alarmText('behind', 'invalid: ephemeral event expired')
   check('and a slow clock is named as slow rather than just "wrong"',
-    slow.display !== 'none' && /behind/.test(slow.text) && !/ahead/.test(slow.text),
+    slow.display !== 'none' && /BEHIND/.test(slow.text) && !/AHEAD/.test(slow.text),
     slow.text.slice(0, 150))
 
-  // A reason we cannot read a direction out of must still say something true.
-  const vague = await alarmText('invalid: bad event')
-  check('and an unreadable reason still says what to do without inventing a cause',
-    vague.display !== 'none' &&
-      !/ahead|behind/.test(vague.text) &&
-      /set the clock/i.test(vague.text) &&
-      /invalid: bad event/.test(vague.text),
-    vague.text.slice(0, 150))
+  check('and the screen says how many relays agreed', /3 relays agree/.test(slow.text),
+    slow.text.slice(0, 90))
 
   await a.evaluate(() => {
     delete window.__game.net.clockAlarm

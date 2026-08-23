@@ -712,6 +712,19 @@ trustworthy:
 > two or more relays rejected the last claims as already expired, **while state
 > ticks from this same session are being accepted**
 
+Which regime you are in depends on the relay, and both are covered by different
+code:
+
+| tolerance for an *old* event | tick | claim | dies first | seen by |
+|---|---|---|---|---|
+| newlay | 365 days | 600s | the claim | the signal below |
+| strfry (all three in the shipped list) | **60s** ephemeral | 600s | the ticks | `Net`'s quorum alarm |
+
+On strfry a clock sixty-one seconds slow kills every tick, which is loud, and the
+quorum alarm names it. The signal below is for the other ordering, where the
+relay is happy to take a year-old tick and the only casualty is the one event
+carrying a deadline of ours.
+
 The ticks landing are not noise to filter out, they are the *control*. They prove
 the relays are reachable, that they are reading our events, and that nothing else
 about this client is wrong. A relay that takes a tick and refuses a claim
@@ -728,6 +741,20 @@ It is an honest *relative* verdict. It says our clock and theirs disagree by mor
 than ten minutes in that direction, which is what somebody needs in order to go
 and fix it, but it cannot rule out two relays that are both fast. The quorum is
 what makes that unlikely.
+
+### Direction is counted, not read
+
+The screen used to work out which way the clock was wrong by looking for
+"future" or "expired" in the reason. It was tested in both directions and it
+never once ran in production, because **three of the four relays this game ships
+with say `created_at too late`** — which contains neither word. The suite was
+green about a relay the game does not talk to.
+
+`Net` decides direction by counting distinct relays that named the timestamp, so
+a wording nobody anticipated cannot silence it, and the screen reads that rather
+than the string. The string is still quoted underneath, because it is the only
+part with a number in it — when there is one at all. Most relays give none, so
+the sentence has to work without it and never invents one.
 
 Above the quote, the screen says which *way* the clock is wrong, because that is
 the first thing somebody needs and the relay always says it: `too far in the

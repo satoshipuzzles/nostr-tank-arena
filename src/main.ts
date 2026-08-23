@@ -7,6 +7,7 @@ import { Input, PLAYER_TWO, SOLO, type Scheme } from './input'
 
 import { DEFAULT_RELAYS, Identity, Net } from './nostr'
 import { Renderer } from './render'
+import type { ClockDirection } from './nostr'
 import { modifierForBlock } from './modifiers'
 import { type Buffs, PICKUPS, type PickupKind } from './pickups'
 import { type Profile, Profiles, shortNpub } from './profiles'
@@ -474,13 +475,17 @@ function blockClock(clock: BlockClock): string {
 function drawClockAlarm(): void {
   const node = $('alarm')
   const players = running?.players ?? []
-  // The fast alarm first: nothing is landing at all, which is the louder of the
-  // two problems and the one that stops the match.
+  // The loud one first: a quorum of relays refusing our events outright on a
+  // timestamp reason. That covers a fast clock either way, and a slow clock on
+  // any relay whose tolerance for an *old* event is tighter than our own claim
+  // deadline — which is the common case, because the four relays this game
+  // ships with give an ephemeral event sixty seconds.
   const fast = players.map((p) => p.game.net.clockAlarm).find((a) => a !== null)
-  // The slow one is the quieter failure and the more insidious. It has to be
-  // raised separately because `Net` cannot see it — a slow clock only kills the
-  // one event kind that carries a deadline, while the tick stream lands
-  // normally and resets any all-malformed streak ten times a second.
+  // And the quiet one, which `Net` structurally cannot see. Where the relay's
+  // tolerance for an old event is *looser* than our claim's deadline, the only
+  // thing that dies is the claim — every tick lands, ten a second, resetting
+  // any streak `Net` might have built. The game looks perfectly normal and
+  // every pickup comes straight back.
   const slow = fast ? null : players.map((p) => p.game.slowClockAlarm).find((a) => a != null)
 
   if (!fast && !slow) {
@@ -490,15 +495,20 @@ function drawClockAlarm(): void {
   node.hidden = false
   if (fast) {
     node.innerHTML =
-      `<b>THIS MACHINE'S CLOCK IS WRONG</b>` +
-      `<span>${clockAdvice(fast.reason)}</span>` +
+      `<b>THIS MACHINE'S CLOCK IS ${fast.direction === 'ahead' ? 'AHEAD' : 'BEHIND'}</b>` +
+      `<span>${clockAdvice(fast.direction, fast.reason, fast.agreed)}</span>` +
       `<code>${escapeHtml(fast.reason)}</code>`
     return
   }
+  // The number here is ours rather than the relay's, and it is a *lower bound*
+  // that the signal's own precondition establishes: a claim only outlives its
+  // deadline if we are behind by more than that deadline, and the ticks landing
+  // prove the relay would have taken it otherwise. Said as "more than", because
+  // that is exactly what is known — it could be an hour.
   const minutes = Math.round(slow!.behindBySeconds / 60)
   node.innerHTML =
     `<b>THIS MACHINE'S CLOCK IS BEHIND</b>` +
-    `<span>By more than ${minutes} minutes, going by the relays. The game plays fine, ` +
+    `<span>By more than ${minutes} minutes. The game plays fine, ` +
     `but <b>every pickup you take comes straight back</b> — the relays drop the claim as ` +
     `already expired before anyone else hears it. Set the clock, or turn on automatic ` +
     `time, and this will clear itself.</span>` +
@@ -506,30 +516,37 @@ function drawClockAlarm(): void {
 }
 
 /**
- * Turn a relay's rejection into something a person can act on.
+ * Turn a quorum of rejections into something a person can act on.
  *
- * Which *way* the clock is wrong is the first thing somebody needs and the
- * relay always says it: `created_at too far in the future` is a fast clock,
- * `event expired` is a slow one (a NIP-40 expiration that was already spent on
- * arrival). Telling a player only that their clock is "wrong" leaves them
- * guessing at the one thing they came here to fix.
+ * Which *way* the clock is wrong is the first thing somebody needs, and the
+ * direction is **counted rather than read**. This used to regex the reason for
+ * "future" or "expired" — and three of the four relays this game actually ships
+ * with say `created_at too late`, which contains neither. The branch worked in
+ * the suite, was broken in both directions to prove it, and never once ran in
+ * production, because the suite spoke a different relay's dialect. `Net` decides
+ * direction by counting distinct relays that named the timestamp, so a wording
+ * nobody anticipated cannot silence it.
  *
- * The window is quoted when the relay gives it, and it is worth knowing *why*
- * that number can be trusted: `created_at_msecs_ahead` is one of the fields a
- * relay's behaviour scaling never touches. Rate limits move underneath you as
- * your standing changes, and the tolerance does not — so the one number this
- * screen is built on is the one number that cannot be stale.
+ * The window is quoted when a relay gives one, and it is worth knowing why that
+ * number can be trusted where it appears: `created_at_msecs_ahead` is one of the
+ * fields a relay's behaviour scaling never touches. Most relays give no number
+ * at all, so the sentence has to work without it.
  */
-function clockAdvice(reason: string): string {
+function clockAdvice(direction: ClockDirection, reason: string, agreed: number): string {
+  // The direction comes from `Net`, which decided it by counting relays rather
+  // than by reading words off one string. That distinction is not cosmetic: this
+  // used to regex the reason for "future" or "expired", and three of the four
+  // relays this game actually ships with say `created_at too late`, which
+  // contains neither. The branch worked in the suite and never once ran in
+  // production.
   const window = reason.match(/window (\d+) ms/)
   const by = window ? ` by more than ${Math.round(Number(window[1]) / 60_000)} minutes` : ''
-  const direction = /future/i.test(reason)
-    ? `, because the clock here is <b>ahead</b>${by}`
-    : /expired/i.test(reason)
-      ? ', because the clock here is <b>behind</b> — our events arrive already out of date'
-      : ''
+  const which =
+    direction === 'ahead'
+      ? `the clock here is <b>ahead</b>${by}`
+      : 'the clock here is <b>behind</b> — our events arrive already out of date'
   return (
-    `Every relay is rejecting our events${direction}. ` +
+    `${agreed} relays agree: ${which}. ` +
     'Nothing you do in the game will fix it — set the clock, or turn on automatic time, ' +
     'and this will clear itself.'
   )
