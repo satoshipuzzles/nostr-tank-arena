@@ -857,9 +857,36 @@ things a rejected promise can mean:
 
 | kind | what happened | mute? |
 |---|---|---|
-| `refused` | `OK false` — rate cap, PoW, allowlist, web of trust | **yes** |
+| `refused` | `pow:` `blocked:` `rate-limited:` `restricted:` `auth-required:` | **yes** |
 | `no-verdict` | nothing came back: publish timeout, dropped socket | no |
 | `malformed` | `invalid: ...` — the event was bad | no |
+| `unknown` | `error:`, or anything with no recognised prefix | no |
+
+`duplicate:` is not in the table because it is not a failure: the relay already
+has the event, so it is counted as an acceptance. It arrives as a rejected
+promise, which is the only reason it needs mentioning at all.
+
+**Match the prefix first, and only then guess from the shape.** NIP-01's
+machine-readable prefix set is closed, and searching for substrings anywhere in
+the message got three of newlay's real frames backwards — all in the direction
+that cannot mute:
+
+```
+restricted: you are timed out until 1799999999          contains "timed out"
+rate-limited: too many open connections from your IP    contains "connection"
+rate-limited: connection attempts too fast; slow down   contains "connection"
+```
+
+A moderation timeout is the most literal "it has a policy, not a bad minute"
+frame that exists, and it was the one being read as silence — so the client
+would hammer, for a whole session, a relay that had explicitly and by name told
+it to stop. The prefix has to win over any word that happens to appear inside
+the message.
+
+**Unrecognised defaults to not muting.** Muting is the destructive direction and
+NIP-01 defines `error:` as "any other reason" — the weakest possible basis for
+writing a relay off. This also subsumes the `relay.fountain.fm` case below
+without a string-table entry for it.
 
 **`no-verdict` is not a refusal, because refusing is a frame and silence is not
 one.** purplerelay.com was measured timing out on hundreds of publishes in a
@@ -877,6 +904,15 @@ then retried; the wait doubles each time, capped at fifteen minutes. A relay
 with a real policy costs fifteen wasted events per attempt and then goes quiet
 for longer and longer, while one that was reloading when we met it comes back.
 
+The span lives in its own map, and that is not an implementation detail. The
+first version kept it inside the `muted` entry — which `publish()` prunes on
+entry the moment the wait expires, taking the span with it. `prev` was therefore
+always `undefined`, every wait was sixty seconds, and the fifteen-minute cap was
+unreachable. **The test asserted `mutes >= 2`, which is the counter, and the
+counter increments identically whether the wait grew or not**: the check ran,
+reported success, and measured nothing. It asserts on the wait now — first 60s,
+second 120s.
+
 Alongside that, a `ledger` that never expires. `trouble` is deliberately
 forgetful — a complaint ages out after twenty seconds so the HUD reflects now —
 but ticks outrun everything else about 150:1, so the successful publish that
@@ -885,9 +921,11 @@ is thirty-four seconds long. Anything sampling at the end of a round saw a
 healthy board and no explanation. The ledger keeps per-relay counts by kind for
 the whole session.
 
-Confirmed red before being trusted. Against the previous `nostr.ts`, five checks
-fail — the `invalid`-rejecting relay and the silent one are both muted, the
-client stops publishing to them, and a mute is never retried.
+Confirmed red before being trusted, twice. Against the `nostr.ts` before any of
+this, five checks fail: the `invalid`-rejecting relay and the silent one are
+both muted, the client stops publishing to them, and a mute is never retried.
+Against the substring-first version, thirteen more do — including
+`the second mute waits longer than the first  first 60s, second 60s`.
 
 Two things the suite is careful about:
 

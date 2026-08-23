@@ -74,6 +74,14 @@ const BEHAVIOURS = {
   pow: () => ({ ok: false, msg: 'pow: 28 bits needed' }),
   blocked: () => ({ ok: false, msg: 'blocked: spam not permitted' }),
   expired: () => ({ ok: false, msg: 'invalid: event expired' }),
+  // newlay's per-event moderation gate. The reason contains the words "timed
+  // out", which an earlier substring-first classifier read as silence — so the
+  // single most explicit per-pubkey refusal there is could never mute.
+  timedout: () => ({ ok: false, msg: 'restricted: you are timed out until 1799999999' }),
+  // The relay already has the event. A rejected promise, but not a failure.
+  duplicate: () => ({ ok: false, msg: 'duplicate: already have this event' }),
+  // NIP-01's catch-all. Ambiguous, and muting is the destructive direction.
+  unknownerr: () => ({ ok: false, msg: 'error: unknown error' }),
   silent: () => null, // accept the frame, answer nothing, ever
 }
 
@@ -112,6 +120,9 @@ const limited = startRelay('ratelimited')
 const pow = startRelay('pow')
 const blocked = startRelay('blocked')
 const expired = startRelay('expired')
+const timedout = startRelay('timedout')
+const duplicate = startRelay('duplicate')
+const unknownerr = startRelay('unknownerr')
 const silent = startRelay('silent')
 
 const browser = await puppeteer.launch({
@@ -133,7 +144,10 @@ try {
 
   // The lobby takes a relay list, so no source change is needed to point the
   // game at these. ws:// is only reachable because the preview is http://.
-  const list = [good.url, limited.url, pow.url, blocked.url, expired.url, silent.url].join('\n')
+  const list = [
+    good.url, limited.url, pow.url, blocked.url,
+    expired.url, timedout.url, duplicate.url, unknownerr.url, silent.url,
+  ].join('\n')
   await page.$eval('#relays', (el, v) => { el.value = v }, list)
   await page.type('#name', 'relaytest')
   await page.type('#room', 'rl' + Math.floor(Math.random() * 1e6))
@@ -142,7 +156,7 @@ try {
     .waitForFunction(() => !!window.__game, { timeout: 25_000 })
     .then(() => true)
     .catch(() => false)
-  check('game starts against six fake relays', started)
+  check('game starts against nine fake relays', started)
   if (!started) throw new Error('never reached the arena')
 
   const using = await page.evaluate(() => window.__game.net.relays)
@@ -157,6 +171,13 @@ try {
           pow: window.__classifyFailure('pow: 28 bits needed'),
           blocked: window.__classifyFailure('blocked: spam not permitted'),
           restricted: window.__classifyFailure("restricted: not in this relay's web of trust"),
+          moderated: window.__classifyFailure('restricted: you are timed out until 1799999999'),
+          ipconns: window.__classifyFailure('rate-limited: too many open connections from your IP'),
+          connfast: window.__classifyFailure('rate-limited: connection attempts too fast; slow down'),
+          authreq: window.__classifyFailure('auth-required: we only accept authenticated events'),
+          dupe: window.__classifyFailure('duplicate: already have this event'),
+          catchall: window.__classifyFailure('error: unknown error'),
+          gibberish: window.__classifyFailure('something nobody has ever seen'),
           timeout: window.__classifyFailure('publish timed out'),
           socket: window.__classifyFailure('WebSocket connection closed'),
           expired: window.__classifyFailure('invalid: event expired'),
@@ -175,6 +196,39 @@ try {
     check('a dropped socket is not a refusal', cls.socket === 'no-verdict', cls.socket)
     check('an expired event is our fault, not the relay\'s', cls.expired === 'malformed', cls.expired)
     check('a bad signature is our fault, not the relay\'s', cls.badsig === 'malformed', cls.badsig)
+    // The prefix has to win over any word inside the message. All three of
+    // these contain a substring an earlier version matched on first.
+    check(
+      'a moderation timeout is a refusal, not silence',
+      cls.moderated === 'refused',
+      `${cls.moderated} — the reason contains "timed out"`,
+    )
+    check(
+      'too many connections is a refusal, not silence',
+      cls.ipconns === 'refused',
+      `${cls.ipconns} — the reason contains "connection"`,
+    )
+    check(
+      'connecting too fast is a refusal, not silence',
+      cls.connfast === 'refused',
+      `${cls.connfast} — the reason contains "connection"`,
+    )
+    check('auth-required is a refusal', cls.authreq === 'refused', cls.authreq)
+    check(
+      'a duplicate is not a failure at all — the relay has the event',
+      cls.dupe === 'accepted',
+      cls.dupe,
+    )
+    check(
+      "NIP-01's catch-all does not mute",
+      cls.catchall === 'unknown',
+      `${cls.catchall} — "error:" means "any other reason"`,
+    )
+    check(
+      'an unrecognised message defaults to not muting',
+      cls.gibberish === 'unknown',
+      cls.gibberish,
+    )
   }
 
   // ------------------------------------------------- what actually gets muted
@@ -237,6 +291,32 @@ try {
   if (hasLedger) {
     check('the silent relay is counted as no-verdict', s.noVerdict > 5, `${s.noVerdict} no-verdict`)
   }
+
+  check(
+    'the moderation-timeout relay IS muted — it refused us by name',
+    state.muted.includes(timedout.url),
+    state.muted.includes(timedout.url) ? '' : 'still publishing to a relay that told us to stop',
+  )
+  check(
+    'the duplicate-reporting relay is NOT muted',
+    !state.muted.includes(duplicate.url),
+    state.muted.includes(duplicate.url) ? 'MUTED — struck for already having our event' : 'never muted',
+  )
+  check(
+    'the catch-all-error relay is NOT muted',
+    !state.muted.includes(unknownerr.url),
+    state.muted.includes(unknownerr.url) ? 'MUTED — struck on an unparsed reason' : 'never muted',
+  )
+  check(
+    'we keep publishing to the duplicate-reporting relay',
+    duplicate.received > 20,
+    `${duplicate.received} received`,
+  )
+  if (hasLedger) {
+    const d = led(duplicate.url)
+    check('a duplicate counts as accepted, not rejected', d.accepted > 20 && d.refused === 0, `${d.accepted} accepted, ${d.refused} refused`)
+    check('the catch-all lands in its own bucket', led(unknownerr.url).unknown > 10, `${led(unknownerr.url).unknown} unknown`)
+  }
   check(
     '...and is NOT muted, because silence is not a refusal',
     !state.muted.includes(silent.url),
@@ -267,6 +347,23 @@ try {
   // expire it directly and confirm the relay is published to again — the point
   // under test is that the mute is time-bounded and reversible at all.
 
+  // Read the first mute's wait before expiring it, so the second can be
+  // compared against a real number rather than an assumed 60s.
+  const firstSpan = (await page.evaluate(
+    (u) => {
+      const m = window.__game.net.muted
+      if (!(m instanceof Map)) return null
+      const e = m.get(u)
+      return e ? { span: e.span } : null
+    },
+    limited.url,
+  )) ?? { span: 0 }
+  check(
+    'the first mute is the base wait',
+    Math.abs(firstSpan.span - 60_000) < 1000,
+    `${(firstSpan.span / 1000).toFixed(0)}s`,
+  )
+
   const before = limited.received
   await page.evaluate(() => {
     const muted = window.__game.net.muted
@@ -286,13 +383,23 @@ try {
     remuted.includes(limited.url),
     remuted.length + ' muted',
   )
-  if (hasLedger) {
-    const after = await page.evaluate(
-      (u) => [...window.__game.net.ledger.values()].find((l) => l.url === u),
-      limited.url,
-    )
-    check('the backoff records the second mute', after.mutes >= 2, `${after.mutes} mutes`)
-  }
+  // Assert on the wait, not the tally. `mutes` increments identically whether
+  // the backoff doubled or not — which is how the first version of this file
+  // shipped a backoff that never doubled and a check that reported success.
+  const spans = await page.evaluate(
+    (u) => {
+      const m = window.__game.net.muted
+      if (!(m instanceof Map)) return null
+      const e = m.get(u)
+      return e ? { remaining: e.until - Date.now(), span: e.span } : null
+    },
+    limited.url,
+  )
+  check(
+    'the second mute waits longer than the first',
+    spans !== null && spans.span > firstSpan.span * 1.5,
+    spans === null ? 'no mute recorded' : `first ${(firstSpan.span / 1000).toFixed(0)}s, second ${(spans.span / 1000).toFixed(0)}s`,
+  )
 } catch (err) {
   check('the run completed', false, err.message)
 } finally {

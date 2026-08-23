@@ -147,20 +147,78 @@ export class Identity {
  *     relay answer `invalid: event expired`. Striking the relays for that would
  *     mute the entire set over a local clock problem.
  */
-export type FailureKind = 'refused' | 'no-verdict' | 'malformed'
+export type FailureKind = 'refused' | 'no-verdict' | 'malformed' | 'unknown'
 
 /**
- * Sort a failure into one of the three.
+ * NIP-01's machine-readable OK prefixes, plus `auth-required:` from NIP-42.
  *
- * String matching, because that is all a rejected promise carries: nostr-tools
- * gives us either the relay's own OK message or its own timeout text. One known
- * blind spot, stated rather than hidden — a relay that answers a bad signature
- * with something generic (`relay.fountain.fm` says `error: unknown error`)
- * reads as `refused` when it is really `malformed`. It costs that relay strikes
- * it did not earn, and there is nothing in the frame to tell the difference.
+ * The set is closed, which is the whole reason to match on it. The previous
+ * version of this function searched for substrings anywhere in the message and
+ * got three of newlay's real frames backwards, all in the dangerous direction:
+ *
+ *   `restricted: you are timed out until 1799999999`   contains "timed out"
+ *   `rate-limited: too many open connections from your IP`   contains "connection"
+ *   `rate-limited: connection attempts too fast; slow down`  same
+ *
+ * All three read as `no-verdict`, which never strikes — so the client would
+ * hammer, for the whole session, a relay that had explicitly and per-pubkey
+ * told it to stop. A moderation timeout is the most literal "it has a policy,
+ * not a bad minute" frame that exists, and it was the one being ignored.
+ *
+ * Prefix first, heuristics only when there is no prefix. A relay's own reason
+ * can then never be overridden by a word that happens to appear inside it.
  */
-export function classifyFailure(reason: string): FailureKind {
-  const r = reason.toLowerCase()
+const OK_PREFIX: Record<string, FailureKind | 'accepted'> = {
+  // The relay already has the event. Publishing succeeded in every sense that
+  // matters, so this is not a failure at all — and it is the single worst thing
+  // on the list to strike a relay for.
+  'duplicate:': 'accepted',
+  'pow:': 'refused',
+  'blocked:': 'refused',
+  'rate-limited:': 'refused',
+  'restricted:': 'refused',
+  'auth-required:': 'refused',
+  'invalid:': 'malformed',
+  // NIP-01 defines `error:` as "any other reason" — the catch-all. That is the
+  // weakest possible basis for writing a relay off, so it does not mute.
+  'error:': 'unknown',
+}
+
+/**
+ * Why a publish failed, which is several different questions wearing one coat.
+ *
+ * The distinction is the point of this file. `publish()` used to treat every
+ * rejected promise the same and mute a relay for the rest of the session after
+ * fifteen in a row, on the reasoning that a run of refusals "is a policy, not a
+ * bad minute". That reasoning holds for exactly one of these:
+ *
+ *   * `refused` — the relay looked at the event and said no. Rate cap, proof of
+ *     work, an allowlist, a web of trust, a moderation timeout. A run of these
+ *     really is a policy, and giving up on the relay is right.
+ *
+ *   * `no-verdict` — no answer at all: the client's 4400ms publish timeout
+ *     expired, or the socket dropped. The relay has not refused anything,
+ *     because refusing is a *frame* and silence is not one. purplerelay.com was
+ *     measured timing out on hundreds of publishes while a separate subscriber
+ *     confirmed it was still forwarding 246 of 251 of them.
+ *
+ *   * `malformed` — the relay says the event itself is bad (`invalid: ...`),
+ *     which is almost always *our* fault. A clock far enough behind makes every
+ *     NIP-40 `expiration` arrive already spent and every relay answer
+ *     `invalid: event expired`; striking for that mutes the entire set over a
+ *     local clock problem.
+ *
+ *   * `unknown` — the relay said something, and we do not recognise it. It gets
+ *     reported in the relay's own words and never mutes, because muting is the
+ *     destructive direction and an unparsed string is no evidence for it.
+ */
+export function classifyFailure(reason: string): FailureKind | 'accepted' {
+  const r = reason.trim().toLowerCase()
+  for (const prefix of Object.keys(OK_PREFIX)) {
+    if (r.startsWith(prefix)) return OK_PREFIX[prefix]
+  }
+  // No machine-readable prefix. Now, and only now, guess from the shape —
+  // these are the client's own messages rather than any relay's.
   if (
     r.includes('timed out') ||
     r.includes('timeout') ||
@@ -171,8 +229,7 @@ export function classifyFailure(reason: string): FailureKind {
   ) {
     return 'no-verdict'
   }
-  if (r.startsWith('invalid:') || r.startsWith('error: invalid')) return 'malformed'
-  return 'refused'
+  return 'unknown'
 }
 
 // Exposed the same way and for the same reason as `__game` and `__sfx`: the
@@ -207,11 +264,26 @@ export interface RelayTrouble {
  * pickup wave is thirty-four seconds long. This one keeps the count.
  */
 export interface RelayLedger {
+  /**
+   * Keyed by relay URL alone, which is only correct because **one `Net` serves
+   * exactly one session key.**
+   *
+   * That invariant is load-bearing and was briefly untrue: local split-screen
+   * first shipped with both players sharing a `Net`, and a relay that refused
+   * player two while accepting player one then read as `{accepted: n,
+   * refused: n}` — indistinguishable from both players being throttled at 50%,
+   * which needs the opposite fix. `restricted:` and `blocked:` are per-pubkey
+   * by definition, so a web-of-trust gate or a moderation timeout hits exactly
+   * one of the two people on the couch. Player two has its own `Net` now
+   * (`main.ts`), so attribution comes free. Share one again and this map goes
+   * blind in a way nothing here will report.
+   */
   url: string
   accepted: number
   refused: number
   noVerdict: number
   malformed: number
+  unknown: number
   /** Times this relay has been muted, so a flapping relay is distinguishable. */
   mutes: number
   lastReason: string
@@ -248,6 +320,8 @@ export class Net {
    * somebody else's.
    */
   private muted = new Map<string, { until: number; span: number }>()
+  /** How long the next mute lasts, per relay. Outlives the prune in `publish`. */
+  private muteSpan = new Map<string, number>()
   private strikes = new Map<string, number>()
   private static readonly MUTE_AFTER = 15
   /**
@@ -306,9 +380,16 @@ export class Net {
           if (known && Date.now() - known.at > 20_000) this.trouble.delete(url)
         },
         (err: unknown) => {
-          this.rejected++
           const reason = (err instanceof Error ? err.message : String(err)).slice(0, 120)
           const kind = classifyFailure(reason)
+          if (kind === 'accepted') {
+            // `duplicate:` — the relay has the event. It arrives as a rejected
+            // promise and is not a failure, so it is not counted as one.
+            this.strikes.set(url, 0)
+            this.entry(url).accepted++
+            return
+          }
+          this.rejected++
           const known = this.trouble.get(url)
           this.trouble.set(url, {
             url,
@@ -322,10 +403,12 @@ export class Net {
           led.lastAt = Date.now()
           if (kind === 'refused') led.refused++
           else if (kind === 'no-verdict') led.noVerdict++
-          else led.malformed++
+          else if (kind === 'malformed') led.malformed++
+          else led.unknown++
 
           // Only an actual refusal counts toward giving up on a relay. Silence
-          // is not a verdict, and our own bad event is not the relay's fault.
+          // is not a verdict, our own bad event is not the relay's fault, and a
+          // message we cannot parse is not evidence for the destructive option.
           if (kind !== 'refused') return
           const strikes = (this.strikes.get(url) ?? 0) + 1
           this.strikes.set(url, strikes)
@@ -338,15 +421,24 @@ export class Net {
   private entry(url: string): RelayLedger {
     let led = this.ledger.get(url)
     if (!led) {
-      led = { url, accepted: 0, refused: 0, noVerdict: 0, malformed: 0, mutes: 0, lastReason: '', lastAt: 0 }
+      led = {
+        url, accepted: 0, refused: 0, noVerdict: 0, malformed: 0, unknown: 0,
+        mutes: 0, lastReason: '', lastAt: 0,
+      }
       this.ledger.set(url, led)
     }
     return led
   }
 
   private mute(url: string): void {
-    const prev = this.muted.get(url)
-    const span = Math.min(prev ? prev.span * 2 : Net.MUTE_MS, Net.MUTE_MS_MAX)
+    // `span` lives in its own map because `publish()` prunes `muted` on entry,
+    // and that delete took the previous span with it — so `prev` was always
+    // undefined, every wait was sixty seconds, and MUTE_MS_MAX was unreachable.
+    // The docstring promised a doubling that could not happen. It does not
+    // decay: a relay muted repeatedly within one session has earned the wait.
+    const prev = this.muteSpan.get(url)
+    const span = Math.min(prev ? prev * 2 : Net.MUTE_MS, Net.MUTE_MS_MAX)
+    this.muteSpan.set(url, span)
     this.muted.set(url, { until: Date.now() + span, span })
     this.strikes.set(url, 0)
     this.entry(url).mutes++
