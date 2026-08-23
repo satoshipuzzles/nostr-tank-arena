@@ -329,6 +329,11 @@ export class Game {
   displayColor: number
   /** Set when a relay subscription has produced at least one event. */
   sawTraffic = false
+  /**
+   * Events dropped for arriving before EOSE. See `onEvent` for why that is a
+   * trade rather than a fact, and why this number is worth being able to read.
+   */
+  storedDropped = 0
   /** performance.now() of the last event any relay delivered. Drives the watchdog. */
   lastInboundAt = 0
   /**
@@ -504,6 +509,29 @@ export class Game {
    * exhausted, it is exact, and it needs no clock, no `since`, and nothing
    * agreed with anybody. A shell fired before we joined is not a shell, it is a
    * record that one was fired — there is no such thing as a late one.
+   *
+   * ## Where this is a trade rather than a fact
+   *
+   * "Pre-EOSE means stored" is true of strfry and cowboy measured it holding
+   * with a second to spare — forty shells published during a deliberately slow
+   * store pass, none delivered early, none lost. It is **not** true of newlay,
+   * which registers a subscription before running the query (deliberately, to
+   * close the gap where a live event falls between the scan and the live path)
+   * and flushes that buffer *before* sending EOSE. On newlay a shell fired at
+   * you while your subscription is opening arrives pre-EOSE, and this line
+   * throws it away.
+   *
+   * Kept anyway, because the two errors are not the same size. Dropping a live
+   * event costs a few milliseconds of a window that only exists while joining,
+   * and every kind here survives it: a tick is replaced 100ms later, an
+   * attestation is re-announced when a new peer appears, a missed shell means a
+   * hit that never lands on a victim who is authoritative over its own hull
+   * anyway. Accepting a stored one costs a ghost match — shells with full
+   * damage, somebody else's deaths in the feed, phantom tanks.
+   *
+   * `storedDropped` counts them, per session, so the trade is observable rather
+   * than a silent assumption. A number that keeps climbing after the join is a
+   * relay ordering its buffer the other way.
    */
   onEvent(e: Event, stored = false): void {
     if (this.disposed) return
@@ -516,7 +544,10 @@ export class Game {
     // session attestation every `SESSION_REBROADCAST_MS` and ticks ten times a
     // second, so the roster rebuilds from live traffic within moments — at the
     // cost of nothing, because a stale roster entry is a lie about who is here.
-    if (stored) return
+    if (stored) {
+      this.storedDropped++
+      return
+    }
     if (this.seen.has(e.id) || this.seenPrev.has(e.id)) return
     this.seen.add(e.id)
     if (this.seen.size > 3000) {

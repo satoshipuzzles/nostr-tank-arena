@@ -788,7 +788,32 @@ passes because both sides come off the same broken clock.
 
 **EOSE is the boundary.** Every relay sends it when its store is exhausted; it is
 exact, it is per relay, and it needs no clock, no `since` and nothing agreed with
-anybody. Everything before it is dropped. A shell fired before you joined is not
+anybody. Everything before it is dropped.
+
+That last sentence is a **trade, not a fact**, and it is worth being exact about
+which. "Pre-EOSE means stored" holds on strfry — measured with a second of
+margin: forty shells published during a deliberately slow store pass, none
+delivered early and none lost. It does *not* hold on newlay, which registers a
+subscription before running the query — deliberately, to close the gap where a
+live event falls between the scan and the live path — and flushes that buffer
+*before* sending EOSE. There, a shell fired at you while your subscription is
+opening arrives pre-EOSE and this rule throws it away.
+
+Kept anyway, because the two errors are not the same size. Dropping a live event
+costs a few milliseconds of a window that only exists while joining, and every
+kind here survives it: a tick is replaced 100ms later, an attestation is
+re-announced when a new peer appears, and a missed shell is a hit that never
+lands on a victim who is authoritative over its own hull regardless. Accepting a
+stored one costs a ghost match. `Game.storedDropped` counts them so the trade is
+observable rather than an assumption — a number still climbing long after the
+join is a relay ordering its buffer the other way.
+
+This is also the clearest bill for the monoculture. Three stock strfry is three
+votes and one opinion, and the first thing a second implementation did was
+contradict a premise this fix rests on. A client with one relay implementation in
+front of it has silently encoded that implementation's behaviour as the
+protocol's, and no suite can tell you which assumptions those are until something
+else answers. A shell fired before you joined is not
 a shell, it is a record that one was fired, and there is no such thing as a late
 one.
 

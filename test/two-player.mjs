@@ -188,6 +188,16 @@ try {
   // which is the flake I have hit more than any other in this suite.
   await a.keyboard.down('KeyW')
   let moved = 0
+  // Everything alpha's feed has ever said, accumulated across the polls.
+  //
+  // Sampling it once is a race against two separate evictions: entries expire
+  // after 6000ms *and* the feed keeps only the last six lines, so a busy round
+  // can push a kill out by count before it ages out by time. A line that
+  // appeared and then scrolled away still appeared.
+  const feedSeen = new Set()
+  const soakFeed = async () => {
+    for (const line of (await snap(a)).feed) feedSeen.add(line)
+  }
   for (let i = 0; i < 14; i++) {
     await wait(700)
     const now = (await snap(b)).peers[0]
@@ -223,18 +233,33 @@ try {
     await a.keyboard.down('Space')
     await wait(300)
     await a.keyboard.up('Space')
-    await wait(2600)
+    await wait(1300)
+    await soakFeed()
+    await wait(1300)
+    await soakFeed()
     if ((await snap(b)).deaths > 0) break
   }
+  await soakFeed()
+  // Snapshot the feed the moment the death lands, not after the respawn wait.
+  //
+  // Feed entries expire after 6000ms (`game.ts`), and the poll above can detect
+  // the death up to 2600ms after the shot — so reading it 3800ms later put the
+  // sample at up to 6400ms and turned a real check into a coin flip. Fizz lost
+  // an hour to it hunting a regression that was not there, and found it by
+  // running the same probe against the base commit and comparing *rates*: four
+  // passes on the branch, three on main.
+  const atDeath = { a: await snap(a), b: await snap(b) }
   // RESPAWN_DELAY is 2.5s and the death is detected at the end of a poll, so a
   // 2s wait here was a coin flip on whether bravo was back yet.
   await wait(3800)
 
   const finalA = await snap(a)
   const finalB = await snap(b)
-  check('bravo died', finalB.deaths >= 1, JSON.stringify(finalB.feed))
-  check('alpha credited with the kill', finalA.kills >= 1, JSON.stringify(finalA.feed))
-  check('kill feed names the killer', finalA.feed.some((t) => t.includes('alpha') && t.includes('bravo')))
+  check('bravo died', finalB.deaths >= 1, JSON.stringify(atDeath.b.feed))
+  check('alpha credited with the kill', finalA.kills >= 1, JSON.stringify(atDeath.a.feed))
+  check('kill feed names the killer',
+    [...feedSeen].some((t) => t.includes('alpha') && t.includes('bravo')),
+    JSON.stringify([...feedSeen]))
   check('bravo respawned at full hp', !finalB.dead && finalB.hp === 3, `hp=${finalB.hp} dead=${finalB.dead}`)
 
   // -------------------------------------------------------------------- sound
@@ -1246,6 +1271,7 @@ try {
   const replay = await a.evaluate(() => {
     const g = window.__game
     const before = { shells: g.shells.size, feed: g.feed.length, peers: g.peers.size }
+    const droppedBefore = g.storedDropped
     const stamp = () => Math.floor(Date.now() / 1000)
     const ghost = 'aa'.repeat(32)
     // Exactly what a relay hands back out of its store on join.
@@ -1265,6 +1291,7 @@ try {
       before,
       after: { shells: g.shells.size, feed: g.feed.length, peers: g.peers.size },
       ghostPeer: g.peers.has(ghost),
+      dropped: g.storedDropped - droppedBefore,
     }
   })
   check('a shell replayed out of the store does not become a shell',
@@ -1273,6 +1300,12 @@ try {
     replay.after.feed === replay.before.feed, JSON.stringify(replay))
   check('and a stored tick does not stand a ghost tank in the arena',
     !replay.ghostPeer && replay.after.peers === replay.before.peers, JSON.stringify(replay))
+  // The counter exists because "pre-EOSE means stored" is true of strfry and
+  // false of newlay, which flushes its live buffer before EOSE — so this is a
+  // trade rather than a fact, and a trade should be countable. A number still
+  // climbing long after the join is a relay ordering its buffer the other way.
+  check('and the drop is counted rather than silent', replay.dropped === 3,
+    `${replay.dropped} dropped`)
 
   // The other direction: a *live* event of the same shape must still work, or
   // "nothing replays" would pass against a client that had stopped listening.
