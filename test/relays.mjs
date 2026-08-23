@@ -158,7 +158,13 @@ function startBucketRelay(perMin) {
 
 function startRelay(behaviour, opts = {}) {
   const wss = new WebSocketServer({ port: 0 })
-  const state = { behaviour, received: 0, accepted: 0, connections: 0, closeSubs: !!opts.closeSubs }
+  const state = {
+    behaviour, received: 0, accepted: 0, connections: 0,
+    closeSubs: !!opts.closeSubs,
+    // Every REQ filter this relay was sent, so a test can see what the client
+    // asked for rather than only what it did with the answer.
+    reqFilters: [],
+  }
   // sockets -> the subscription ids each has open, so this fake can push an
   // event the way a real relay does rather than only answering publishes.
   const subs = new Map()
@@ -190,6 +196,7 @@ function startRelay(behaviour, opts = {}) {
       }
       if (msg[0] === 'CLOSE') { subs.get(ws)?.delete(msg[1]); return }
       if (msg[0] === 'REQ') {
+        state.reqFilters.push(msg[2])
         if (!state.closeSubs) subs.get(ws)?.add(msg[1])
         // A relay can refuse to read the kinds it happily accepts writes for.
         // relay.fountain.fm answers exactly this for 21000, 21001, 21003 and
@@ -1210,6 +1217,90 @@ try {
       `${liveRelay.received - before} events in 2.5s`,
     )
     await readPage.close()
+  }
+
+  // ------------------------------ one relay's reconnect must not blind the rest
+  //
+  // nostr-tools rewrites a resubscribing filter's `since` to `lastEmitted + 1`,
+  // and `lastEmitted` is the maximum `created_at` *received* — not accepted, so
+  // an event the client-side filter already rejected still raises it. That is
+  // the furthest-ahead clock in the room, not our own history.
+  //
+  // And `matchFilters` runs client-side on every inbound event, so a filter
+  // object shared across the per-relay subscriptions means one relay's
+  // reconnect discards the others' traffic against a filter they never sent.
+
+  const relayA = startRelay('good')
+  const relayB = startRelay('good')
+  const twoPage = await openAgainst([relayA.url, relayB.url], 'twin')
+  check('a session against two delivering relays starts', twoPage !== null)
+
+  if (twoPage) {
+    await wait(4000)
+    const tag2 = await twoPage.evaluate(() => `tankarena-${window.__game.room}`)
+    const sk2 = generateSecretKey()
+    const pk2 = getPublicKey(sk2)
+    const stamped = (offset) =>
+      finalizeEvent(
+        {
+          kind: 21000,
+          created_at: Math.floor(Date.now() / 1000) + offset,
+          tags: [['t', tag2]],
+          content: JSON.stringify({ t: 1, x: 800, y: 600, h: 0, g: 0, hp: 3, d: false }),
+        },
+        sk2,
+      )
+
+    // A peer whose clock is five minutes fast. Inside every relay's forward
+    // window, so nothing refuses it and nothing anywhere complains.
+    relayA.inject(stamped(300))
+    await wait(2000)
+    const reqsBefore = relayA.reqFilters.length
+    relayA.dropAll()
+    await wait(6000)
+
+    const newReq = relayA.reqFilters.slice(reqsBefore)
+    check(
+      'the resubscribe asks for the filter we built, with no `since` in it',
+      newReq.length > 0 && newReq.every((f) => f.since === undefined),
+      JSON.stringify(newReq),
+    )
+
+    // B never dropped. Its traffic must survive A's reconnect.
+    await twoPage.evaluate((pk) => window.__game.peers.delete(pk), pk2)
+    relayB.inject(stamped(0))
+    await wait(3000)
+    check(
+      "and the relay that never dropped still delivers",
+      await twoPage.evaluate((pk) => [...window.__game.peers.keys()].includes(pk), pk2),
+      'B is healthy and its events were discarded against a filter A mutated',
+    )
+    await twoPage.close()
+  }
+
+  // ------------------------------ a CLOSED verdict must not be retried forever
+  //
+  // A dropped socket is ours to restore. A relay that read the filter and
+  // declined it is not — resubscribing to that loops for the whole session, and
+  // the relay removed two PRs ago would have made this client do exactly that
+  // on every kind it uses.
+
+  const refuser = startRelay('good', { closeSubs: true })
+  const refusePage = await openAgainst([refuser.url], 'refuse')
+  if (refusePage) {
+    await wait(9000)
+    const reqs = refuser.reqFilters.length
+    check(
+      'a relay that declines the filter is asked once, not in a loop',
+      reqs <= 4,
+      `${reqs} REQs in 9s — one per Game.subscribe call is 2`,
+    )
+    check(
+      'and it is reported rather than retried',
+      (await refusePage.evaluate(() => window.__game.net.deafRelays ?? [])).length > 0,
+      'not in deafRelays',
+    )
+    await refusePage.close()
   }
 
 } catch (err) {

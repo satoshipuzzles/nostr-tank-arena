@@ -1474,6 +1474,56 @@ after                                                            0.00 + probes
 Silence does not clear the alarm, only an acceptance or an ordinary refusal
 does: an unreachable relay is no evidence that the clock came right.
 
+### Reconnection is ours, because the library rewrites the filter
+
+`enableReconnect: true` does resubscribe — measured in Chrome, both a close
+frame and a TCP-level drop come back. What it also does is rewrite the filter on
+the way: `sub.filters[f].since = sub.lastEmitted + 1`. And `lastEmitted` is the
+maximum `created_at` **received**, set outside the `matchFilters` branch — so it
+is not "the newest event we accepted", it is the furthest-ahead clock in the
+room.
+
+One peer stamped five minutes fast, which no relay refuses because it is inside
+every forward window, and the resubscribe asks for `since: now + 301`. That is
+the `since` bug deleted from `game.ts`, coming back through the library on
+somebody else's clock.
+
+Worse, the filter object was shared across the per-relay subscriptions, and
+`matchFilters` runs client-side on every inbound event. Measured with two relays
+and only one of them dropped:
+
+```
+filter before any drop        {kinds, #t}
+filter after A reconnected    {kinds, #t, since: now+301}
+B's REQ on the wire           {kinds, #t}        <- B never resubscribed
+B's events delivered after    false              <- discarded locally
+```
+
+One relay's reconnect blinds all of them, against a filter B never sent.
+
+So the pool is constructed with `enableReconnect: false` and this file owns the
+reconnect: a fresh `subscribeMany` with a filter it built, cloned per relay.
+Backoff starts at 400ms rather than the library's ten seconds, and resets when
+the relay accepts the REQ.
+
+Routing matters, because two different things arrive on one `onclose` with
+nothing but wording to tell them apart:
+
+```
+/^relay connection .../   the socket died      reconnect, with backoff
+"closed by us|caller"     we closed it         neither
+anything else             a CLOSED verdict     report it, never retry
+```
+
+That last line is not hypothetical: resubscribing to a relay that declined your
+filter loops for the whole session, and the relay removed two commits ago would
+have done exactly that on every kind this game uses.
+
+**A subscription is identified by which `subscribe()` call it belongs to and
+which relay — not by the relay alone.** Keying on the URL made the second call
+close the first one's subscription on every relay, which is the read path going
+dark by way of the code written to keep it alive.
+
 ### The read path has to survive a dropped socket
 
 nostr-tools defaults `enableReconnect` to false. A hard close then runs

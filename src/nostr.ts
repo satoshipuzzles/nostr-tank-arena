@@ -528,12 +528,35 @@ export interface RelayLedger {
   lowestLimit: number
   /** Set when the relay closed our subscription, in its own words. */
   subscriptionClosed: string | null
+  /** Times the socket died under us and we rebuilt the subscription. */
+  reconnects: number
   /** Events/min we are pacing ourselves to right now, or 0 when unpaced. */
   pacedTo: number
   /** Times this relay has been muted, so a flapping relay is distinguishable. */
   mutes: number
   lastReason: string
   lastAt: number
+}
+
+/**
+ * Ids already delivered, bounded the way `Game.onEvent`'s set is and for the
+ * same reason: a redelivered death event must not count twice. Rotated rather
+ * than cleared, so the older half survives one rotation.
+ */
+function boundedIdSet(): { have(id: string): boolean } {
+  let now = new Set<string>()
+  let prev = new Set<string>()
+  return {
+    have(id: string): boolean {
+      if (now.has(id) || prev.has(id)) return true
+      now.add(id)
+      if (now.size > 5000) {
+        prev = now
+        now = new Set()
+      }
+      return false
+    },
+  }
 }
 
 export class Net {
@@ -557,8 +580,42 @@ export class Net {
    * to `lastEmitted + 1` on the way, so the replay is bounded by what we have
    * already seen rather than by the relay's retention.
    */
-  private pool = new SimplePool({ enableReconnect: true })
-  private closers: { close(): void }[] = []
+  /**
+   * Reconnection is ours, not the library's, and the difference is a filter.
+   *
+   * `enableReconnect: true` does resubscribe — measured in Chrome, both a close
+   * frame and a TCP-level drop come back. What it also does is rewrite the
+   * filter on the way: `sub.filters[f].since = sub.lastEmitted + 1`. And
+   * `lastEmitted` is the maximum `created_at` *received*, set outside the
+   * `matchFilters` branch, so it is not "the newest event we accepted" — it is
+   * the furthest-ahead clock in the room.
+   *
+   * One peer stamped 300 seconds fast, which no relay refuses because it is
+   * inside every forward window, and the resubscribe asks for `since: now+301`.
+   * That is the `since` bug this game deleted from `game.ts`, coming back
+   * through the library on somebody else's clock.
+   *
+   * Worse, the filter object is shared across the per-relay subscriptions and
+   * `matchFilters` runs client-side on every inbound event. Measured with two
+   * relays and only one of them dropped:
+   *
+   *   filter before any drop        {kinds, #t}
+   *   filter after A reconnected    {kinds, #t, since: now+301}
+   *   B's REQ on the wire           {kinds, #t}          <- never resubscribed
+   *   B's events delivered after    false                <- discarded locally
+   *
+   * One relay's reconnect blinds all of them, against a filter B never sent.
+   *
+   * So: the library does not reconnect, this class does, with a filter it built
+   * — and a clone per relay besides, because one object three subscriptions can
+   * mutate is a hazard whoever is writing to it.
+   */
+  private pool = new SimplePool({ enableReconnect: false })
+  private closers = new Map<string, { close(): void }>()
+  private resubTimers = new Set<ReturnType<typeof setTimeout>>()
+  private resubAttempts = new Map<string, number>()
+  private subGroups = 0
+  private disposed = false
   readonly relays: string[]
 
   /**
@@ -590,28 +647,6 @@ export class Net {
   private muteSpan = new Map<string, number>()
   /** Relays that closed our subscription rather than serving it. */
   private closedSubs = new Map<string, string>()
-  /**
-   * Ids already delivered by any relay, shared across all the subscriptions.
-   *
-   * Bounded the same way `Game.onEvent`'s is and for the same reason: a
-   * redelivered death event must not count twice. Rotated rather than cleared,
-   * so the older half survives one rotation.
-   */
-  private readonly seenIds = (() => {
-    let now = new Set<string>()
-    let prev = new Set<string>()
-    return {
-      have(id: string): boolean {
-        if (now.has(id) || prev.has(id)) return true
-        now.add(id)
-        if (now.size > 5000) {
-          prev = now
-          now = new Set()
-        }
-        return false
-      },
-    }
-  })()
   /** Relays that told us their number, and what we are doing about it. */
   private pace = new Map<string, RelayPace>()
   /** Consecutive publishes that every asked relay called malformed. */
@@ -759,14 +794,48 @@ export class Net {
    * because only this side knows which relay an event came from.
    */
   subscribe(filter: Filter, onevent: (e: Event, stored: boolean) => void): void {
-    for (const url of this.relays) {
-      let live = false
-      this.closers.push(
-        this.pool.subscribeMany([url], filter, {
-          onevent: (e: Event) => onevent(e, !live),
-          oneose: () => {
-            live = true
-          },
+    // One dedupe set per call, shared across that call's relays and no further.
+    //
+    // It was one set for the whole `Net`, and that is wrong in a way nothing
+    // else here would have shown: nostr-tools consults `alreadyHaveEvent`
+    // *before* it runs `matchFilters`. `subscribe()` is called twice with
+    // disjoint filters — the live kinds and the stored claim — and both run on
+    // the same socket, so whichever subscription sees an event first marks it
+    // seen, and if its own filter then rejects it the other subscription is
+    // never offered it at all. Every claim could be swallowed by the live
+    // subscription and every tick by the claim one.
+    const seen = boundedIdSet()
+    // `subscribe()` is called more than once with different filters, so a
+    // subscription is identified by which call it belongs to *and* which relay
+    // — not by the relay alone. Keying on the URL made the second call close
+    // the first one's subscription on every relay, which is the read path going
+    // dark by way of the code written to keep it alive.
+    const group = this.subGroups++
+    for (const url of this.relays) this.openSub(group, url, filter, onevent, seen)
+  }
+
+  private openSub(
+    group: number,
+    url: string,
+    filter: Filter,
+    onevent: (e: Event, stored: boolean) => void,
+    seen: { have(id: string): boolean },
+  ): void {
+    if (this.disposed) return
+    let live = false
+    const key = `${group}:${url}`
+    this.closers.get(key)?.close()
+    this.closers.set(
+      key,
+      // A clone, so nothing downstream can reach the caller's object or any
+      // other relay's copy of it.
+      this.pool.subscribeMany([url], { ...filter }, {
+        onevent: (e: Event) => onevent(e, !live),
+        oneose: () => {
+          live = true
+          // The relay took the filter. Whatever went wrong before is over.
+          this.resubAttempts.set(key, 0)
+        },
           // One subscription per relay costs nostr-tools' cross-relay dedupe:
           // its `_knownIds` is allocated per `subscribeMany` call, so three
           // calls means three sets and every event arrives about three times.
@@ -774,21 +843,39 @@ export class Net {
           // rotates on a fixed *count*, so three times the traffic is a third
           // of the dedupe window in time. Harmless while nothing replays;
           // reconnection replays. One shared set puts the window back.
-          alreadyHaveEvent: (id: string) => this.seenIds.have(id),
-          onclose: (reasons: { url: string; reason: string }[]) => {
-            const reason = reasons?.[0]?.reason ?? 'closed without a reason'
-            // A `CLOSED` frame is a verdict — the relay read the filter and
-            // declined it, in its own words. A dropped socket is silence, and
-            // nostr-tools supplies the wording for those itself. This thread's
-            // own rule is that silence is not a verdict, so they are kept
-            // apart rather than both rendered as "the relay said".
-            if (/^relay connection/i.test(reason)) return
-            this.closedSubs.set(url, reason)
-            this.entry(url).subscriptionClosed = reason
-          },
-        }),
-      )
-    }
+        alreadyHaveEvent: (id: string) => seen.have(id),
+        onclose: (reasons: { url: string; reason: string }[]) => {
+          const reason = reasons?.[0]?.reason ?? 'closed without a reason'
+          if (this.disposed || /closed by (us|caller)/i.test(reason)) return
+
+          // Two things arrive on this one callback with nothing but wording to
+          // tell them apart, which is worth stating because the wording is
+          // nostr-tools' and can change underneath this.
+          if (/^relay connection/i.test(reason)) {
+            // The socket died. Silence, not a verdict — ours to restore.
+            const attempt = (this.resubAttempts.get(key) ?? 0) + 1
+            this.resubAttempts.set(key, attempt)
+            this.entry(url).reconnects++
+            // The library's own backoff starts at ten seconds, which is ten
+            // seconds blind for a wifi blip. Start fast, give up slowly.
+            const delay = Math.min(400 * 2 ** (attempt - 1), 15_000)
+            const t = setTimeout(() => {
+              this.resubTimers.delete(t)
+              this.openSub(group, url, filter, onevent, seen)
+            }, delay)
+            this.resubTimers.add(t)
+            return
+          }
+
+          // A `CLOSED` frame is a verdict: the relay read the filter and
+          // declined it, in its own words. Resubscribing to that loops forever
+          // — which is exactly what the relay removed two PRs ago would have
+          // made this client do, on every kind it uses.
+          this.closedSubs.set(url, reason)
+          this.entry(url).subscriptionClosed = reason
+        },
+      }),
+    )
   }
 
   /** Relays that hung up on our subscription, in their own words. */
@@ -1160,7 +1247,7 @@ export class Net {
     if (!led) {
       led = {
         url, accepted: 0, refused: 0, noVerdict: 0, malformed: 0, unknown: 0,
-        lowestLimit: 0, pacedTo: 0, subscriptionClosed: null,
+        lowestLimit: 0, pacedTo: 0, subscriptionClosed: null, reconnects: 0,
         mutes: 0, lastReason: '', lastAt: 0,
       }
       this.ledger.set(url, led)
@@ -1251,8 +1338,13 @@ export class Net {
   }
 
   close(): void {
-    for (const c of this.closers) c.close()
-    this.closers = []
+    // Set first: a socket torn down by `pool.close` reports as a dropped one,
+    // and without this the reconnect loop would fight the shutdown.
+    this.disposed = true
+    for (const t of this.resubTimers) clearTimeout(t)
+    this.resubTimers.clear()
+    for (const c of this.closers.values()) c.close()
+    this.closers.clear()
     this.pool.close(this.relays)
   }
 }
