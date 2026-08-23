@@ -10,8 +10,21 @@
 
 import type { Event, Filter } from 'nostr-tools'
 import { ARENA_H, ARENA_W, SPAWNS, hasLineOfSight } from './arena'
+import {
+  PICKUPS,
+  PICKUP_RADIUS,
+  applyPickup,
+  claimTag,
+  hasBuff,
+  noBuffs,
+  scheduleFor,
+  type Buffs,
+  type ClaimPayload,
+  type Pickup,
+} from './pickups'
 import { Identity, Net } from './nostr'
 import {
+  KIND_CLAIM,
   KIND_DEATH,
   KIND_SESSION,
   KIND_SHELL,
@@ -41,8 +54,10 @@ import type { Controls } from './input'
 const TICK_MS = 100 // 10Hz state broadcast
 /** Kills in a row that earn a full repair. */
 const STREAK_REPAIR = 3
-/** Seconds without taking a hit before one point of hull comes back. */
-const REGEN_AFTER = 8
+/** Kills in a row that earn rapid fire, and a glow so everyone can see it. */
+const STREAK_RAPID = 5
+/** How long the streak reward's rapid fire lasts. */
+const STREAK_RAPID_MS = 14_000
 /** How long the podium sits between rounds. */
 export const INTERMISSION_MS = 9_000
 const SESSION_REBROADCAST_MS = 12_000
@@ -108,10 +123,18 @@ export class Game {
   /** Consecutive kills without dying. Resets on death, drives the repair. */
   streak = 0
   bestStreak = 0
-  /** performance.now() of the last hit we took, for the regen timer. */
-  private lastHitAt = 0
   /** The block this round belongs to. 0 until the chain tip arrives. */
   round = 0
+  /** The tip's hash, which seeds the pickup schedule. */
+  roundHash = ''
+  /** performance.now() when this round started, for the pickup clock. */
+  roundStartedAt = performance.now()
+  /** Pickups currently on the board, by id. Derived, never received. */
+  readonly pickups = new Map<string, Pickup>()
+  /** Timed effects on our own tank. */
+  readonly buffs: Buffs = noBuffs()
+  /** A big centre-screen message. The HUD clears it after a couple of seconds. */
+  notice: { text: string; sub: string; hue: number; at: number } | null = null
   /** Set when a block lands; the podium is up until it clears. */
   lastRound: RoundResult | null = null
   intermissionUntil = 0
@@ -151,7 +174,10 @@ export class Game {
   async start(): Promise<void> {
     const since = Math.floor(Date.now() / 1000) - 30
     const filter: Filter = {
-      kinds: [KIND_SESSION, KIND_STATE, KIND_SHELL, KIND_DEATH],
+      // KIND_CLAIM is stored rather than ephemeral, so `since` genuinely
+      // backfills it for a client that just connected — which is the entire
+      // reason it is not on an ephemeral kind like everything else here.
+      kinds: [KIND_SESSION, KIND_STATE, KIND_SHELL, KIND_DEATH, KIND_CLAIM],
       '#t': [roomTag(this.room)],
       since,
     }
@@ -210,6 +236,8 @@ export class Game {
         return this.onShell(e)
       case KIND_DEATH:
         return this.onDeath(e)
+      case KIND_CLAIM:
+        return this.onClaim(e)
     }
   }
 
@@ -346,47 +374,32 @@ export class Game {
    * hull points was already able to do exactly that.
    */
   private onOwnKill(): void {
+    const now = performance.now()
     this.streak++
     this.bestStreak = Math.max(this.bestStreak, this.streak)
-    if (this.streak === STREAK_REPAIR && this.tank.hp < MAX_HP) {
+
+    if (this.streak === STREAK_REPAIR) {
       this.tank.hp = MAX_HP
-      this.repairedAt = performance.now()
-      this.pushFeed(`${STREAK_REPAIR} in a row — hull repaired`)
-    } else if (this.streak > STREAK_REPAIR) {
+      this.repairedAt = now
+      this.announce(`${STREAK_REPAIR} IN A ROW`, 'hull repaired', 130)
+    } else if (this.streak === STREAK_RAPID) {
+      this.buffs.rapidUntil = Math.max(this.buffs.rapidUntil, now) + STREAK_RAPID_MS
+      this.announce(`${STREAK_RAPID} IN A ROW`, 'rapid fire — and everyone can see you', 20)
+    } else if (this.streak > STREAK_RAPID) {
+      this.announce(`${this.streak} IN A ROW`, 'unstoppable', 45)
+    } else {
       this.pushFeed(`${this.streak} in a row`)
     }
   }
 
-  /** Set when a repair or a regen tick lands, so the renderer can show it. */
-  repairedAt = 0
-
-  /**
-   * Seconds without being hit before a hull point comes back.
-   *
-   * A field rather than a constant because it is a balance number, and because
-   * it interacts with everything: set it too low and a duel cannot be finished,
-   * which is exactly what happened the first time the smoke test ran with regen
-   * enabled — the victim healed between shells and no kill ever landed. The
-   * test now turns it off to assert the kill path and back on to assert regen,
-   * rather than the two quietly fighting.
-   */
-  regenAfter = REGEN_AFTER
-
-  /**
-   * One hull point back after a spell without being hit.
-   *
-   * Changes the pacing more than it looks: it makes breaking off a losing fight
-   * a real option instead of a slow death, which on a board this open is the
-   * difference between four players circling and four players committing.
-   */
-  private regen(now: number): void {
-    if (this.tank.dead || this.tank.hp >= MAX_HP) return
-    if (now - this.lastHitAt < this.regenAfter * 1000) return
-    this.tank.hp++
-    this.lastHitAt = now
-    this.repairedAt = now
-    this.pushFeed(`patched up — ${this.tank.hp}/${MAX_HP}`)
+  /** A banner, and a line in the feed. Bigger than the feed alone deserves. */
+  private announce(text: string, sub: string, hue: number): void {
+    this.notice = { text, sub, hue, at: performance.now() }
+    this.pushFeed(`${text.toLowerCase()} — ${sub}`)
   }
+
+  /** Set when a repair lands, so the renderer can show it. */
+  repairedAt = 0
 
   private pushFeed(text: string): void {
     this.feed.push({ text, at: performance.now() })
@@ -401,10 +414,12 @@ export class Game {
     if (this.tank.dead) {
       if (now >= this.tank.respawnAt) this.respawn()
     } else {
-      stepTank(this.tank, controls.throttle, controls.steer, controls.aim, dt)
+      const boost = hasBuff(this.buffs, 'speedUntil', now) ? 1.45 : 1
+      stepTank(this.tank, controls.throttle, controls.steer, controls.aim, dt, boost)
       if (controls.fire && now >= this.tank.reloadAt) this.fire(now)
-      this.regen(now)
+      this.sweepPickups(now)
     }
+    this.refreshPickups(now)
 
     for (const shell of this.shells.values()) {
       stepShell(shell, dt)
@@ -439,8 +454,15 @@ export class Game {
       shellHits(shell, this.tank.x, this.tank.y)
     ) {
       this.shells.delete(shell.id)
+      // A shield eats the shot and is spent. Same authority as HP: our own
+      // tank decides what happened to it, and the result rides out in the next
+      // state tick like any other change.
+      if (hasBuff(this.buffs, 'shieldUntil', performance.now())) {
+        this.buffs.shieldUntil = 0
+        this.announce('SHIELD BROKE', 'that one was free', 200)
+        return
+      }
       this.tank.hp--
-      this.lastHitAt = performance.now()
       if (this.tank.hp <= 0) this.die(shell.owner)
       return
     }
@@ -455,7 +477,7 @@ export class Game {
   }
 
   private fire(now: number): void {
-    this.tank.reloadAt = now + RELOAD * 1000
+    this.tank.reloadAt = now + RELOAD * 1000 * (hasBuff(this.buffs, 'rapidUntil', now) ? 0.42 : 1)
     const x = this.tank.x + Math.cos(this.tank.gun) * MUZZLE_OFFSET
     const y = this.tank.y + Math.sin(this.tank.gun) * MUZZLE_OFFSET
     const shell = spawnShell(randomId(), this.identity.sessionPubkey, x, y, this.tank.gun)
@@ -468,7 +490,9 @@ export class Game {
     this.tank.dead = true
     this.tank.hp = 0
     this.streak = 0
-    this.lastHitAt = performance.now()
+    this.buffs.rapidUntil = 0
+    this.buffs.shieldUntil = 0
+    this.buffs.speedUntil = 0
     this.tank.respawnAt = performance.now() + RESPAWN_DELAY * 1000
     this.deaths++
     const payload: DeathPayload = {
@@ -625,6 +649,14 @@ export class Game {
    * tip, so they all do this within a few seconds of each other. That is the
    * whole reason the block is the clock.
    */
+  /** A new block: reset the round clock and the derived pickup schedule. */
+  beginRound(height: number, hash: string): void {
+    this.round = height
+    this.roundHash = hash
+    this.roundStartedAt = performance.now()
+    this.pickups.clear()
+  }
+
   endRound(height: number, layoutName: string): RoundResult {
     const result: RoundResult = {
       height: this.round || height - 1,
@@ -639,6 +671,9 @@ export class Game {
     this.deaths = 0
     this.streak = 0
     this.bestStreak = 0
+    this.buffs.rapidUntil = 0
+    this.buffs.shieldUntil = 0
+    this.buffs.speedUntil = 0
     // Peer tallies are ours to keep, not theirs to send, so they reset here too.
     for (const peer of this.peers.values()) {
       peer.kills = 0
@@ -646,6 +681,93 @@ export class Game {
     }
     this.pushFeed(`block ${height} — new round on ${layoutName}`)
     return result
+  }
+
+  // ---------------------------------------------------------------- pickups
+
+  /**
+   * Rebuild the set of live pickups from the round clock.
+   *
+   * Derived every frame rather than stored, because "derived" is what makes it
+   * agree across clients with nothing on the wire. `taken` is the only piece of
+   * state that is not a function of the block hash, and it is carried forward
+   * across rebuilds so a claimed pad stays empty until the next wave.
+   */
+  private refreshPickups(now: number): void {
+    if (!this.roundHash) return
+    const elapsed = (now - this.roundStartedAt) / 1000
+    const want = scheduleFor(this.roundHash, elapsed)
+    const wanted = new Set(want.map((p) => p.id))
+
+    for (const id of [...this.pickups.keys()]) {
+      if (!wanted.has(id)) this.pickups.delete(id)
+    }
+    for (const pickup of want) {
+      const existing = this.pickups.get(pickup.id)
+      if (existing) continue
+      this.pickups.set(pickup.id, pickup)
+    }
+  }
+
+  /** Anything we are standing on, taken immediately and announced afterwards. */
+  private sweepPickups(now: number): void {
+    for (const pickup of this.pickups.values()) {
+      if (pickup.taken) continue
+      const dx = pickup.at.x - this.tank.x
+      const dy = pickup.at.y - this.tank.y
+      if (dx * dx + dy * dy > PICKUP_RADIUS * PICKUP_RADIUS) continue
+
+      pickup.taken = true
+      const spec = PICKUPS[pickup.kind]
+      if (pickup.kind === 'repair') {
+        this.tank.hp = MAX_HP
+        this.repairedAt = now
+      } else {
+        applyPickup(this.buffs, pickup.kind, now)
+      }
+      this.announce(spec.label.toUpperCase(), pickup.kind === 'repair' ? 'full hull' : `${spec.seconds}s`, spec.hue)
+      this.publishClaim(pickup)
+    }
+  }
+
+  /**
+   * Tell the room a pad is gone.
+   *
+   * Stored, not ephemeral, and that is the whole point: an ephemeral claim
+   * never reaches a client that connected a moment later and cannot be asked
+   * for afterwards, so late joiners would see pickups that are not there. The
+   * NIP-40 `expiration` keeps the relay from holding game litter — the pad is
+   * meaningless two minutes after the wave that made it.
+   *
+   * The `d` tag names the claimant as well as the pickup, so two claims on the
+   * same pad coexist instead of one replacing the other. A relay that kept only
+   * the last one would be quietly deciding who won.
+   */
+  private publishClaim(pickup: Pickup): void {
+    const payload: ClaimPayload = { p: pickup.id, kind: pickup.kind }
+    this.net.publish(
+      this.identity.signAsSession({
+        kind: KIND_CLAIM,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [
+          ['d', claimTag(pickup.id, this.identity.sessionPubkey)],
+          ['t', roomTag(this.room)],
+          ['expiration', String(Math.floor(Date.now() / 1000) + 120)],
+        ],
+        content: JSON.stringify(payload),
+      }),
+    )
+  }
+
+  private onClaim(e: Event): void {
+    if (e.pubkey === this.identity.sessionPubkey) return
+    const p = parsePayload<ClaimPayload>(e.content)
+    if (!p || typeof p.p !== 'string') return
+    const pickup = this.pickups.get(p.p)
+    if (!pickup || pickup.taken) return
+    pickup.taken = true
+    const who = this.peers.get(e.pubkey)?.name ?? 'someone'
+    this.pushFeed(`${who} took ${PICKUPS[pickup.kind]?.label ?? 'a pickup'}`)
   }
 
   /** True while the podium is up. */

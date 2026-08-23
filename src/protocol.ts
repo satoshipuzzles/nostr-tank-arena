@@ -13,6 +13,15 @@ export const KIND_STATE = 21000 // ephemeral: tank state tick
 export const KIND_SHELL = 21001 // ephemeral: a shell was fired
 export const KIND_DEATH = 21002 // ephemeral: victim reports its own death
 export const KIND_SCORE = 30078 // addressable (NIP-78): persistent score record
+/**
+ * Pickup claim. Same NIP-78 kind, different `d` namespace — and stored rather
+ * than ephemeral on purpose: relays forward ephemeral events only to whoever is
+ * connected at that instant and cannot be asked for them afterwards, so a
+ * client that joined a moment later would see pickups that are not there. It
+ * carries a NIP-40 `expiration` so the relay drops it once it stops meaning
+ * anything.
+ */
+export const KIND_CLAIM = 30078
 
 export const SCORE_D_TAG = 'nostr-tank-arena/score'
 

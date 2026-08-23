@@ -2,18 +2,17 @@
 // what lets shells be re-simulated locally from a single "I fired" event
 // instead of streaming their positions.
 //
-// "Identical on every client" used to be easy: there was one map, compiled in.
-// Now there are four, and which one is in play comes out of the current Bitcoin
-// block hash. That is the whole synchronisation mechanism. Nobody votes, nobody
-// announces a map, and there is no host to trust — two clients that agree on
-// the tip agree on the geometry, because the geometry is a pure function of it.
+// Which board is in play comes out of the current Bitcoin block hash. That is
+// the whole synchronisation mechanism: nobody votes, nobody announces a map,
+// there is no host to trust, and two clients that agree on the tip agree on the
+// geometry because the geometry is a pure function of it.
 //
-// `WALLS` and `SPAWNS` are therefore mutable arrays rather than constants, and
-// they are mutated **in place** so that every module holding a reference (the
-// simulation, the renderer) sees the new layout without re-importing anything.
-
-export const ARENA_W = 1600
-export const ARENA_H = 1200
+// Boards are different *sizes* as well as different shapes. `ARENA_W` and
+// `ARENA_H` are therefore live bindings rather than constants — an ES module
+// export that is reassigned updates everywhere it was imported, so the
+// simulation clamps to the new board and the renderer refits its camera without
+// anything being passed around. `WALLS`, `SPAWNS` and `PADS` are mutated in
+// place for the same reason.
 
 export interface Rect {
   x: number
@@ -22,98 +21,132 @@ export interface Rect {
   h: number
 }
 
+export interface Pt {
+  x: number
+  y: number
+}
+
 const BORDER = 24
 
-/** Mirror a rect through the arena centre, giving 180-degree rotational symmetry. */
-const flip = (r: Rect): Rect => ({
-  x: ARENA_W - r.x - r.w,
-  y: ARENA_H - r.y - r.h,
+/** The outer fence, sized to the board. */
+const ring = (w: number, h: number): Rect[] => [
+  { x: 0, y: 0, w, h: BORDER },
+  { x: 0, y: h - BORDER, w, h: BORDER },
+  { x: 0, y: 0, w: BORDER, h },
+  { x: w - BORDER, y: 0, w: BORDER, h },
+]
+
+/** Mirror through the centre, which is what makes a board fair. */
+const flip = (r: Rect, w: number, h: number): Rect => ({
+  x: w - r.x - r.w,
+  y: h - r.y - r.h,
   w: r.w,
   h: r.h,
 })
 
-/** Every layout gets the same outer fence. */
-const RING: Rect[] = [
-  { x: 0, y: 0, w: ARENA_W, h: BORDER },
-  { x: 0, y: ARENA_H - BORDER, w: ARENA_W, h: BORDER },
-  { x: 0, y: 0, w: BORDER, h: ARENA_H },
-  { x: ARENA_W - BORDER, y: 0, w: BORDER, h: ARENA_H },
-]
+const flipPt = (p: Pt, w: number, h: number): Pt => ({ x: w - p.x, y: h - p.y })
 
-/** Half a layout, mirrored through the centre to guarantee it is fair. */
-const symmetric = (half: Rect[]): Rect[] => [...RING, ...half, ...half.map(flip)]
-
-export interface Layout {
+export interface LayoutSpec {
   name: string
-  walls: Rect[]
-  spawns: { x: number; y: number }[]
+  w: number
+  h: number
+  /** Half the cover. The other half is this, rotated 180 degrees. */
+  cover: (w: number, h: number) => Rect[]
+  spawns: (w: number, h: number) => Pt[]
+  /** Where pickups can appear. Mirrored, so no corner is closer to more of them. */
+  pads: (w: number, h: number) => Pt[]
 }
 
-const CORNERS = [
-  { x: 170, y: 170 },
-  { x: ARENA_W - 170, y: 170 },
-  { x: 170, y: ARENA_H - 170 },
-  { x: ARENA_W - 170, y: ARENA_H - 170 },
+const corners = (w: number, h: number): Pt[] => [
+  { x: 175, y: 175 },
+  { x: w - 175, y: 175 },
+  { x: 175, y: h - 175 },
+  { x: w - 175, y: h - 175 },
 ]
 
 /**
- * Four boards. Each is 180-degree rotationally symmetric, so no corner is a
- * better place to spawn than any other — with four players and a block-long
- * round, an unfair map is not something anyone can play around.
+ * Four boards, three of them bigger than the original.
+ *
+ * Size is part of the variety: 1600x1200 is a knife fight with four players in
+ * it, and 2000x1500 gives you somewhere to go. Every board is 180-degree
+ * rotationally symmetric, because with a round that lasts a whole block an
+ * unfair spawn is not something anyone can play around.
  */
-export const LAYOUTS: Layout[] = [
+export const LAYOUTS: LayoutSpec[] = [
   {
-    // The original. Long sightlines broken by a cross you have to commit to.
     name: 'Crossroads',
-    walls: symmetric([
-      { x: ARENA_W / 2 - 150, y: ARENA_H / 2 - 24, w: 150, h: 48 },
-      { x: ARENA_W / 2 - 24, y: ARENA_H / 2 - 150, w: 48, h: 150 },
+    w: 1600,
+    h: 1200,
+    cover: (w, h) => [
+      { x: w / 2 - 150, y: h / 2 - 24, w: 150, h: 48 },
+      { x: w / 2 - 24, y: h / 2 - 150, w: 48, h: 150 },
       { x: 300, y: 240, w: 220, h: 48 },
       { x: 300, y: 240, w: 48, h: 220 },
       { x: 1080, y: 240, w: 220, h: 48 },
       { x: 1252, y: 240, w: 48, h: 220 },
       { x: 760, y: 300, w: 80, h: 80 },
-    ]),
-    spawns: CORNERS,
+    ],
+    spawns: corners,
+    pads: (w, h) => [
+      { x: w / 2, y: 210 },
+      { x: 420, y: h / 2 },
+    ],
   },
   {
-    // Open middle, heavy cover on the flanks. Rewards crossing fast.
     name: 'The Lanes',
-    walls: symmetric([
-      { x: 260, y: 380, w: 420, h: 48 },
-      { x: 260, y: 620, w: 420, h: 48 },
-      { x: 700, y: 150, w: 48, h: 300 },
-      { x: ARENA_W / 2 - 90, y: ARENA_H / 2 - 24, w: 90, h: 48 },
-    ]),
-    spawns: CORNERS,
+    w: 2000,
+    h: 1400,
+    cover: (w, h) => [
+      { x: 300, y: 430, w: 520, h: 48 },
+      { x: 300, y: 730, w: 520, h: 48 },
+      { x: 880, y: 160, w: 48, h: 380 },
+      { x: w / 2 - 110, y: h / 2 - 24, w: 110, h: 48 },
+      { x: 1180, y: 430, w: 220, h: 48 },
+    ],
+    spawns: corners,
+    pads: (w, h) => [
+      { x: w / 2, y: h / 2 - 230 },
+      { x: 560, y: 580 },
+    ],
   },
   {
-    // A forest of pillars. Shells bounce once, so this one is about ricochets.
     name: 'Pillars',
-    walls: symmetric([
-      { x: 300, y: 260, w: 96, h: 96 },
-      { x: 620, y: 260, w: 96, h: 96 },
-      { x: 300, y: 540, w: 96, h: 96 },
-      { x: 620, y: 540, w: 96, h: 96 },
-      { x: 940, y: 260, w: 96, h: 96 },
-      { x: 460, y: 400, w: 96, h: 96 },
-    ]),
-    spawns: CORNERS,
+    w: 1950,
+    h: 1450,
+    cover: () => [
+      { x: 330, y: 300, w: 104, h: 104 },
+      { x: 700, y: 300, w: 104, h: 104 },
+      { x: 330, y: 640, w: 104, h: 104 },
+      { x: 700, y: 640, w: 104, h: 104 },
+      { x: 1070, y: 300, w: 104, h: 104 },
+      { x: 515, y: 470, w: 104, h: 104 },
+      { x: 885, y: 470, w: 104, h: 104 },
+    ],
+    spawns: corners,
+    pads: (w, h) => [
+      { x: w / 2, y: h / 2 },
+      { x: 200, y: h / 2 },
+    ],
   },
   {
-    // A ring you fight around, with four gaps. Closest thing to a board game.
     name: 'The Ring',
-    walls: symmetric([
-      { x: 440, y: 320, w: 340, h: 48 },
-      { x: 440, y: 320, w: 48, h: 220 },
-      { x: 1112, y: 320, w: 48, h: 220 },
-      { x: ARENA_W / 2 - 60, y: ARENA_H / 2 - 60, w: 120, h: 120 },
-    ]),
-    spawns: [
-      { x: 170, y: ARENA_H / 2 },
-      { x: ARENA_W - 170, y: ARENA_H / 2 },
-      { x: ARENA_W / 2, y: 150 },
-      { x: ARENA_W / 2, y: ARENA_H - 150 },
+    w: 1900,
+    h: 1400,
+    cover: (w, h) => [
+      { x: 520, y: 380, w: 420, h: 48 },
+      { x: 520, y: 380, w: 48, h: 260 },
+      { x: w - 568, y: 380, w: 48, h: 260 },
+      { x: w / 2 - 70, y: h / 2 - 70, w: 140, h: 140 },
+    ],
+    spawns: (w, h) => [
+      { x: 190, y: h / 2 },
+      { x: w - 190, y: h / 2 },
+      { x: w / 2, y: 170 },
+      { x: w / 2, y: h - 170 },
+    ],
+    pads: (w, h) => [
+      { x: w / 2, y: h / 2 - 300 },
+      { x: 330, y: 330 },
     ],
   },
 ]
@@ -121,27 +154,27 @@ export const LAYOUTS: Layout[] = [
 /**
  * Which board a block hash calls for.
  *
- * The last byte, so it moves every block and no client has to be told. A hash
- * we do not have yet (offline, or the tip is still loading) falls back to
- * layout 0, which is the map this game shipped with.
+ * The last byte, so it moves every block and nobody has to be told. A hash we
+ * do not have yet falls back to layout 0, which is the map this game shipped
+ * with.
  */
 export function layoutForBlock(hash: string | null): number {
   if (!hash || !/^[0-9a-f]{8,}$/i.test(hash)) return 0
   return parseInt(hash.slice(-2), 16) % LAYOUTS.length
 }
 
-/**
- * The geometry in play. Mutated in place on purpose — `sim.ts` and `render.ts`
- * both hold this exact array, and re-assigning the binding would leave them
- * colliding against the previous board.
- */
-export const WALLS: Rect[] = []
-export const SPAWNS: { x: number; y: number }[] = []
+// --------------------------------------------------------- the current board
 
-/** Name of the layout currently loaded, for the HUD. */
+/** Live bindings. Reassigned by `setLayout`, and every importer sees it. */
+export let ARENA_W = LAYOUTS[0].w
+export let ARENA_H = LAYOUTS[0].h
 export let layoutName = ''
 
-/** Listeners that need to rebuild something when the board changes. */
+export const WALLS: Rect[] = []
+export const SPAWNS: Pt[] = []
+/** Pickup pads. Positions only — what spawns on them is decided in `pickups.ts`. */
+export const PADS: Pt[] = []
+
 const listeners: ((index: number) => void)[] = []
 
 export function onLayoutChange(fn: (index: number) => void): void {
@@ -154,19 +187,29 @@ export function setLayout(index: number): void {
   const next = ((index % LAYOUTS.length) + LAYOUTS.length) % LAYOUTS.length
   if (next === currentLayout) return
   currentLayout = next
-  const layout = LAYOUTS[next]
+  const spec = LAYOUTS[next]
+
+  ARENA_W = spec.w
+  ARENA_H = spec.h
+  layoutName = spec.name
+
+  const half = spec.cover(spec.w, spec.h)
   WALLS.length = 0
-  WALLS.push(...layout.walls)
+  WALLS.push(...ring(spec.w, spec.h), ...half, ...half.map((r) => flip(r, spec.w, spec.h)))
+
   SPAWNS.length = 0
-  SPAWNS.push(...layout.spawns)
-  layoutName = layout.name
+  SPAWNS.push(...spec.spawns(spec.w, spec.h))
+
+  const pads = spec.pads(spec.w, spec.h)
+  PADS.length = 0
+  PADS.push(...pads, ...pads.map((p) => flipPt(p, spec.w, spec.h)))
+
   for (const fn of listeners) fn(next)
 }
 
 export const currentLayoutIndex = (): number => currentLayout
 
-// Load the default board at import time, so a client that never reaches a block
-// API still has a playable arena.
+// A playable board before any block arrives.
 setLayout(0)
 
 const clamp = (v: number, lo: number, hi: number) => (v < lo ? lo : v > hi ? hi : v)
@@ -191,7 +234,6 @@ export function resolveCircle(pos: { x: number; y: number }, radius: number): vo
         pos.x += (dx / d) * (radius - d)
         pos.y += (dy / d) * (radius - d)
       } else {
-        // Centre is inside the box: eject along the shallowest face.
         const left = pos.x - w.x
         const right = w.x + w.w - pos.x
         const top = pos.y - w.y

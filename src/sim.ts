@@ -131,6 +131,8 @@ export function stepTank(
   steer: number,
   aim: number | null,
   dt: number,
+  /** Overdrive, from a pickup. 1 is the normal tank. */
+  speedMul = 1,
 ): void {
   t.hull += steer * TURN_RATE * dt
   if (aim !== null) {
@@ -139,7 +141,7 @@ export function stepTank(
     t.gun += Math.abs(d) < max ? d : Math.sign(d) * max
   }
 
-  const speed = throttle >= 0 ? throttle * FORWARD_SPEED : throttle * REVERSE_SPEED
+  const speed = (throttle >= 0 ? throttle * FORWARD_SPEED : throttle * REVERSE_SPEED) * speedMul
   t.x += Math.cos(t.hull) * speed * dt
   t.y += Math.sin(t.hull) * speed * dt
 

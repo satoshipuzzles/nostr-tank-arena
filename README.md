@@ -106,6 +106,14 @@ each other.
 Gamepad: left stick drives, right stick aims, right trigger or `A` fires. It
 plays fine on a TV browser with a controller, which is the point.
 
+Two steering schemes, switchable in the lobby. **Direct** (the default) reads the
+keys or the stick as a *direction on the board*: press up-left and the tank turns
+toward up-left and goes. **Tank** is the classic one — `A`/`D` rotate the hull,
+`W`/`S` drive it. Direct is the default because tank controls are the thing
+everybody bounced off; you spend your first minute pointing the wrong way instead
+of shooting anybody. The hull still physically rotates at `TURN_RATE` either way,
+so a tank still feels heavy — only the input changes.
+
 ## Protocol
 
 Everything travels as Nostr events. High-frequency data uses **ephemeral kinds**
@@ -120,11 +128,37 @@ subscribes you to an entire match.
 | `21001` | shell fired | ephemeral | session key | `{ id, t0, x, y, a }` |
 | `21002` | death report | ephemeral | session key | `{ t, k, x, y }` |
 | `30078` | score record | addressable (NIP-78) | **real npub** | `{ kills, deaths, room, at }` |
+| `30078` | pickup claim | addressable (NIP-78) + NIP-40 | session key | `{ id, kind, at }` |
 
 Field key: `s` session pubkey, `t`/`t0` sender clock in ms, `h` hull heading,
 `g` gun heading, `d` dead flag, `a` shell angle, `k` killer's session pubkey
-(`null` for a self-destruct). Angles are radians, positions are arena pixels in a
-1600×1200 space. Score records use `d` tag `nostr-tank-arena/score`.
+(`null` for a self-destruct). Angles are radians, positions are arena pixels — the
+board size is per-layout and lives in `ARENA_W`/`ARENA_H`. Score records use `d`
+tag `nostr-tank-arena/score`; the per-block record uses
+`nostr-tank-arena/score/<height>`, and a pickup claim uses
+`nostr-tank-arena/claim/<blockhash-prefix>:<wave>:<pad>:<claimant>`.
+
+### Pickups, and why the claim is stored rather than ephemeral
+
+A pickup's pad, its type and its spawn time are a pure function of the block hash
+and the round clock, so every client computes the same schedule from a number it
+already has. Nothing is announced and nothing is voted on. Only the *claim* is
+published.
+
+That claim is a **stored** event with a NIP-40 `expiration`, not an ephemeral one.
+Relays forward ephemeral events only to whoever is connected at that instant and
+cannot be asked for them afterwards, so a client that joined 200ms later would
+drive over a shield that is already gone. A stored claim can be `REQ`ed by a late
+joiner, and the expiration means the relay drops the litter on schedule.
+
+Nothing here is ordered by `created_at`, because the publisher picks it. A
+simultaneous double-grab is resolved by not resolving it: both players get the
+pickup. The window is one relay round trip, and a party game that occasionally
+hands two people a shield is better than one where grabbing an item stalls for
+200ms while the network decides. The `d` tag includes the claimant so two claims
+for the same pad coexist instead of overwriting each other — a relay keeping only
+the last one would be silently picking a winner, which is exactly the hidden
+authority this game does not want.
 
 ### Two keys per player
 
@@ -244,16 +278,71 @@ Two things follow from this and both are in the client:
   events a second delays the relays that are listening. Subscriptions stay open:
   refusing our events says nothing about whether it forwards somebody else's.
 
-**Run your own relay if you care about this.** No cap you did not set, and the
-whole class of problem goes away — [newlay](https://code.relay.tools/opensauce/newlay)
-takes whatever kinds you throw at it, and [feeds.relay.tools](https://feeds.relay.tools)
-will host one. Put yours first in the Relays box and leave the public ones as
-fallback.
+**Run your own relay if you care about this** — but do not assume "my relay"
+means "no limit". It means the limit is yours to set, and the defaults are
+*lower* than the public relays measured above.
+
+[cowboy](https://code.relay.tools/opensauce/newlay), who wrote newlay, walked
+through the traps. Recording them here so nobody has to rediscover them:
+
+- newlay's built-in default `publishing_rate_limit` is **60 events/min**, and the
+  docker-compose quickstart sets `[tier.anon]` to **30**. One player at 10Hz needs
+  **600**. Boot the quickstart, point the game at it, and you would measure worse
+  rejection than the public relays and conclude your own relay was junk.
+- `messages_per_min` is a **separate** cap on inbound frames (default 240). It
+  bites independently even with the rate limit raised.
+- newlay scores each connection's behaviour and **multiplies your rate limits by
+  it**: a rate hit is −2, a rejected event is −4, and below 15 you are at 0.1× of
+  whatever you configured. A client that overruns the cap gets its cap lowered,
+  which makes it overrun again. That is the same invisible-degradation shape as
+  the swallowed OK frames above, self-inflicted. Pin it off on a game tier.
+- `[ip_gate]` is per-**IP** and shared across every socket from it, defaulting to
+  600 events/min — exactly one 10Hz player. Two people on one wifi, or local
+  split-screen, and the second player degrades while the first does not, which
+  reads as "their client is broken".
+
+A tier that actually carries four players at 10Hz:
+
+```toml
+[tier.anon]
+rank = 0
+can_read = true
+can_write = true
+publishing_rate_limit = 1800     # default 60. 10Hz = 600; the rest is burst headroom
+filter_rate_limit = 300
+messages_per_min = 3000          # default 240. Separate cap, bites independently
+bytes_in_per_min = 8388608       # default 1 MiB; ~600B/event x 600/min is close
+max_subscriptions = 40
+max_filters = 20
+min_pow_difficulty = 0           # no nos.lol 28-bit surprise
+created_at_msecs_ago = 10000     # narrows the backdating window on a relay you control
+created_at_msecs_ahead = 5000
+behavior_multiplier = { min = 1.0, max = 1.5 }   # pins the throttle spiral off
+
+[ip_gate]
+max_connections_per_ip = 64
+events_per_min_per_ip = 20000    # default 600 = one player. Kills couch play
+```
+
+`accepted_event_kinds` defaults to empty, meaning all kinds, so ephemeral 21000
+just works and NIP-40 expirations are honoured — both of which this game needs.
+Do **not** enable `[buzz]` (that is channel/git hosting, not a game relay) and do
+**not** turn on `[wot] gate_writes`, which would silently reject every player
+outside your follow graph.
+
+The `created_at` bound only binds on a relay you control; a cheater can publish
+anywhere. It narrows the window, it does not replace an honest design.
+
+[feeds.relay.tools](https://feeds.relay.tools) will host one with those caps. Put
+yours first in the Relays box and leave the public ones in as genuine peers, not
+cold standby — one relay is one point of failure, and you want events landing on
+more than one box the first time yours reboots.
 
 ## Layout
 
 ```
-src/arena.ts     the four boards, collision, spawn points, block-hash selection
+src/arena.ts     the boards, collision, spawn points, block-hash selection
+src/pickups.ts   block-hash-derived spawn schedule and the claim record
 src/sim.ts       tank and shell physics, all the feel constants
 src/game.ts      netcode: subscribe, interpolate, hit detection, authority
 src/nostr.ts     identity (real key + session key) and relay pool

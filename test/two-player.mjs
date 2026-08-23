@@ -133,12 +133,6 @@ try {
   const moved = beforeMove && afterMove ? Math.hypot(afterMove.x - beforeMove.x, afterMove.y - beforeMove.y) : 0
   check('B sees A move', moved > 60, `${Math.round(moved)}px`)
 
-  // Regen off for the duel. With it on, the victim heals between shells under
-  // software rasterisation and no kill ever lands — which is a real interaction
-  // between two features, not a flaky test, so it is turned off explicitly here
-  // and asserted on its own below.
-  await b.evaluate(() => (window.__game.regenAfter = 9999))
-
   // Duel: park them in a clear lane and put three shells into bravo.
   for (let i = 0; i < 5; i++) {
     await a.evaluate(() => {
@@ -172,19 +166,6 @@ try {
   check('alpha credited with the kill', finalA.kills >= 1, JSON.stringify(finalA.feed))
   check('kill feed names the killer', finalA.feed.some((t) => t.includes('alpha') && t.includes('bravo')))
   check('bravo respawned at full hp', !finalB.dead && finalB.hp === 3, `hp=${finalB.hp} dead=${finalB.dead}`)
-  // Now the other half of that interaction: a hull point comes back after a
-  // spell without being hit.
-  await b.evaluate(() => {
-    const g = window.__game
-    g.tank.hp = 1
-    g.tank.dead = false
-    g.regenAfter = 1
-  })
-  await wait(3000)
-  const healed = await b.evaluate(() => ({ hp: window.__game.tank.hp, feed: window.__game.feed.map((f) => f.text) }))
-  check('a tank left alone patches itself up', healed.hp > 1, `hp=${healed.hp}`)
-  check('and says so in the feed', healed.feed.some((t) => /patched up/.test(t)), JSON.stringify(healed.feed))
-
   // A round is one Bitcoin block. Nobody announces the change and nobody is the
   // host: both clients watch the same chain tip and both act on it. Driven here
   // through `BlockClock.accept`, which is the same entry point a real poll uses,
@@ -236,6 +217,66 @@ try {
   })
   check('and closing it actually removes it from the page',
     closed.attr && closed.display === 'none' && closed.h === 0, JSON.stringify(closed))
+
+  // ------------------------------------------------------------------ pickups
+  //
+  // Nothing about a pickup is sent: its pad, its type and its wave are derived
+  // from the block hash both clients already have. The only thing on the wire
+  // is the claim, and the claim is a *stored* event precisely so a client that
+  // connected a moment later still learns the pad is empty.
+  const spawned = await Promise.all([a, b].map((p) => p.evaluate(() =>
+    [...window.__game.pickups.values()].map((x) => ({ id: x.id, kind: x.kind, x: Math.round(x.at.x), y: Math.round(x.at.y) })),
+  )))
+  check('pickups appear on the board', spawned[0].length > 0, JSON.stringify(spawned[0]))
+  check('and both clients derived the identical set, having sent nothing',
+    JSON.stringify(spawned[0]) === JSON.stringify(spawned[1]),
+    `${JSON.stringify(spawned[0])} vs ${JSON.stringify(spawned[1])}`)
+
+  // Drive alpha onto one and watch what happens on both sides.
+  const target = spawned[0][0]
+  await a.evaluate((t) => {
+    const g = window.__game
+    g.tank.dead = false
+    g.tank.hp = 1
+    g.tank.x = t.x
+    g.tank.y = t.y
+  }, target)
+  await wait(1400)
+
+  const grabbed = await a.evaluate((id) => {
+    const g = window.__game
+    const p = g.pickups.get(id)
+    return {
+      taken: !!p?.taken,
+      kind: p?.kind,
+      hp: g.tank.hp,
+      buffs: { ...g.buffs },
+      notice: g.notice?.text ?? '',
+    }
+  }, target.id)
+  const gotSomething =
+    grabbed.kind === 'repair' ? grabbed.hp === 3 : Object.values(grabbed.buffs).some((v) => v > 0)
+  check('driving over one takes it', grabbed.taken, JSON.stringify(grabbed))
+  check(`and ${target.kind} actually does something`, gotSomething, JSON.stringify(grabbed))
+  check('and it is announced on the banner, not just in the feed', !!grabbed.notice, grabbed.notice)
+
+  // The claim travelling is the only networked part of the whole mechanism.
+  const seen = await b.evaluate((id) => {
+    const p = window.__game.pickups.get(id)
+    return { taken: !!p?.taken, feed: window.__game.feed.map((f) => f.text) }
+  }, target.id)
+  check('and the other client sees that pad go empty', seen.taken,
+    JSON.stringify(seen.feed.slice(-3)))
+
+  // Regen is gone: Puzz asked for it out, and a tank sitting still must not heal.
+  await b.evaluate(() => {
+    const g = window.__game
+    g.tank.dead = false
+    g.tank.hp = 1
+  })
+  await wait(4000)
+  const stillHurt = await b.evaluate(() => window.__game.tank.hp)
+  check('a tank left alone does not heal by itself any more', stillHurt === 1, `hp=${stillHurt}`)
 
   // The board renders in WebGL, and the aim is a ray cast through the cursor
   // onto a plane rather than a divide. Both are new, and both fail silently: a

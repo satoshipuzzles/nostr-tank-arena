@@ -2,7 +2,7 @@ import './style.css'
 import { layoutForBlock, layoutName, setLayout } from './arena'
 import { BlockClock } from './blocks'
 import { Game } from './game'
-import { Input } from './input'
+import { Input, type Scheme } from './input'
 import { DEFAULT_RELAYS, Identity, Net } from './nostr'
 import { Renderer } from './render'
 import { fetchBlockScores, fetchScores, publishScore } from './scores'
@@ -20,6 +20,7 @@ const board = $('board')
 const nameInput = $<HTMLInputElement>('name')
 const roomInput = $<HTMLInputElement>('room')
 const relayInput = $<HTMLTextAreaElement>('relays')
+const schemeInput = $<HTMLSelectElement>('scheme')
 const lobbyError = $('lobby-error')
 
 const params = new URLSearchParams(location.search)
@@ -41,6 +42,7 @@ const store = (k: string, v: string) => {
 nameInput.value = stored('tank.name') ?? ''
 roomInput.value = params.get('room') ?? stored('tank.room') ?? 'lobby'
 relayInput.value = (stored('tank.relays') ?? DEFAULT_RELAYS.join('\n')).trim()
+schemeInput.value = stored('tank.scheme') === 'tank' ? 'tank' : 'direct'
 
 function readRelays(): string[] {
   const list = relayInput.value
@@ -101,10 +103,12 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
       setLayout(layoutForBlock(tip.hash))
       if (!previous) {
         // First tip of the session — this is the round we joined, not a new one.
-        game.round = tip.height
+        game.beginRound(tip.height, tip.hash)
         return
       }
-      showPodium(game.endRound(tip.height, layoutName))
+      const result = game.endRound(tip.height, layoutName)
+      game.beginRound(tip.height, tip.hash)
+      showPodium(result)
     })
     void clock.start()
 
@@ -123,6 +127,8 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
       )
     }
     const input = new Input(canvas)
+    input.scheme = schemeInput.value as Scheme
+    store('tank.scheme', input.scheme)
     running = { game, renderer, input, clock }
     // Exposed on purpose: the two-player smoke test in test/ drives the match
     // through this handle, and it is genuinely useful in the console.
@@ -211,6 +217,48 @@ function drawHud(game: Game): void {
   $('feed').innerHTML = game.feed
     .map((f) => `<div>${escapeHtml(f.text)}</div>`)
     .join('')
+
+  drawNotice(game, now)
+  drawBuffs(game, now)
+}
+
+/**
+ * The banner.
+ *
+ * A streak or a pickup landing in a six-line feed at the bottom of the screen
+ * is something you read afterwards, not something you notice. This is the same
+ * information where your eyes already are.
+ */
+function drawNotice(game: Game, now: number): void {
+  const node = $('notice')
+  const notice = game.notice
+  if (!notice || now - notice.at > 2200) {
+    node.hidden = true
+    return
+  }
+  const age = (now - notice.at) / 2200
+  node.hidden = false
+  node.style.opacity = String(age > 0.7 ? 1 - (age - 0.7) / 0.3 : 1)
+  node.style.setProperty('--notice-hue', String(notice.hue))
+  node.innerHTML = `<b>${escapeHtml(notice.text)}</b><span>${escapeHtml(notice.sub)}</span>`
+}
+
+/** Little timers for whatever is currently running on your tank. */
+function drawBuffs(game: Game, now: number): void {
+  const node = $('buffs')
+  const live: string[] = []
+  const bar = (label: string, until: number, hue: number) => {
+    const left = (until - now) / 1000
+    if (left <= 0) return
+    live.push(
+      `<span class="buff" style="--buff-hue:${hue}">${escapeHtml(label)} <b>${left.toFixed(1)}s</b></span>`,
+    )
+  }
+  bar('Rapid', game.buffs.rapidUntil, 20)
+  bar('Shield', game.buffs.shieldUntil, 200)
+  bar('Overdrive', game.buffs.speedUntil, 285)
+  node.hidden = live.length === 0
+  node.innerHTML = live.join('')
 }
 
 // ------------------------------------------------------------------ podium

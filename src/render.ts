@@ -25,6 +25,7 @@ import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeom
 import { ARENA_H, ARENA_W, WALLS, onLayoutChange } from './arena'
 import type { Game, Peer } from './game'
 import { MAX_HP, RELOAD, TANK_RADIUS } from './sim'
+import { PICKUPS, hasBuff } from './pickups'
 
 // Board furniture, in arena units so it stays in scale with the simulation.
 const WALL_H = 58
@@ -389,6 +390,10 @@ export class Renderer {
    */
   private board = new THREE.Group()
   private lastRepairAt = 0
+  /** One group per live pickup, keyed by the id the schedule derived. */
+  private pickupMeshes = new Map<string, THREE.Group>()
+  /** The bubble that shows a shield is up. One, reused. */
+  private shield: THREE.Mesh
 
   constructor(private canvas: HTMLCanvasElement) {
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' })
@@ -410,6 +415,19 @@ export class Renderer {
     this.scene.add(this.confetti.mesh)
     this.scene.add(this.you.root)
     this.you.ring.visible = true
+
+    this.shield = new THREE.Mesh(
+      new THREE.SphereGeometry(TANK_RADIUS + 16, 20, 14),
+      new THREE.MeshBasicMaterial({
+        color: 0x7fd4ff,
+        transparent: true,
+        opacity: 0.28,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      }),
+    )
+    this.shield.visible = false
+    this.scene.add(this.shield)
 
     this.reloadBar = new THREE.Mesh(
       new THREE.BoxGeometry(1, 7, 7),
@@ -618,7 +636,6 @@ export class Renderer {
     this.syncPeers(game)
     this.applyTank(this.you, game.tank.x, game.tank.y, game.tank.hull, game.tank.gun, game.tank.hp,
       game.tank.dead, game.displayColor, game.name, true, dt, now)
-    this.you.ring.visible = !game.tank.dead
 
     for (const peer of game.peers.values()) {
       const rig = this.rigs.get(peer.session)
@@ -628,8 +645,39 @@ export class Renderer {
     }
 
     this.syncShells(game)
+    this.syncPickups(game, now)
     this.deaths(game)
     this.reload(game, now)
+
+    // Shield bubble and overdrive trail. Both have to be legible to the other
+    // three players, not just to you — knowing who is currently hard to kill is
+    // most of what makes a pickup worth contesting.
+    this.shield.visible = hasBuff(game.buffs, 'shieldUntil', now) && !game.tank.dead
+    if (this.shield.visible) {
+      this.shield.position.set(game.tank.x, 26, game.tank.y)
+      this.shield.scale.setScalar(1 + Math.sin(now / 180) * 0.04)
+    }
+    if (hasBuff(game.buffs, 'speedUntil', now) && !game.tank.dead) {
+      this.confetti.burst(game.tank.x, game.tank.y, 1, 285, {
+        speed: 24,
+        up: 40,
+        y: 10,
+        size: 0.45,
+        life: 0.4,
+      })
+    }
+    // A streak you can see from across the board.
+    this.you.ring.visible = !game.tank.dead
+    const ringMat = this.you.ring.material as THREE.MeshBasicMaterial
+    if (game.streak >= 3) {
+      ringMat.color.setHSL(((now / 12) % 360) / 360, 0.9, 0.6)
+      ringMat.opacity = 0.85
+      this.you.ring.scale.setScalar(1.15 + Math.sin(now / 140) * 0.08)
+    } else {
+      ringMat.color.setHex(0xffffff)
+      ringMat.opacity = 0.55
+      this.you.ring.scale.setScalar(1)
+    }
 
     if (game.tank.hp < this.lastHp && !game.tank.dead) this.shake = Math.max(this.shake, 9)
     this.lastHp = game.tank.hp
@@ -810,6 +858,71 @@ export class Renderer {
       this.scene.remove(mesh)
       this.shells.delete(id)
       this.lastShellSeen.delete(id)
+    }
+  }
+
+  /**
+   * Pickups on their pads.
+   *
+   * Nothing here is received: the game derives the same schedule every client
+   * derives, so this is drawing a pure function of the block hash and the round
+   * clock. A pad that has been claimed keeps its ring and loses its prize, so
+   * you can see where the good spots are even while they are empty.
+   */
+  private syncPickups(game: Game, now: number): void {
+    for (const [id, group] of this.pickupMeshes) {
+      if (game.pickups.has(id)) continue
+      this.scene.remove(group)
+      group.traverse((child) => {
+        const mesh = child as THREE.Mesh
+        mesh.geometry?.dispose()
+        const material = mesh.material as THREE.Material | undefined
+        material?.dispose()
+      })
+      this.pickupMeshes.delete(id)
+    }
+
+    for (const pickup of game.pickups.values()) {
+      let group = this.pickupMeshes.get(pickup.id)
+      if (!group) {
+        const hue = PICKUPS[pickup.kind].hue / 360
+        group = new THREE.Group()
+        const gem = new THREE.Mesh(
+          new THREE.OctahedronGeometry(17, 0),
+          new THREE.MeshStandardMaterial({
+            color: new THREE.Color().setHSL(hue, 0.85, 0.6),
+            emissive: new THREE.Color().setHSL(hue, 0.9, 0.22),
+            roughness: 0.35,
+          }),
+        )
+        gem.castShadow = true
+        gem.name = 'gem'
+        const pad = new THREE.Mesh(
+          new THREE.RingGeometry(24, 34, 26),
+          new THREE.MeshBasicMaterial({
+            color: new THREE.Color().setHSL(hue, 0.8, 0.6),
+            transparent: true,
+            opacity: 0.5,
+            side: THREE.DoubleSide,
+          }),
+        )
+        pad.rotation.x = -Math.PI / 2
+        pad.position.y = 1.5
+        pad.name = 'pad'
+        group.add(gem, pad)
+        group.position.set(pickup.at.x, 0, pickup.at.y)
+        this.scene.add(group)
+        this.pickupMeshes.set(pickup.id, group)
+      }
+
+      const gem = group.getObjectByName('gem') as THREE.Mesh
+      const pad = group.getObjectByName('pad') as THREE.Mesh
+      gem.visible = !pickup.taken
+      gem.rotation.y = now / 620
+      gem.rotation.x = 0.42
+      gem.position.y = 34 + Math.sin(now / 320) * 6
+      ;(pad.material as THREE.MeshBasicMaterial).opacity = pickup.taken ? 0.14 : 0.5
+      pad.scale.setScalar(pickup.taken ? 1 : 1 + Math.sin(now / 260) * 0.06)
     }
   }
 
