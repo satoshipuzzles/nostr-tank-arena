@@ -1,5 +1,23 @@
 // Keyboard + mouse for a desk, gamepad for a couch. Both produce the same
 // four numbers the tank simulation cares about.
+//
+// ## One of these per player, not one per page
+//
+// That distinction is the whole reason local two-player works. An `Input` used
+// to own the keyboard outright: a `window` keydown listener filling one set, a
+// "any held key beats the pad" backstop reading that set, and a `readPad()` that
+// returned whichever pad answered first. All three are correct for one human
+// with a keyboard and a pad in front of them, and all three break the moment
+// there are two humans — Fizz measured it before split-screen was written:
+//
+//   - player one holding W froze player two's pad completely, and splitting into
+//     two `Input` objects did not help, because both were listening to the same
+//     `window` and both concluded somebody was driving
+//   - a second pad was inert: the first pad to claim was returned every frame,
+//     and a *centred* pad zero was enough to shadow a pushed pad one
+//
+// So an `Input` now has a `Binding`: which half of the keyboard it reads, which
+// pad index it owns, and whether it gets the mouse. Nothing is shared.
 
 import { angleDelta } from './sim'
 
@@ -43,6 +61,57 @@ const clamp = (v: number, lo: number, hi: number) => (v < lo ? lo : v > hi ? hi 
  */
 export type Scheme = 'direct' | 'tank'
 
+/** Which physical controls belong to this player. Nothing here is shared. */
+export interface Binding {
+  /**
+   * `both` is the solo default. In two-player, one takes `wasd` and the other
+   * takes `arrows`, so a key held by one player is invisible to the other.
+   */
+  keys: 'both' | 'wasd' | 'arrows' | 'none'
+  /**
+   * `any` means "the first pad that gets picked up", which is right when there
+   * is one player and no way to know which pad they will reach for. With two
+   * players each names an index, or pad one shadows pad zero forever.
+   */
+  pad: number | 'any' | null
+  /** Only one player can have the mouse, and it is whoever is at the keyboard. */
+  mouse: boolean
+}
+
+export const SOLO: Binding = { keys: 'both', pad: 'any', mouse: true }
+/**
+ * Player two: the arrow keys, or pad one, and no mouse.
+ *
+ * Deliberately mutable per instance — `main.ts` narrows player one to WASD and
+ * pad zero at the same moment, because with two people at one keyboard "either
+ * half drives me" is the same collision as "any pad drives me".
+ */
+export const PLAYER_TWO: Binding = { keys: 'arrows', pad: 1, mouse: false }
+
+const DRIVE_KEYS: Record<
+  Binding['keys'],
+  { up: string[]; down: string[]; left: string[]; right: string[]; fire: string[] }
+> = {
+  both: {
+    up: ['KeyW', 'ArrowUp'],
+    down: ['KeyS', 'ArrowDown'],
+    left: ['KeyA', 'ArrowLeft'],
+    right: ['KeyD', 'ArrowRight'],
+    fire: ['Space'],
+  },
+  wasd: { up: ['KeyW'], down: ['KeyS'], left: ['KeyA'], right: ['KeyD'], fire: ['Space'] },
+  // Right hand on the arrows, thumb on Enter or right shift. Several, because
+  // which one is comfortable depends entirely on the keyboard.
+  arrows: {
+    up: ['ArrowUp'],
+    down: ['ArrowDown'],
+    left: ['ArrowLeft'],
+    right: ['ArrowRight'],
+    fire: ['Enter', 'NumpadEnter', 'ShiftRight', 'NumpadAdd'],
+  },
+  none: { up: [], down: [], left: [], right: [], fire: [] },
+}
+
 export class Input {
   /** Default is `direct`: it is the one people can drive without being told. */
   scheme: Scheme = 'direct'
@@ -74,7 +143,10 @@ export class Input {
    */
   private triggerRest = new Map<number, number>()
 
-  constructor(private canvas: HTMLCanvasElement) {
+  constructor(
+    private canvas: HTMLCanvasElement,
+    readonly binding: Binding = SOLO,
+  ) {
     window.addEventListener('keydown', this.onKeyDown)
     window.addEventListener('keyup', this.onKeyUp)
     canvas.addEventListener('mousedown', this.onMouseDown)
@@ -109,27 +181,39 @@ export class Input {
   }
 
   read(tank: { x: number; y: number; gun: number; hull: number }): Controls {
-    const has = (...codes: string[]) => codes.some((c) => this.keys.has(c))
-    // A held key beats the pad, always. Drift calibration should mean no pad
-    // ever claims the input it did not earn, but this is the backstop that does
-    // not depend on getting that right: if someone is holding W, they want to
-    // drive, and no reading of a stick they are not touching outranks that.
-    const driving = has('KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowLeft', 'ArrowDown', 'ArrowRight')
+    const map = DRIVE_KEYS[this.binding.keys]
+    const has = (codes: string[]) => codes.some((c) => this.keys.has(c))
+    // A held key beats the pad, always — but only a key *this player* owns.
+    // Reading the whole keyboard here is what let player one's W freeze player
+    // two's pad, and it did so through two separate `Input` objects, because the
+    // set behind it was filled from a shared `window` listener.
+    const driving = has(map.up) || has(map.down) || has(map.left) || has(map.right)
     const pad = driving ? null : this.readPad(tank)
     if (pad) return pad
 
-    const x = (has('KeyD', 'ArrowRight') ? 1 : 0) - (has('KeyA', 'ArrowLeft') ? 1 : 0)
-    const y = (has('KeyS', 'ArrowDown') ? 1 : 0) - (has('KeyW', 'ArrowUp') ? 1 : 0)
+    const x = (has(map.right) ? 1 : 0) - (has(map.left) ? 1 : 0)
+    const y = (has(map.down) ? 1 : 0) - (has(map.up) ? 1 : 0)
 
-    const aim = this.mouseWorld
-      ? Math.atan2(this.mouseWorld.y - tank.y, this.mouseWorld.x - tank.x)
-      : null
-    const fire = this.mouseDown || this.keys.has('Space')
+    const fire = (this.binding.mouse && this.mouseDown) || has(map.fire)
+    const aim =
+      this.binding.mouse && this.mouseWorld
+        ? Math.atan2(this.mouseWorld.y - tank.y, this.mouseWorld.x - tank.x)
+        : // No mouse and no right stick: the gun points where you drive. Not so
+          // much a compromise as the other half of the arcade tradition — and a
+          // second player on the arrow keys with a turret that never turns is
+          // not playing a game.
+          this.aimlessGun(x, y, tank)
 
     if (this.scheme === 'tank') {
       return { throttle: -y, steer: x, aim, fire }
     }
     return { ...this.toHeading(x, y, tank.hull), aim, fire }
+  }
+
+  /** Where a player with no aiming device is pointing: along the hull. */
+  private aimlessGun(x: number, y: number, tank: { hull: number }): number | null {
+    if (this.binding.mouse) return null
+    return x || y ? Math.atan2(y, x) : tank.hull
   }
 
   /**
@@ -151,9 +235,14 @@ export class Input {
   }
 
   private readPad(tank: { gun: number; hull: number }): Controls | null {
+    if (this.binding.pad === null) return null
     const pads = navigator.getGamepads?.() ?? []
     for (const pad of pads) {
       if (!pad) continue
+      // An index means this pad and no other. Without it, `readPad` returns
+      // whoever answers first — and once pad zero has latched `usingGamepad`,
+      // pad one is never reached even when pad zero is sitting centred.
+      if (this.binding.pad !== 'any' && pad.index !== this.binding.pad) continue
       const axis = this.calibrate(pad)
       const lx = deadzone(axis(0))
       const ly = deadzone(axis(1))
@@ -201,7 +290,15 @@ export class Input {
   private calibrate(pad: Gamepad): (i: number) => number {
     let rest = this.neutral.get(pad.index)
     if (!rest || rest.length !== pad.axes.length) {
-      rest = [...pad.axes]
+      // Seeded from the first reading only where that reading is plausibly a
+      // resting one. Fizz caught this on their own probe three times over: a pad
+      // first seen while somebody is already pushing it calibrates the push as
+      // its centre and reads zero until they let go. Player two joining
+      // mid-match with a thumb on the stick is the normal case, not the edge.
+      // A large first reading is therefore assumed to be input rather than
+      // drift; if it really was drift, the downward convergence below finds it
+      // the moment the stick passes anywhere near centre.
+      rest = pad.axes.map((v) => (Math.abs(v) < DEADZONE ? v : 0))
       this.neutral.set(pad.index, rest)
     }
     for (let i = 0; i < pad.axes.length; i++) {

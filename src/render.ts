@@ -708,7 +708,14 @@ export class Renderer {
 
   // -------------------------------------------------------------- the frame
 
-  draw(game: Game): void {
+  /**
+   * `localSessions` names the tanks belonging to somebody sitting in this room.
+   *
+   * In local two-player the second player is an ordinary peer of the first —
+   * same events, same interpolation — so without this they would render as a
+   * stranger and go looking for a ring that is under the other player's tank.
+   */
+  draw(game: Game, localSessions?: ReadonlySet<string>): void {
     const dt = Math.min(0.05, this.clock.getDelta())
     const now = performance.now()
 
@@ -744,7 +751,7 @@ export class Renderer {
         name: peer.name,
         verified: peer.pubkey !== null,
         streak: peer.streak,
-        mine: false,
+        mine: localSessions?.has(peer.session) ?? false,
       })
     }
 

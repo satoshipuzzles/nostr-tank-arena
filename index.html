@@ -18,10 +18,11 @@
       <div id="notice" hidden></div>
       <div id="rules" hidden></div>
       <div id="buffs" hidden></div>
+      <div id="p2" hidden></div>
       <div id="feed"></div>
       <div id="controls-hint">
         <span><b>WASD</b> drive</span><span><b>mouse</b> aim</span><span><b>click / space</b> fire</span
-        ><span><b>gamepad</b> supported</span>
+        ><span><b>gamepad</b> supported</span><span id="hint-p2" hidden><b>P2:</b> arrows + enter, or pad 2</span>
       </div>
       <div id="podium" hidden>
         <div class="card">
@@ -55,6 +56,13 @@
 
         <label>Callsign<input id="name" maxlength="16" placeholder="tank" /></label>
         <label>Room<input id="room" maxlength="24" placeholder="lobby" /></label>
+
+        <label class="choice">Players
+          <select id="players">
+            <option value="1">One — this machine, one tank</option>
+            <option value="2">Two on this screen — second pad or the arrow keys</option>
+          </select>
+        </label>
 
         <label class="choice">Sound
           <select id="sound">

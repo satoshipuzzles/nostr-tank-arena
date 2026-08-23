@@ -277,6 +277,35 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
 }
 #rules span { font-size: 11px; color: var(--dim); }
 
+/*
+ * Player two, on one screen. Not a second HUD — just the numbers that are
+ * theirs: hull, score, and whatever is ticking down on them. Their name, kills
+ * and deaths are already on the scoreboard, because to player one's client they
+ * are a peer like anybody else in the room.
+ */
+#p2 {
+  position: absolute;
+  bottom: 118px;
+  right: 14px;
+  display: grid;
+  gap: 6px;
+  justify-items: end;
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: var(--panel);
+  z-index: 4;
+}
+.p2-row { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.p2-row .pips { display: flex; gap: 4px; }
+.p2-row .pips i {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: #38404d;
+  display: block;
+}
+.p2-row .pips i.on { background: var(--pip, #ffc44d); }
+
 #buffs {
   position: absolute;
   bottom: 118px;

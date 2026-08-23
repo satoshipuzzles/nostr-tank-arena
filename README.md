@@ -106,6 +106,18 @@ each other.
 Gamepad: left stick drives, right stick aims, right trigger or `A` fires. It
 plays fine on a TV browser with a controller, which is the point. `M` mutes.
 
+**Two on one screen.** Pick *Two* under Players in the lobby and a second tank
+joins the same room from the same tab. Player one keeps WASD, the mouse and pad
+zero; player two gets the arrow keys with Enter or right-shift to fire, or pad
+one. Both are real npubs with their own signed events and their own leaderboard
+entries — the only things they share are the socket and the screen.
+
+There is no split viewport, deliberately. The camera already frames the whole
+arena, so two people on a couch can both see everything; carving that into two
+smaller copies of the same picture would be worse on every screen size. What
+"split-screen" is actually for here is two humans, one machine — and that part
+is real.
+
 Two steering schemes, switchable in the lobby. **Direct** (the default) reads the
 keys or the stick as a *direction on the board*: press up-left and the tank turns
 toward up-left and goes. **Tank** is the classic one — `A`/`D` rotate the hull,
@@ -499,6 +511,55 @@ has seen the new tip and another has not, they disagree about the map, the rules
 and the schedule alike. That is inherent to having no host, it is bounded by the
 poll interval, and it costs a pad.
 
+## Two players, one machine
+
+The interesting half is not the second tank, it is that **local players skip the
+relay entirely**.
+
+Everything player two publishes is handed to player one in the same turn, as
+well as going out to the relays — and it is the *same signed event*, through the
+same `onEvent`. Nothing downstream is special-cased: the two tanks agree for the
+same reasons two strangers do, a remote player sees exactly what they would
+have, and the relay's echo a moment later is ignored because events are
+de-duplicated by id.
+
+What it removes is the round trip. Two people on one couch should not be
+watching each other at 150ms — that is the one latency in this game with no
+excuse, because the sender and the receiver are the same process. The suite
+checks it by cutting the relays off at the knees and asserting a shot still
+arrives in the same turn.
+
+### One `Input` per player, not one per page
+
+Three things were correct for one human with a keyboard and a pad, and broke the
+moment there were two. Fizz measured all three against the single-player code
+before this was written, and every one of them would have shipped:
+
+- **A held key suppressed a pad that was being actively pushed.** The "any held
+  key beats the pad" backstop read a key set filled from a `window` listener, so
+  splitting into two `Input` objects did not help — both saw every key and both
+  concluded somebody was driving. Player one's W froze player two completely.
+- **A second pad was inert.** `readPad()` returned whichever pad answered first,
+  and once pad zero had latched, a *centred* pad zero was enough to shadow a
+  pushed pad one forever.
+- **A pad first seen while being pushed calibrated the push as its centre**, and
+  read zero until it was released. Invisible for someone who plugs in and then
+  plays; not invisible for player two joining mid-match with a thumb already on
+  the stick. The rest position is now seeded from the first reading only where
+  that reading is small enough to plausibly *be* a rest position.
+
+So an `Input` carries a `Binding`: which half of the keyboard it reads, which pad
+index it owns, whether it gets the mouse. Nothing is shared.
+
+A player with neither a mouse nor a right stick aims **along the hull** — the gun
+points where you drive. That is the other half of the arcade tradition rather
+than a compromise, and the alternative is a second player whose turret never
+turns.
+
+Sound has one ear, and it is player one's. Everything player two does is already
+audible there as a peer event, positioned, through the same path a stranger's
+shot takes; a second sink would play every shot twice.
+
 ## Who is that? Kind 0, and NIP-05
 
 A signed score is only worth reading if you can tell whose it is, and a hex
@@ -578,6 +639,7 @@ src/main.ts      lobby, HUD, game loop
 test/two-player.mjs  headless two-browser smoke test against live relays
 test/sound.mjs       taps the master bus and measures what each sound emits
 test/controls.mjs    hands the page a fake gamepad and checks WASD survives it
+test/couch.mjs       two pads, two players, one tab
 test/shot.mjs        photographs a pinned block, because pixels are not the DOM
 ```
 
@@ -587,6 +649,8 @@ test/shot.mjs        photographs a pinned block, because pixels are not the DOM
 npm run build && npm run preview &
 npm run test:live
 npm run test:sound
+npm run test:controls
+npm run test:couch
 npm run test:controls
 ```
 

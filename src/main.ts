@@ -3,7 +3,8 @@ import { layoutForBlock, layoutName, setLayout } from './arena'
 import { Sfx } from './audio'
 import { BlockClock } from './blocks'
 import { Game } from './game'
-import { Input, type Scheme } from './input'
+import { Input, PLAYER_TWO, SOLO, type Scheme } from './input'
+
 import { DEFAULT_RELAYS, Identity, Net } from './nostr'
 import { Renderer } from './render'
 import { modifierForBlock } from './modifiers'
@@ -26,6 +27,7 @@ const roomInput = $<HTMLInputElement>('room')
 const relayInput = $<HTMLTextAreaElement>('relays')
 const schemeInput = $<HTMLSelectElement>('scheme')
 const soundInput = $<HTMLSelectElement>('sound')
+const playersInput = $<HTMLSelectElement>('players')
 const lobbyError = $('lobby-error')
 
 const params = new URLSearchParams(location.search)
@@ -48,6 +50,7 @@ nameInput.value = stored('tank.name') ?? ''
 roomInput.value = params.get('room') ?? stored('tank.room') ?? 'lobby'
 relayInput.value = (stored('tank.relays') ?? DEFAULT_RELAYS.join('\n')).trim()
 schemeInput.value = stored('tank.scheme') === 'tank' ? 'tank' : 'direct'
+playersInput.value = stored('tank.players') === '2' ? '2' : '1'
 
 /**
  * One AudioContext for the page, built on the first real click.
@@ -108,10 +111,16 @@ $('play-guest').addEventListener('click', () => {
   void begin(async () => Identity.guest())
 })
 
-let running: {
+/** One human. Two of these is the whole of local two-player. */
+interface Player {
   game: Game
-  renderer: Renderer
   input: Input
+}
+
+let running: {
+  /** Player one is always `players[0]`, and owns the mouse, the HUD and the ear. */
+  players: Player[]
+  renderer: Renderer
   clock: BlockClock
   profiles: Profiles
 } | null = null
@@ -174,15 +183,50 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     sfx.unlock()
     paintSoundButton()
 
+    // Built before anything that needs to read it: both games take their pickup
+    // anchor from it, and player two is constructed before the old position of
+    // this line.
+    const clock = new BlockClock(params.get('blocks'))
+
+    const twoPlayer = playersInput.value === '2'
+    store('tank.players', twoPlayer ? '2' : '1')
+
     const net = new Net(relays)
     const profiles = new Profiles(net)
     const game = new Game(identity, net, room, name, color)
+    // Only player one has an ear. Two local players share one set of speakers,
+    // and every event player two publishes is already heard here as a peer —
+    // positioned, through the same code a remote player's shot goes through. A
+    // second sink would play the same shot twice.
     game.sfx = (sound, opts) => sfx.play(sound, opts)
     await game.start()
 
+    const players: Player[] = [{ game, input: new Input(canvas, { ...SOLO }) }]
+
+    if (twoPlayer) {
+      // A throwaway key, deliberately. Player two is a real npub in the room
+      // with their own signed events and their own leaderboard entry — the only
+      // thing they share with player one is the socket and the screen. Asking a
+      // second person to produce a NIP-07 signer to play on a couch is how a
+      // couch mode does not get used.
+      const second = await Identity.guest()
+      const p2 = new Game(second, net, room, `${name}-2`, (color + 137) % 360)
+      p2.chainClock = () => ({ seconds: clock.chainSeconds(), pending: clock.chainPending })
+      await p2.start()
+      // Each is an ordinary peer of the other, through the same signed events —
+      // just delivered without the round trip. See `Game.localMirror`.
+      game.localMirror.push(p2)
+      p2.localMirror.push(game)
+      players.push({ game: p2, input: new Input(canvas, { ...PLAYER_TWO }) })
+      // Player one gives up the arrow keys and the roaming pad claim: with two
+      // people at one keyboard, "either half drives me" is the same collision
+      // as "any pad drives me".
+      players[0].input.binding.keys = 'wasd'
+      players[0].input.binding.pad = 0
+    }
+
     // The round clock. Starting it before the first frame means the board is
     // already the right one for the current block by the time anybody drives.
-    const clock = new BlockClock(params.get('blocks'))
     // The pickup schedule reads its clock from the chain, not from when this
     // client happened to poll. The wave index ends up inside the pickup id, so
     // a local origin means two clients compute different ids for the same pad
@@ -192,12 +236,18 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
       setLayout(layoutForBlock(tip.hash))
       if (!previous) {
         // First tip of the session — this is the round we joined, not a new one.
-        game.beginRound(tip.height, tip.hash)
+        for (const p of players) p.game.beginRound(tip.height, tip.hash)
         return
       }
-      const result = game.endRound(tip.height, layoutName)
-      game.beginRound(tip.height, tip.hash)
-      showPodium(result)
+      // Every local player banks their own round; only player one's podium is
+      // shown, because there is one screen.
+      let shown: ReturnType<Game['endRound']> | null = null
+      for (const p of players) {
+        const result = p.game.endRound(tip.height, layoutName)
+        if (!shown) shown = result
+        p.game.beginRound(tip.height, tip.hash)
+      }
+      if (shown) showPodium(shown)
     })
     void clock.start()
 
@@ -208,17 +258,18 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     try {
       renderer = new Renderer(canvas)
     } catch (err) {
-      game.dispose()
+      for (const p of players) p.game.dispose()
       throw new Error(
         'This browser could not open a WebGL context, so the 3D board cannot draw. ' +
           'Check that hardware acceleration is on, or try another browser. ' +
           (err instanceof Error ? `(${err.message})` : ''),
       )
     }
-    const input = new Input(canvas)
-    input.scheme = schemeInput.value as Scheme
-    store('tank.scheme', input.scheme)
-    running = { game, renderer, input, clock, profiles }
+    const scheme = schemeInput.value as Scheme
+    for (const p of players) p.input.scheme = scheme
+    store('tank.scheme', scheme)
+    running = { players, renderer, clock, profiles }
+    $('hint-p2').hidden = !twoPlayer
     // A profile landing has to repaint immediately: the HUD throttles itself to
     // eight frames a second and would otherwise show the npub for another beat
     // after the picture was already in hand.
@@ -232,9 +283,11 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     ;(window as unknown as { __clock: BlockClock }).__clock = clock
     ;(window as unknown as { __sfx: Sfx }).__sfx = sfx
     ;(window as unknown as { __profiles: Profiles }).__profiles = profiles
+    ;(window as unknown as { __players: Player[] }).__players = players
 
     canvas.addEventListener('mousemove', (e) => {
-      input.mouseWorld = renderer.toWorld(e.clientX, e.clientY)
+      const world = renderer.toWorld(e.clientX, e.clientY)
+      for (const p of players) if (p.input.binding.mouse) p.input.mouseWorld = world
     })
 
     const url = new URL(location.href)
@@ -262,11 +315,16 @@ function loop(now = performance.now()): void {
   const dt = Math.min(0.05, last ? (now - last) / 1000 : 0)
   last = now
 
-  const { game, renderer, input } = running
-  const controls = input.read(game.tank)
-  game.update(dt, controls)
-  renderer.draw(game)
-  drawHud(game)
+  const { players, renderer } = running
+  // Every local player steps in the same frame, before anything is drawn.
+  // Player two's events reach player one's game inside `update` — see
+  // `Game.localMirror` — so drawing after both have stepped is what makes the
+  // couch latency actually zero rather than one frame.
+  for (const p of players) p.game.update(dt, p.input.read(p.game.tank))
+  const local = new Set(players.map((p) => p.game.identity.sessionPubkey))
+  renderer.draw(players[0].game, local)
+  drawHud(players[0].game)
+  drawSecondPlayer(players[1] ?? null, now)
 }
 
 let hudAt = 0
@@ -403,6 +461,49 @@ function drawNotice(game: Game, now: number): void {
 }
 
 /**
+ * Player two's panel.
+ *
+ * One screen, so player two does not get a second HUD — they get the numbers
+ * that are theirs and nobody else's: hull, score, and whatever is ticking down.
+ * Everything else about them is already visible. They are a peer of player one,
+ * so their name sits on the scoreboard like anybody in the room, and their tank
+ * carries its own pips and streak ring out on the board.
+ */
+function drawSecondPlayer(p2: Player | null, now: number): void {
+  const node = $('p2')
+  if (!p2) {
+    node.hidden = true
+    return
+  }
+  const g = p2.game
+  // Player one's view of player two's colour, not player two's own. Hues are
+  // spread to a palette per client, so the two can disagree — and the panel has
+  // to match the tank on *this* screen or it is labelling the wrong player.
+  const hue =
+    running?.players[0].game.peers.get(g.identity.sessionPubkey)?.displayColor ?? g.displayColor
+  const hull = Array.from(
+    { length: g.maxHp },
+    (_, i) =>
+      `<i class="${i < g.tank.hp && !g.tank.dead ? 'on' : ''}" style="--pip:hsl(${hue} 75% 60%)"></i>`,
+  ).join('')
+  const timers = Object.entries(BUFF_TIMERS)
+    .map(([kind, key]) => {
+      const left = (g.buffs[key] - now) / 1000
+      if (left <= 0) return ''
+      const spec = PICKUPS[kind as PickupKind]
+      return `<span class="buff" style="--buff-hue:${spec.hue}">${escapeHtml(spec.label)} <b>${left.toFixed(1)}s</b></span>`
+    })
+    .filter(Boolean)
+    .join('')
+  node.hidden = false
+  node.innerHTML =
+    `<div class="p2-row"><b style="color:hsl(${hue} 75% 68%)">P2</b>` +
+    `<span class="pips">${hull}</span>` +
+    `<span class="kd">${g.kills} / ${g.deaths}</span></div>` +
+    (timers ? `<div class="p2-row">${timers}</div>` : '')
+}
+
+/**
  * Little timers for whatever is currently running on your tank.
  *
  * Driven off the pickup table rather than a hand-written list, so adding a
@@ -471,14 +572,14 @@ function showPodium(result: import('./game').RoundResult): void {
     try {
       const me = rows.find((r) => r.you)
       await publishScore(
-        running.game.identity,
-        running.game.net,
-        running.game.room,
+        running.players[0].game.identity,
+        running.players[0].game.net,
+        running.players[0].game.room,
         me?.kills ?? 0,
         me?.deaths ?? 0,
         result.height,
         result.layout,
-        running.game.bestStreak,
+        running.players[0].game.bestStreak,
       )
       publish.textContent = 'Published'
     } catch {
@@ -552,7 +653,7 @@ $('copy-link').addEventListener('click', async () => {
 $('publish-score').addEventListener('click', async () => {
   if (!running) return
   const btn = $<HTMLButtonElement>('publish-score')
-  const { game } = running
+  const game = running.players[0].game
   btn.disabled = true
   btn.textContent = 'Signing…'
   try {
@@ -590,8 +691,8 @@ async function loadBoard(scope: 'block' | 'all'): Promise<void> {
   try {
     const scores =
       scope === 'block'
-        ? await fetchBlockScores(running.game.net, height!)
-        : await fetchScores(running.game.net)
+        ? await fetchBlockScores(running.players[0].game.net, height!)
+        : await fetchScores(running.players[0].game.net)
     // A signed score is only worth reading if you can tell whose it is. The
     // profile fetch is fire-and-forget: rows render with the npub immediately
     // and upgrade themselves to a face and a NIP-05 when the events land.

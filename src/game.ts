@@ -220,6 +220,24 @@ export class Game {
    * match through the default sink without an AudioContext anywhere.
    */
   sfx: SoundSink = silence
+  /**
+   * Other `Game`s running in this same tab, for local two-player.
+   *
+   * Everything one player publishes is handed to these directly, in the same
+   * turn, as well as going out to the relays. That is the whole of local
+   * two-player's netcode and it is worth being precise about why it is not a
+   * shortcut around the protocol: the event delivered is the *same signed
+   * event* that goes on the wire, through the same `onEvent`. Nothing is
+   * special-cased downstream, the two tanks agree for the same reasons two
+   * strangers do, and a remote player sees exactly what they would have.
+   *
+   * What it removes is the round trip. Two people on one couch should not be
+   * watching each other at 150ms — that is the one latency in this game that
+   * has no excuse, because the sender and the receiver are the same process.
+   * `onEvent` already de-duplicates by event id, so the relay's echo a moment
+   * later is ignored.
+   */
+  readonly localMirror: Game[] = []
 
   private seen = new Set<string>()
   private seenPrev = new Set<string>()
@@ -308,23 +326,29 @@ export class Game {
       content: JSON.stringify(payload),
     })
     this.net.publish(signed)
+    this.mirror(signed)
     this.lastSessionBroadcast = performance.now()
   }
 
   private publishAsSession(kind: number, payload: unknown): void {
-    this.net.publish(
-      this.identity.signAsSession({
-        kind,
-        created_at: Math.floor(Date.now() / 1000),
-        tags: [['t', roomTag(this.room)]],
-        content: JSON.stringify(payload),
-      }),
-    )
+    const event = this.identity.signAsSession({
+      kind,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [['t', roomTag(this.room)]],
+      content: JSON.stringify(payload),
+    })
+    this.net.publish(event)
+    this.mirror(event)
+  }
+
+  /** Hand a freshly signed event to the other local players, without a relay. */
+  private mirror(event: Event): void {
+    for (const other of this.localMirror) other.onEvent(event)
   }
 
   // ---------------------------------------------------------------- inbound
 
-  private onEvent(e: Event): void {
+  onEvent(e: Event): void {
     if (this.disposed) return
     if (this.seen.has(e.id) || this.seenPrev.has(e.id)) return
     this.seen.add(e.id)
@@ -946,18 +970,22 @@ export class Game {
    */
   private publishClaim(pickup: Pickup): void {
     const payload: ClaimPayload = { p: pickup.id, kind: pickup.kind }
-    this.net.publish(
-      this.identity.signAsSession({
-        kind: KIND_CLAIM,
-        created_at: Math.floor(Date.now() / 1000),
-        tags: [
-          ['d', claimTag(pickup.id, this.identity.sessionPubkey)],
-          ['t', roomTag(this.room)],
-          ['expiration', String(Math.floor(Date.now() / 1000) + 120)],
-        ],
-        content: JSON.stringify(payload),
-      }),
-    )
+    const event = this.identity.signAsSession({
+      kind: KIND_CLAIM,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [
+        ['d', claimTag(pickup.id, this.identity.sessionPubkey)],
+        ['t', roomTag(this.room)],
+        ['expiration', String(Math.floor(Date.now() / 1000) + 120)],
+      ],
+      content: JSON.stringify(payload),
+    })
+    this.net.publish(event)
+    // A pad taken by the player next to you must go empty on their screen now,
+    // not after a round trip — otherwise two people on one couch routinely both
+    // take the same item, which is the one case where the deliberate
+    // both-players-get-it tie is not a fair trade.
+    this.mirror(event)
   }
 
   private onClaim(e: Event): void {
