@@ -89,6 +89,14 @@ const BEHAVIOURS = {
   perip: () => ({ ok: false, msg: 'rate-limited: too many events from your IP; slow down' }),
   // newlay's ninth reject prefix, which is not in NIP-01.
   muted: () => ({ ok: false, msg: 'mute: you have been muted by a moderator' }),
+  // Refuses everything, but names a cap far above the tick rate. So it gets
+  // paced rather than muted, pacing never actually throttles it, and it stays
+  // in every target set refusing forever — which is what a genuinely paced
+  // relay looks like on a publish where the x1.1 probe has just overshot.
+  fastlimit: () => ({
+    ok: false,
+    msg: 'rate-limited: publishing too fast (limit 6000 events/min); slow down or AUTH for higher limits',
+  }),
   silent: () => null, // accept the frame, answer nothing, ever
 }
 
@@ -779,6 +787,90 @@ try {
       `${oddOne.received - keptStart} events in 6s`,
     )
     await biasPage.close()
+  }
+
+  // --- one relay must not be able to acquit either ---------------------------
+  //
+  // `rate-limited:` is the only refusal newlay emits from *above* the created_at
+  // gate — the events bucket and the per-IP gate both run before the timestamp
+  // is looked at. So it is proof the relay never examined the clock, while
+  // every other prefix means created_at was checked and passed.
+  //
+  // The old rule cleared the streak on any refusal, and the pacer manufactures
+  // this one on purpose: escalating x1.1 and snapping back on the next refusal
+  // is the feedback signal. So on a paced relay it arrives periodically,
+  // forever. Three relays refusing every event because the clock is fifteen
+  // minutes ahead, one paced relay saying "slow down", and the alarm could
+  // never raise: not unanimous, and zeroed on every publish.
+  const acquitInvalid = [startRelay('future'), startRelay('future'), startRelay('expired')]
+  const acquitRate = startRelay('fastlimit')
+  const acquitPage = await openAgainst(
+    [...acquitInvalid.map((r) => r.url), acquitRate.url],
+    'acquit',
+  )
+  check('a session with three invalid relays and one rate-limiter starts', acquitPage !== null)
+
+  if (acquitPage) {
+    await wait(9000)
+    const st = await acquitPage.evaluate(() => ({
+      alarm: window.__game.net.clockAlarm ?? null,
+      muted: window.__game.net.mutedRelays.length,
+    }))
+    check(
+      'a "slow down" does not vouch for the clock',
+      st.alarm !== null,
+      st.alarm
+        ? `alarm up: ${st.alarm.reason}`
+        : 'no alarm — one rate limit acquitted three relays that read the timestamp',
+    )
+    check(
+      'and the rate-limiter is paced, not muted, so it stays in every publish',
+      st.muted === 0,
+      `${st.muted} muted`,
+    )
+    await acquitPage.close()
+  }
+
+  // --- but a refusal from below the gate really does acquit ------------------
+  //
+  // `blocked:` comes after the created_at check, so the relay examined the
+  // timestamp and passed it before refusing for another reason. That is
+  // stronger evidence the clock is fine than an acceptance is.
+  const gateInvalid = [startRelay('expired'), startRelay('expired'), startRelay('expired')]
+  const gateBlocked = startRelay('blocked')
+  const gatePage = await openAgainst(
+    [...gateInvalid.map((r) => r.url), gateBlocked.url],
+    'gate',
+  )
+  check('a session with three invalid relays and one blocker starts', gatePage !== null)
+
+  if (gatePage) {
+    // Five all-malformed publishes raise the alarm and fifteen refusals mute a
+    // relay, so there is a wide window where the blocker is still live and the
+    // streak would already have been long enough. Sample inside it.
+    await wait(1500)
+    const early = await gatePage.evaluate(() => ({
+      alarm: window.__game.net.clockAlarm ?? null,
+      muted: window.__game.net.mutedRelays.length,
+    }))
+    // This one passes against the old rule too, and for a different reason:
+    // there, *any* refusal cleared the streak. It is a guard against
+    // over-tightening the fix rather than a demonstration of it — the check
+    // above is the one that discriminates.
+    check(
+      'a relay that read the timestamp and passed it holds the alarm off',
+      early.alarm === null && early.muted === 0,
+      early.alarm ? `alarm raised while a blocker was still voting` : `no alarm, ${early.muted} muted`,
+    )
+    // Once it mutes it stops voting, and the three that agree are half the list.
+    await wait(12_000)
+    const late = await gatePage.evaluate(() => window.__game.net.clockAlarm ?? null)
+    check(
+      'and once it is gone the remaining three agree',
+      late !== null,
+      late ? `alarm up: ${late.reason}` : 'no alarm',
+    )
+    await gatePage.close()
   }
 
   // --- the genuine case ------------------------------------------------------

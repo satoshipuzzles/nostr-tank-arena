@@ -358,6 +358,25 @@ export function parseRateLimit(reason: string): number | null {
 }
 
 /**
+ * What one event costs against a `publishing_rate_limit`.
+ *
+ * The cap is denominated in *tokens*, not events, and an event is not
+ * necessarily one token:
+ *
+ *   cost = 1 + tags.count / 50 + content.length / 8192
+ *
+ * — the tag *count*, not tag bytes. A position tick carries one tag and about
+ * 88 characters of payload, so it costs 1.03. Pacing at 0.9 events per token of
+ * allowance therefore spends 0.927 of the cap rather than 0.9 of it, and the
+ * margin that was supposed to be ten percent is seven. It grows worse as tags
+ * do. Not broken, but the number being protected was not the number in the
+ * constant, so the pace is against cost now.
+ */
+export function eventCost(event: { tags: string[][]; content: string }): number {
+  return 1 + event.tags.length / 50 + event.content.length / 8192
+}
+
+/**
  * What we have agreed to slow down to for one relay.
  *
  * Muting a rate-limiting relay is the wrong response when it has told us its
@@ -654,9 +673,16 @@ export class Net {
       reason: null,
     }
     if (!targets.length) return Promise.resolve(outcome)
-    if (disposable) for (const url of targets) this.paceSpend(url, now)
+    if (disposable) {
+      const cost = eventCost(event)
+      for (const url of targets) this.paceSpend(url, now, cost)
+    }
     const results = this.pool.publish(targets, event)
     this.published += results.length
+    // Refusals split by which side of the created_at gate they came from. One
+    // prefix out of eight means the opposite of the other seven.
+    let aboveClockGate = 0
+    let belowClockGate = 0
     const settled = results.map((p, i) => {
       const url = targets[i]
       return p.then(
@@ -682,6 +708,15 @@ export class Net {
           }
           if (kind === 'refused') {
             outcome.refused++
+            // `rate-limited:` is the only refusal newlay can emit from above
+            // the created_at gate — the events bucket and the per-IP gate both
+            // run before the timestamp is looked at. So it is positive proof
+            // the relay never examined the clock. Every other prefix comes from
+            // below that line: `blocked:`, `restricted:`, `auth-required:` and
+            // `pow:` all mean created_at was examined and passed, which makes
+            // them *stronger* evidence the clock is fine than an acceptance is.
+            if (reason.trim().toLowerCase().startsWith('rate-limited:')) aboveClockGate++
+            else belowClockGate++
             outcome.reason = reason
           } else if (kind === 'malformed') {
             outcome.malformed++
@@ -753,11 +788,29 @@ export class Net {
       // deliberate: a probe should be able to *clear* the alarm and never to
       // deepen it, or the thing that holds publishing down would also be the
       // thing feeding itself.
-      const enoughAgree = outcome.sent >= 2 && outcome.malformed === outcome.sent
+      // Only relays that actually examined the timestamp get a vote. A
+      // `rate-limited:` refusal is not a dissenting opinion about the clock —
+      // it is a relay that never reached the question, and counting it as
+      // disagreement is what made this bug deterministic rather than a race.
+      //
+      // The pacer *manufactures* that refusal on purpose: escalating x1.1 and
+      // snapping back on the next refusal is the feedback signal, and without
+      // it we never learn a relay has forgiven us. So on any paced relay a
+      // rate limit arrives periodically, forever. Four relays, a clock fifteen
+      // minutes ahead, one of them paced: that one answers `rate-limited:`, the
+      // other three answer `invalid:`, and under the old rule the sample was
+      // "not unanimous" *and* the streak was zeroed on every publish. The
+      // player's clock is wrong, three relays refuse everything at -4 apiece,
+      // and the screen says nothing for the whole session.
+      const clockEvidence = outcome.accepted + outcome.malformed + belowClockGate
+      const enoughAgree = outcome.malformed >= 2 && outcome.malformed === clockEvidence
       const enoughVisible = outcome.sent * 2 >= this.relays.length
+      // An acquittal needs evidence too: an acceptance, or a refusal from below
+      // the gate. A relay that told us to slow down has not vouched for us.
+      const acquits = outcome.accepted > 0 || belowClockGate > 0
       if (enoughAgree && enoughVisible) {
         this.allMalformedStreak++
-      } else if (outcome.accepted > 0 || outcome.refused > 0) {
+      } else if (acquits) {
         // Anything the relays engaged with normally clears it. Silence does
         // not: an unreachable relay is no evidence the clock came right.
         this.allMalformedStreak = 0
@@ -790,9 +843,11 @@ export class Net {
     return true
   }
 
-  private paceSpend(url: string, now: number): void {
+  private paceSpend(url: string, now: number, cost: number): void {
     const p = this.pace.get(url)
-    if (p) p.nextAt = now + 60_000 / p.allowance
+    // Charge the interval by what the event costs the relay's bucket, not by
+    // counting events — see `eventCost`.
+    if (p) p.nextAt = now + (60_000 * cost) / p.allowance
   }
 
   /**

@@ -1061,6 +1061,13 @@ muting (before)              8.9         11%
 pacing (after)               0.9        100%
 ```
 
+**The cap is denominated in tokens, not events.** An event costs
+`1 + tags.count / 50 + content.length / 8192` — the tag *count*, not tag bytes —
+so a position tick with one tag and ~88 characters costs 1.03. Pacing at 0.9
+*events* per token of allowance therefore spends 0.927 of the cap, and the
+margin that was supposed to be ten percent is seven. It gets worse as tags grow.
+The pace is charged against cost now, so the margin is the one in the constant.
+
 So: parse `limit (\d+) events/min`, pace to 90% of it, and do not strike. A
 client under the cap takes no rate hits, so its minutes are clean, so the score
 climbs and the number in the string goes back up while you watch. The margin
@@ -1146,6 +1153,28 @@ reading the lobby.
 So five consecutive publishes that every asked relay calls invalid raise
 `net.clockAlarm`, publishing holds, and the relay's own words go on the screen.
 It is the only failure in this game a player can go and fix.
+
+**Only relays that examined the timestamp get a vote.** newlay checks whether
+you are going too fast before it checks whether you are wrong: the events bucket
+and the per-IP gate both run above the `created_at` check, and they are the only
+gates that answer `rate-limited:`. So that one prefix is positive proof the relay
+never reached the question. Every other refusal — `blocked:`, `restricted:`,
+`auth-required:`, `pow:` — comes from below the line, which means `created_at`
+was examined and passed, and those are *stronger* evidence the clock is fine
+than an acceptance is.
+
+One prefix out of eight means the opposite of the other seven, and treating them
+alike was not a corner case: the pacer manufactures a rate limit deliberately and
+forever, because escalating ×1.1 and snapping back on the next refusal is the
+feedback signal. Three relays refusing every event because the clock is fifteen
+minutes ahead, one paced relay saying "slow down", and the alarm could never
+raise — not unanimous, *and* the streak zeroed on every publish. The player's
+clock is wrong, three relays are refusing everything at −4 apiece, and the screen
+says nothing for the entire session.
+
+So the denominator is relays that voted on the clock — acceptances, malformed
+verdicts, and refusals from below the gate — and an acquittal needs one of the
+same. A relay that told us to slow down has not vouched for us.
 
 **Two distinct relays have to agree, and half the list has to be visible.**
 "Every relay we asked" is not "every relay", and the difference is biased in
