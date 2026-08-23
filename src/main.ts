@@ -227,7 +227,25 @@ function setView(next: ViewMode): void {
   view = next
   store('tank.view', view)
   running?.renderer.setView(view)
+  applyViewToInput()
   paintView()
+}
+
+/**
+ * Tell every local `Input` whether its sticks are being read from inside a tank.
+ *
+ * A gamepad's right stick and a phone's aim stick set an *absolute* gun angle,
+ * because screen space and board space line up in board view. In the cockpit
+ * they do not: the camera yaws with the gun, so a stick pushed up the glass has
+ * to mean "ahead of this vehicle" or the pad is aiming at a compass the player
+ * cannot see. The mouse is unaffected — `Renderer.toWorld` already answers with
+ * a point on the aim arc.
+ *
+ * Only in a single-player match, which is the only place a cockpit is offered.
+ */
+function applyViewToInput(): void {
+  if (!running) return
+  for (const p of running.players) p.input.hullRelative = view === 'cockpit'
 }
 paintView()
 
@@ -511,6 +529,7 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     cockpitAllowed = !twoPlayer
     if (!cockpitAllowed) view = 'board'
     renderer.setView(view)
+    for (const p of players) p.input.hullRelative = view === 'cockpit'
     paintView()
 
     canvas.addEventListener('mousemove', (e) => {

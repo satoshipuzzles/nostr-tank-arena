@@ -146,6 +146,35 @@ There is one camera and a couch match has two people looking at it; the board is
 genuinely a shared picture and a cockpit is one player's eyes. Split-screen is
 the real fix and it is a bigger change than this one.
 
+### The sticks stop being screen-space
+
+`Input` reads a gamepad's sticks and a phone's thumb sticks raw, because screen
+space and board space line up — the board camera is a single pitch with no roll,
+so screen-right is world +x and screen-down is world +z, and the note above
+`Input` says so. That fact is about the camera, and the cockpit camera breaks it:
+it yaws with the gun, so screen-right becomes "whichever way the turret is
+currently facing".
+
+Left alone, a pad in the cockpit aims at a compass the player cannot see. Push
+the right stick up and the gun swings to world-north regardless of which way the
+tank is pointing. So `Input.hullRelative` rotates both stick vectors into the
+hull's frame while the camera is inside the tank: screen-up is the direction the
+vehicle is pointing, screen-right is its right side.
+
+Two things it deliberately does not touch. The mouse, which never went through
+here — `Renderer.toWorld` already answers a cockpit cursor as a bearing on the
+aim arc. And the `tank` control scheme's throttle and steer, which are relative
+to the vehicle by definition; rotating those would turn "forward" into a slow
+spin. Only the readings that are a *direction on the board* — the direct
+scheme's drive vector, and every aim — are rotated.
+
+The guard is in `npm run test:controls`, and each case starts the gun 90 degrees
+from the right answer *and* 90 degrees from the board-space answer, so the
+turret can reach either one inside the window. An earlier draft parked the gun
+where the correct answer already was, which would have passed against a build
+that ignored the stick entirely. The two answers are 180 degrees apart at a hull
+of 90, which is not a gap a tolerance can blur.
+
 
 ## Play
 

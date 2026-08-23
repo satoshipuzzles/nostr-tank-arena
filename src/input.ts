@@ -92,6 +92,12 @@ export interface Binding {
  * Written down because it is a fact about the camera, not about the input, and
  * the day somebody swings the camera round the board this file starts lying
  * without a test failing.
+  *
+ * Cockpit view is the exception, and `hullRelative` below is what pays for it.
+ * The camera in there yaws with the gun, so screen-right stops being world +x
+ * and starts being "whichever way the turret happens to be facing". A thumb
+ * pushed up the glass has to mean *ahead of this vehicle*, which is the one
+ * reference the camera cannot move.
  */
 
 
@@ -169,6 +175,37 @@ export class Input {
    */
   touch: TouchSticks | null = null
 
+  /**
+   * True while this player's camera is inside their own tank.
+   *
+   * Sticks are read raw in board view because screen space and board space line
+   * up — see the note above. They do not line up in the cockpit, so both stick
+   * vectors are rotated into the hull's frame before anything else looks at
+   * them: screen-up is the direction the vehicle is pointing, screen-right is
+   * its right side. The mouse does not go through here at all; `toWorld` hands
+   * back a point on the far side of the aim arc and the maths is the same
+   * either way.
+   *
+   * Set per player rather than globally, because only one of them can be in a
+   * cockpit — see `cockpitAllowed` in `main.ts`.
+   */
+  hullRelative = false
+
+  /**
+   * A stick vector as the board sees it.
+   *
+   * Identity in board view. In the cockpit it is rotated by the hull heading
+   * plus a right angle, which is the rotation that sends screen-up (0, -1) to
+   * (cos hull, sin hull) — straight ahead of the tank.
+   */
+  private fromScreen(x: number, y: number, hull: number): { x: number; y: number } {
+    if (!this.hullRelative) return { x, y }
+    const a = hull + Math.PI / 2
+    const cos = Math.cos(a)
+    const sin = Math.sin(a)
+    return { x: x * cos - y * sin, y: x * sin + y * cos }
+  }
+
   constructor(
     private canvas: HTMLCanvasElement,
     readonly binding: Binding = SOLO,
@@ -213,13 +250,18 @@ export class Input {
     // `TouchSticks.touched` for why that is observed rather than detected.
     const touched = this.touch?.read()
     if (touched && (touched.drive || touched.fire)) {
-      const aim = touched.aim ? Math.atan2(touched.aim.y, touched.aim.x) : null
+      const aimed = touched.aim ? this.fromScreen(touched.aim.x, touched.aim.y, tank.hull) : null
+      const aim = aimed ? Math.atan2(aimed.y, aimed.x) : null
       const x = touched.drive?.x ?? 0
       const y = touched.drive?.y ?? 0
+      // The tank scheme is throttle and steer, which are relative to the vehicle
+      // already — there is nothing for `fromScreen` to do to them, and rotating
+      // them would turn "forward" into a slow spin.
       if (this.scheme === 'tank') {
         return { throttle: -y, steer: x, aim, fire: touched.fire }
       }
-      const drive = this.toHeading(x, y, tank.hull)
+      const heading = this.fromScreen(x, y, tank.hull)
+      const drive = this.toHeading(heading.x, heading.y, tank.hull)
       // Scaled by how far the thumb is pushed, the same as a stick. A touch
       // control that is all-or-nothing is why phone games feel twitchy: there
       // is no way to nudge into a corner.
@@ -250,16 +292,22 @@ export class Input {
           // not playing a game.
           this.aimlessGun(x, y, tank)
 
+    // Throttle and steer are relative to the vehicle already; only the direct
+    // scheme reads the keys as a direction on the board, and only that reading
+    // has to be rotated when the board is being seen from inside the turret.
     if (this.scheme === 'tank') {
       return { throttle: -y, steer: x, aim, fire }
     }
-    return { ...this.toHeading(x, y, tank.hull), aim, fire }
+    const heading = this.fromScreen(x, y, tank.hull)
+    return { ...this.toHeading(heading.x, heading.y, tank.hull), aim, fire }
   }
 
   /** Where a player with no aiming device is pointing: along the hull. */
   private aimlessGun(x: number, y: number, tank: { hull: number }): number | null {
     if (this.binding.mouse) return null
-    return x || y ? Math.atan2(y, x) : tank.hull
+    if (!x && !y) return tank.hull
+    const world = this.fromScreen(x, y, tank.hull)
+    return Math.atan2(world.y, world.x)
   }
 
   /**
@@ -290,6 +338,9 @@ export class Input {
       // pad one is never reached even when pad zero is sitting centred.
       if (this.binding.pad !== 'any' && pad.index !== this.binding.pad) continue
       const axis = this.calibrate(pad)
+      // Deadzoned first, then rotated: a deadzone is a property of the stick and
+      // rotating a resting stick into the hull frame would make it a small push
+      // in some direction rather than no push at all.
       const lx = deadzone(axis(0))
       const ly = deadzone(axis(1))
       const rx = deadzone(axis(2))
@@ -306,12 +357,17 @@ export class Input {
       if (claimed) this.usingGamepad = true
 
       // Right stick sets absolute gun angle; if it is centred the gun holds.
-      const aim = rx || ry ? Math.atan2(ry, rx) : null
+      // Deadzoned before `fromScreen`, not after: a deadzone is a property of
+      // the stick, and rotating a resting stick into the hull frame would turn
+      // no push at all into a small push in some direction.
+      const look = rx || ry ? this.fromScreen(rx, ry, tank.hull) : null
+      const aim = look ? Math.atan2(look.y, look.x) : null
       // A stick already gives a direction, so `direct` is what it wants — and
       // it is what every twin-stick game on a couch has trained people to
       // expect from the left stick.
       if (this.scheme === 'direct') {
-        const drive = this.toHeading(lx, ly, tank.hull)
+        const heading = this.fromScreen(lx, ly, tank.hull)
+        const drive = this.toHeading(heading.x, heading.y, tank.hull)
         // Scale by how far the stick is pushed, so it is not all-or-nothing.
         const push = Math.min(1, Math.hypot(lx, ly))
         return { throttle: drive.throttle * push, steer: drive.steer, aim, fire }

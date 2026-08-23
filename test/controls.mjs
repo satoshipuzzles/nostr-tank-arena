@@ -287,6 +287,70 @@ try {
     Math.abs(norm((gun * 180) / Math.PI - 90)) < 25,
     `gun at ${((gun * 180) / Math.PI).toFixed(0)}°, asked for 90°`,
   )
+  // ------------------------------- the same stick, seen from inside the tank
+  //
+  // In board view the right stick sets an absolute angle on the board, because
+  // screen space and board space line up. In the cockpit they do not — the
+  // camera yaws with the gun — so a stick pushed up the glass has to mean
+  // "ahead of this vehicle" instead.
+  //
+  // Every case below starts the gun 90 degrees away from the right answer *and*
+  // 90 degrees away from the wrong one, so the turret can reach either inside
+  // the window and arriving at one is a real choice rather than a slew rate. An
+  // earlier draft parked the gun where the correct answer already was, which
+  // would have passed against a build that ignored the stick entirely.
+  const stickGun = async (hullDeg, gunDeg) => {
+    await page.evaluate(
+      ({ h, g }) => {
+        const t = window.__game.tank
+        t.x = 1400
+        t.y = 1100
+        t.hull = h
+        t.gun = g
+        t.dead = false
+        t.reloadAt = 0
+      },
+      { h: (hullDeg * Math.PI) / 180, g: (gunDeg * Math.PI) / 180 },
+    )
+    await setPad([0, 0, 0, 0], undefined, newPad())
+    await wait(300)
+    // Straight up the glass.
+    await setPad([0, 0, 0, -0.9], [0, 0, 0, 0, 0, 0, 0, 0])
+    await wait(2600)
+    return page.evaluate(() => (window.__game.tank.gun * 180) / Math.PI)
+  }
+
+  const boardUp = await stickGun(0, 0)
+  check(
+    'in board view the right stick is an angle on the board',
+    Math.abs(norm(boardUp + 90)) < 25,
+    `gun at ${boardUp.toFixed(0)}°, asked for -90°`,
+  )
+
+  await page.evaluate(() => document.getElementById('view-toggle').click())
+  await wait(200)
+  const inCockpit = await page.evaluate(() => window.__renderer.viewMode)
+  check('the view toggle reaches the cockpit', inCockpit === 'cockpit', inCockpit)
+
+  // Hull across the board from screen-up: the right answer and the board-space
+  // answer are 180 degrees apart, which no tolerance can blur.
+  const cockpitUp = await stickGun(90, 0)
+  check(
+    'in the cockpit the right stick is a bearing off the hull',
+    Math.abs(norm(cockpitUp - 90)) < 25,
+    `gun at ${cockpitUp.toFixed(0)}°, hull at 90°, board-space answer is -90°`,
+  )
+
+  // Again with the hull somewhere else, because a check that only ever sees one
+  // heading cannot tell "follows the hull" from "happens to land on 90".
+  const cockpitAgain = await stickGun(-45, 45)
+  check(
+    'and it follows the hull when the hull moves',
+    Math.abs(norm(cockpitAgain + 45)) < 25,
+    `gun at ${cockpitAgain.toFixed(0)}°, hull at -45°, board-space answer is -90°`,
+  )
+
+  await page.evaluate(() => document.getElementById('view-toggle').click())
 } catch (err) {
   check('the run completed', false, err.message)
 } finally {
