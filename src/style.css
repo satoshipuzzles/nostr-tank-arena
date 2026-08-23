@@ -411,3 +411,249 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
   #controls-hint { display: none; }
   #scoreboard { min-width: 140px; font-size: 12px; }
 }
+
+/* ------------------------------------------------------- the lobby, redone */
+
+/*
+ * The dropdowns are gone.
+ *
+ * Three `<select>` elements for three binary choices is the shape a form takes
+ * when nobody has looked at it: the value is hidden until you open the thing,
+ * the native menu is drawn by the OS in a style nothing here can touch, and on
+ * iOS it is a full-screen wheel for picking between two words. A segmented
+ * control shows both options and the current answer at once, in one tap, in
+ * this game's own colours.
+ */
+.lobby-card { padding: 26px 26px 22px; }
+
+.brand { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+.brand h1 { margin: 0; font-size: 26px; letter-spacing: -0.6px; }
+/* The tank from the favicon, drawn in CSS so it costs no request. */
+.brand-mark {
+  width: 34px;
+  height: 34px;
+  flex: none;
+  border-radius: 9px;
+  background: #0d1119;
+  border: 1px solid var(--line);
+  position: relative;
+}
+.brand-mark::before, .brand-mark::after {
+  content: '';
+  position: absolute;
+  background: var(--accent);
+}
+.brand-mark::before { left: 6px; top: 13px; width: 16px; height: 9px; border-radius: 2px; }
+.brand-mark::after { left: 20px; top: 16px; width: 9px; height: 4px; border-radius: 1px; }
+
+.lobby-card .tag { margin-bottom: 18px; font-size: 13px; }
+.fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.fields label { margin-bottom: 12px; }
+
+.seg-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.seg-label { color: var(--dim); font-size: 13px; flex: none; width: 66px; }
+.seg {
+  display: flex;
+  flex: 1 1 auto;
+  gap: 4px;
+  padding: 4px;
+  background: #0b0f18;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.seg button {
+  flex: 1 1 0;
+  padding: 7px 10px;
+  font-size: 13px;
+  font-weight: 600;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--dim);
+}
+.seg button:hover { background: rgba(255, 255, 255, 0.04); filter: none; }
+.seg button[aria-pressed='true'] {
+  background: var(--accent);
+  color: #16120a;
+  border-color: var(--accent);
+}
+.advanced { margin: 18px 0 0; }
+.advanced #pads { margin: 10px 0 0; font-size: 13px; color: var(--dim); }
+.advanced textarea { margin-top: 14px; }
+
+/* ------------------------------------------------------------ touch sticks */
+
+/*
+ * Above the canvas, below the HUD, and transparent to every event.
+ *
+ * The layer never takes a pointer: the sticks are a picture of what the canvas
+ * listener is already tracking, and letting them capture would mean a thumb
+ * that slides off its own knob stops steering.
+ */
+#touch {
+  position: fixed;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+  display: none;
+}
+#touch.live { display: block; }
+
+.tstick {
+  position: absolute;
+  /* 140 outer, 56 knob, 2px border: full throw is exactly (136 - 56) / 2 = 40,
+     which is `RADIUS` in touch.ts. Change one and the knob leaves the ring. */
+  width: 140px;
+  height: 140px;
+  margin: -70px 0 0 -70px;
+  border-radius: 50%;
+  /*
+   * Contrast is set against the *board*, not against the menu. These sit over a
+   * daylight sky and a bright green felt, and the first version — white at 16%
+   * — was invisible in a screenshot of the actual game while looking perfectly
+   * reasonable in the stylesheet. Dark ring, light knob: it reads on the pale
+   * felt and on the shadowed walls both.
+   */
+  border: 2px solid rgba(10, 14, 22, 0.45);
+  background: radial-gradient(circle, rgba(10, 14, 22, 0.22) 0%, rgba(10, 14, 22, 0.05) 72%);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.22);
+  display: grid;
+  place-items: center;
+}
+/* The aiming half is the one that shoots, so it carries the game's accent. */
+.tstick.aim { box-shadow: inset 0 0 0 1px rgba(255, 196, 77, 0.55); }
+.tknob {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: rgba(223, 232, 245, 0.55);
+  border: 2px solid rgba(255, 255, 255, 0.85);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
+  will-change: transform;
+}
+.tstick.aim .tknob {
+  background: rgba(255, 196, 77, 0.75);
+  border-color: #ffd888;
+}
+
+/*
+ * Top centre, not bottom centre.
+ *
+ * The bottom of a phone screen is where the four HUD buttons live, and a
+ * centred pill down there sits straight on top of them — caught in a
+ * screenshot, invisible to every DOM assertion, because both elements are
+ * present and correct and simply occupy the same pixels. The top strip between
+ * the scoreboard and the status panel is empty on every viewport this game
+ * supports.
+ */
+#touch-hint {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 14px;
+  color: var(--dim);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+#touch-hint b { color: var(--text); }
+
+/* ---------------------------------------------------------- turn the phone */
+
+#rotate {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  background: #05070c;
+  color: var(--text);
+  text-align: center;
+}
+.rotate-inner { display: grid; justify-items: center; gap: 14px; color: var(--accent); }
+.rotate-inner p { margin: 0; color: var(--text); font-size: 15px; }
+
+/* -------------------------------------------------------------- the phone */
+
+/*
+ * Safe areas, unconditionally rather than under a media query.
+ *
+ * `env(safe-area-inset-*)` is 0px everywhere it does not apply, so this is a
+ * no-op on a desktop and the difference between a readable scoreboard and one
+ * under the notch on an iPhone held sideways. It needs `viewport-fit=cover` in
+ * the meta tag to be non-zero at all, which is why that is there.
+ */
+#scoreboard, #controls-hint, #feed { left: max(14px, env(safe-area-inset-left)); }
+#status, #hud-actions { right: max(14px, env(safe-area-inset-right)); }
+#scoreboard, #status { top: max(14px, env(safe-area-inset-top)); }
+#controls-hint, #hud-actions { bottom: max(14px, env(safe-area-inset-bottom)); }
+#touch-hint { top: max(14px, env(safe-area-inset-top)); }
+#feed { bottom: calc(84px + env(safe-area-inset-bottom)); }
+
+/*
+ * A phone in landscape is about 380px tall. Everything on the HUD has to give
+ * up room at once, and the two things that go first are the ones a player is
+ * not reading mid-round: the keyboard hint and the long relay diagnostics.
+ */
+@media (max-height: 460px) {
+  .panel { padding: 7px 10px; font-size: 11px; }
+  #scoreboard { min-width: 150px; }
+  #hud-actions button { padding: 5px 9px; font-size: 11px; }
+  #feed { bottom: calc(58px + env(safe-area-inset-bottom)); font-size: 11px; }
+  #feed div { padding: 3px 9px; }
+  .avatar { --av: 18px; }
+}
+
+/*
+ * The lobby on a phone: one column, bigger tap targets, and the card allowed to
+ * run the full height rather than being centred inside a scroll container that
+ * the address bar keeps resizing.
+ */
+@media (max-width: 620px) {
+  #lobby, #board { padding: 16px; align-items: start; }
+  .card { padding: 20px 18px; }
+  .fields { grid-template-columns: 1fr; gap: 0; }
+  .seg-row { flex-direction: column; align-items: stretch; gap: 5px; margin-bottom: 12px; }
+  .seg-label { width: auto; }
+  .seg button { padding: 10px; }
+  .row button { flex: 1 1 100%; padding: 13px 16px; }
+}
+
+/*
+ * A phone held sideways is 393 CSS pixels tall and the lobby was built for a
+ * desk. Measured on an iPhone 14 Pro in landscape: the card ran off the bottom
+ * and both Play buttons were below the fold, so the first thing a new player
+ * had to do was work out that a card with no visible scrollbar scrolls.
+ *
+ * Everything here is a subtraction. The tagline goes — it is the one element
+ * that is pure prose and the README says the same thing at more length. The
+ * rest is spacing.
+ */
+@media (max-height: 460px) and (orientation: landscape) {
+  #lobby { padding: 10px; align-items: center; }
+  .lobby-card { padding: 14px 18px; width: min(680px, 100%); }
+  .lobby-card .tag { display: none; }
+  .brand { margin-bottom: 10px; }
+  .brand h1 { font-size: 20px; }
+  .brand-mark { width: 26px; height: 26px; }
+  .brand-mark::before { left: 5px; top: 10px; width: 12px; height: 7px; }
+  .brand-mark::after { left: 15px; top: 12px; width: 7px; height: 3px; }
+  .fields label { margin-bottom: 8px; font-size: 12px; }
+  .fields input { padding: 6px 10px; }
+  .seg-row { margin-bottom: 6px; }
+  .seg { padding: 3px; }
+  .seg button { padding: 5px 8px; font-size: 12px; }
+  .row { margin-top: 12px; }
+  .row button { padding: 8px 14px; }
+  #lobby-note, .advanced { display: none; }
+}

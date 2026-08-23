@@ -2,15 +2,30 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
     <title>Nostr Tank Arena</title>
     <meta name="description" content="Four-player tank deathmatch with no game server. Identity, netcode and scores all ride on Nostr relays." />
     <meta property="og:title" content="Nostr Tank Arena" />
     <meta property="og:description" content="Four-player tank deathmatch with no game server. Identity, netcode and scores all ride on Nostr relays." />
+
+    <!-- Installable. `theme-color` is what paints the notch bar and the Android
+         status bar; without it an installed game sits inside a white strip. -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="theme-color" content="#0d1119" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Tank Arena" />
+    <link rel="apple-touch-icon" href="/icon-180.png" />
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230d1119'/><rect x='6' y='12' width='16' height='10' fill='%23ffc44d'/><rect x='20' y='15' width='9' height='4' fill='%23ffc44d'/></svg>" />
   </head>
   <body>
     <canvas id="stage"></canvas>
+
+    <!-- Sticks are drawn here rather than in WebGL: they are chrome, they never
+         need to be occluded by the board, and a div follows a thumb at the
+         compositor's frame rate rather than the game's. -->
+    <div id="touch"></div>
 
     <div id="hud" hidden>
       <div class="panel" id="scoreboard"></div>
@@ -24,6 +39,9 @@
       <div id="controls-hint">
         <span><b>WASD</b> drive</span><span><b>mouse</b> aim</span><span><b>click / space</b> fire</span
         ><span><b>gamepad</b> supported</span><span id="hint-p2" hidden><b>P2:</b> arrows + enter, or pad 2</span>
+      </div>
+      <div id="touch-hint" hidden>
+        <span><b>left thumb</b> drives</span><span><b>right thumb</b> aims and fires</span>
       </div>
       <div id="podium" hidden>
         <div class="card">
@@ -47,58 +65,59 @@
       </div>
     </div>
 
+    <!-- A landscape twin-stick shooter squeezed into portrait is a worse game,
+         not a more accessible one. Shown only once a finger has been seen, so a
+         narrow desktop window never gets told to rotate a phone it is not. -->
+    <div id="rotate" hidden>
+      <div class="rotate-inner">
+        <svg viewBox="0 0 64 64" width="72" height="72" aria-hidden="true">
+          <rect x="20" y="6" width="24" height="42" rx="4" fill="none" stroke="currentColor" stroke-width="3" />
+          <path d="M14 52a22 22 0 0 0 36 0" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" />
+          <path d="M50 46v7h-7" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+        <p>Turn your phone sideways</p>
+      </div>
+    </div>
+
     <div id="lobby">
-      <div class="card">
-        <h1>Nostr Tank Arena</h1>
+      <div class="card lobby-card">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <h1>Tank Arena</h1>
+        </div>
         <p class="tag">
-          Four-player deathmatch with no game server. Your npub is your identity, relays are the
-          netcode, your score is a signed event.
+          Four-player deathmatch, no game server. Your npub is your identity, relays are the
+          netcode, every round is a Bitcoin block.
         </p>
 
-        <label>Callsign<input id="name" maxlength="16" placeholder="tank" /></label>
-        <label>Room<input id="room" maxlength="24" placeholder="lobby" /></label>
+        <div class="fields">
+          <label>Callsign<input id="name" maxlength="16" placeholder="tank" autocomplete="off" /></label>
+          <label>Room<input id="room" maxlength="24" placeholder="lobby" autocomplete="off" /></label>
+        </div>
 
-        <label class="choice">Players
-          <select id="players">
-            <option value="1">One — this machine, one tank</option>
-            <option value="2">Two on this screen — second pad or the arrow keys</option>
-          </select>
-        </label>
+        <div class="seg-row" id="row-players">
+          <span class="seg-label">Players</span>
+          <div class="seg" id="players" role="group" aria-label="Players">
+            <button type="button" data-value="1">Solo</button>
+            <button type="button" data-value="2">Two on this screen</button>
+          </div>
+        </div>
 
-        <label class="choice">Sound
-          <select id="sound">
-            <option value="on">On — synthesised, no downloads</option>
-            <option value="off">Off</option>
-          </select>
-        </label>
+        <div class="seg-row">
+          <span class="seg-label">Steering</span>
+          <div class="seg" id="scheme" role="group" aria-label="Steering">
+            <button type="button" data-value="direct">Direct</button>
+            <button type="button" data-value="tank">Tank</button>
+          </div>
+        </div>
 
-        <label class="choice">Steering
-          <select id="scheme">
-            <option value="direct">Direct — press a direction, the tank goes that way</option>
-            <option value="tank">Tank — A and D rotate the hull</option>
-          </select>
-        </label>
-
-        <details id="pads-panel">
-          <summary>Controllers</summary>
-          <div id="pads">No gamepad detected. Plug one in or press a button on it.</div>
-          <p class="fine">
-            Browsers only reveal a controller after you press something on it — that is the
-            pairing step, and there is nothing for this game to configure. Left stick drives,
-            right stick aims, right trigger or <b>A</b> fires. Four pads on one machine all
-            work; each one drives the tank of whoever is signed in on that tab.
-          </p>
-        </details>
-
-        <details>
-          <summary>Relays</summary>
-          <textarea id="relays" rows="4" spellcheck="false"></textarea>
-          <p class="fine">
-            One websocket URL per line. Shells and positions ride on ephemeral events, so relays
-            forward them and store nothing. A relay you control will always feel better than a busy
-            public one.
-          </p>
-        </details>
+        <div class="seg-row">
+          <span class="seg-label">Sound</span>
+          <div class="seg" id="sound" role="group" aria-label="Sound">
+            <button type="button" data-value="on">On</button>
+            <button type="button" data-value="off">Off</button>
+          </div>
+        </div>
 
         <div class="row">
           <button id="play-nip07">Play with my npub</button>
@@ -108,6 +127,22 @@
           Guest play generates a throwaway key in this tab. Nothing to install, nothing saved.
         </p>
         <p class="error" id="lobby-error" hidden></p>
+
+        <details class="advanced">
+          <summary>Controllers and relays</summary>
+          <div id="pads">No gamepad detected. Plug one in or press a button on it.</div>
+          <p class="fine">
+            Browsers only reveal a controller after you press something on it — that is the
+            pairing step, and there is nothing for this game to configure. Left stick drives,
+            right stick aims, right trigger or <b>A</b> fires.
+          </p>
+          <textarea id="relays" rows="4" spellcheck="false"></textarea>
+          <p class="fine">
+            One websocket URL per line. Shells and positions ride on ephemeral events, so relays
+            forward them and store nothing. A relay you control will always feel better than a busy
+            public one.
+          </p>
+        </details>
       </div>
     </div>
 

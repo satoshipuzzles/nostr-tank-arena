@@ -20,6 +20,7 @@
 // pad index it owns, and whether it gets the mouse. Nothing is shared.
 
 import { angleDelta } from './sim'
+import type { TouchSticks } from './touch'
 
 export interface Controls {
   /** -1 reverse .. 1 forward */
@@ -77,6 +78,22 @@ export interface Binding {
   /** Only one player can have the mouse, and it is whoever is at the keyboard. */
   mouse: boolean
 }
+
+/**
+ * Screen space and board space line up, which is why the sticks can be read raw.
+ *
+ * The camera sits south of the board and above it, pitched over, with no roll —
+ * `Renderer.frameBoard` builds it from a single pitch and never rotates around
+ * the board. Work the basis out from that and screen-right is world +x, screen-
+ * down is world +z, and world z is what this game calls y. So a thumb pushed
+ * up-right on the glass is a tank driving up-right on the felt, with no
+ * transform in between.
+ *
+ * Written down because it is a fact about the camera, not about the input, and
+ * the day somebody swings the camera round the board this file starts lying
+ * without a test failing.
+ */
+
 
 export const SOLO: Binding = { keys: 'both', pad: 'any', mouse: true }
 /**
@@ -143,6 +160,15 @@ export class Input {
    */
   private triggerRest = new Map<number, number>()
 
+  /**
+   * Set for whoever owns the glass, which is player one and nobody else.
+   *
+   * Two people cannot share a phone, so there is no touch equivalent of the
+   * keyboard split. Player two on a touch device does not exist and the couch
+   * bindings never look at this.
+   */
+  touch: TouchSticks | null = null
+
   constructor(
     private canvas: HTMLCanvasElement,
     readonly binding: Binding = SOLO,
@@ -181,6 +207,26 @@ export class Input {
   }
 
   read(tank: { x: number; y: number; gun: number; hull: number }): Controls {
+    // A thumb on the glass outranks everything. On a phone there is no keyboard
+    // to lose and no pad to shadow, and on a laptop with a touchscreen the
+    // sticks do not exist until a finger has actually arrived — see
+    // `TouchSticks.touched` for why that is observed rather than detected.
+    const touched = this.touch?.read()
+    if (touched && (touched.drive || touched.fire)) {
+      const aim = touched.aim ? Math.atan2(touched.aim.y, touched.aim.x) : null
+      const x = touched.drive?.x ?? 0
+      const y = touched.drive?.y ?? 0
+      if (this.scheme === 'tank') {
+        return { throttle: -y, steer: x, aim, fire: touched.fire }
+      }
+      const drive = this.toHeading(x, y, tank.hull)
+      // Scaled by how far the thumb is pushed, the same as a stick. A touch
+      // control that is all-or-nothing is why phone games feel twitchy: there
+      // is no way to nudge into a corner.
+      const push = Math.min(1, Math.hypot(x, y))
+      return { throttle: drive.throttle * push, steer: drive.steer, aim, fire: touched.fire }
+    }
+
     const map = DRIVE_KEYS[this.binding.keys]
     const has = (codes: string[]) => codes.some((c) => this.keys.has(c))
     // A held key beats the pad, always — but only a key *this player* owns.

@@ -99,7 +99,9 @@ try {
 
   await page.type('#name', 'couch')
   await page.type('#room', 'couch' + Math.floor(Math.random() * 1e6))
-  await page.select('#players', '2')
+  // The lobby's dropdowns are segmented buttons now — same values, same
+  // `.value` interface in `main.ts`, but nothing for `page.select` to talk to.
+  await page.click('#players button[data-value="2"]')
   await page.click('#play-guest')
 
   const started = await page

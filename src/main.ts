@@ -4,6 +4,7 @@ import { Sfx } from './audio'
 import { BlockClock } from './blocks'
 import { Game } from './game'
 import { Input, PLAYER_TWO, SOLO, type Scheme } from './input'
+import { TouchSticks } from './touch'
 
 import { DEFAULT_RELAYS, Identity, Net } from './nostr'
 import { Renderer } from './render'
@@ -26,10 +27,105 @@ const board = $('board')
 const nameInput = $<HTMLInputElement>('name')
 const roomInput = $<HTMLInputElement>('room')
 const relayInput = $<HTMLTextAreaElement>('relays')
-const schemeInput = $<HTMLSelectElement>('scheme')
-const soundInput = $<HTMLSelectElement>('sound')
-const playersInput = $<HTMLSelectElement>('players')
 const lobbyError = $('lobby-error')
+
+/**
+ * A segmented control that answers to `.value`, the way the `<select>` it
+ * replaced did.
+ *
+ * Deliberately the same interface: every read and write in this file already
+ * spoke `.value`, and a redesign that also rewrites nine call sites is a
+ * redesign that breaks something on the way. `aria-pressed` carries the state
+ * for both the stylesheet and a screen reader, so there is no separate class to
+ * keep in sync with the truth.
+ */
+function segmented(id: string): { value: string } {
+  const root = $(id)
+  const buttons = [...root.querySelectorAll<HTMLButtonElement>('button[data-value]')]
+  let current = buttons[0]?.dataset.value ?? ''
+  const paint = () => {
+    for (const b of buttons) b.setAttribute('aria-pressed', String(b.dataset.value === current))
+  }
+  for (const b of buttons) {
+    b.addEventListener('click', () => {
+      current = b.dataset.value ?? current
+      paint()
+    })
+  }
+  paint()
+  return {
+    get value() {
+      return current
+    },
+    set value(v: string) {
+      if (buttons.some((b) => b.dataset.value === v)) current = v
+      paint()
+    },
+  }
+}
+
+const schemeInput = segmented('scheme')
+const soundInput = segmented('sound')
+const playersInput = segmented('players')
+
+/**
+ * The glass. One per page, alive from load, because the first thing it has to
+ * answer is "is this a phone" and that is answered by a finger arriving.
+ */
+const sticks = new TouchSticks(canvas, $('touch'))
+
+/**
+ * Two-player-on-one-screen is a couch feature and there is no couch on a phone.
+ *
+ * Left in the DOM and hidden rather than removed, because the answer can change
+ * inside a session: a tablet with a keyboard is a desk until somebody picks it
+ * up, and a laptop with a touchscreen is a desk that occasionally gets poked.
+ */
+function paintTouchAffordances(): void {
+  if (!sticks.touched) return
+  $('row-players').hidden = true
+  playersInput.value = '1'
+  $('controls-hint').hidden = true
+  // Retired the moment a stick has been raised. An instruction that stays on
+  // screen after it has been followed is not an instruction any more, it is
+  // furniture — and on a 393px-tall phone it is furniture sitting on top of the
+  // buttons.
+  $('touch-hint').hidden = sticks.used
+  paintRotate()
+}
+
+/**
+ * Portrait on a touch device gets a full-stop, not a squeezed layout.
+ *
+ * Gated on three things, and each one is load-bearing. A finger must have been
+ * seen, so a narrow desktop window is never told to turn a phone it does not
+ * have. The game must be running, because the lobby reads perfectly well in
+ * portrait and blocking it would mean typing a callsign sideways before you
+ * have decided to play. And the window must actually be taller than it is
+ * wide, which is the only one of the three anybody would have guessed.
+ */
+function paintRotate(): void {
+  const portrait = window.innerHeight > window.innerWidth
+  $('rotate').hidden = !(running && sticks.touched && portrait)
+}
+window.addEventListener('resize', paintRotate)
+window.addEventListener('orientationchange', paintRotate)
+// Cheap, and it is the only way to notice the first touch: nothing else on the
+// page is listening for one before the game starts.
+window.addEventListener('pointerdown', paintTouchAffordances, { passive: true })
+
+/**
+ * Register the service worker, which is what makes the game installable.
+ *
+ * Failure is not worth reporting to a player: without it the game still runs,
+ * it simply cannot be added to a home screen and will not open offline. Vite
+ * emits the file to the site root untouched — see `public/sw.js`.
+ */
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    void navigator.serviceWorker.register('/sw.js').catch(() => {})
+  })
+}
 
 const params = new URLSearchParams(location.search)
 const stored = (k: string) => {
@@ -203,6 +299,9 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     await game.start()
 
     const players: Player[] = [{ game, input: new Input(canvas, { ...SOLO }) }]
+    // Player one owns the glass. There is no second thumb pair on a phone, and
+    // the couch bindings never read this.
+    players[0].input.touch = sticks
 
     if (twoPlayer) {
       // A throwaway key, deliberately. Player two is a real npub in the room
@@ -321,6 +420,22 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
 
     lobby.hidden = true
     hud.hidden = false
+    paintTouchAffordances()
+    // Best effort, and deliberately unreported. Android gives us the whole
+    // screen and will hold the rotation; iOS Safari refuses both and the game
+    // is played in the browser chrome, which is why the install prompt and the
+    // rotate screen exist. Neither refusal is worth a message.
+    if (sticks.touched) {
+      void document.documentElement.requestFullscreen?.().then(
+        () => {
+          const orientation = screen.orientation as ScreenOrientation & {
+            lock?: (o: string) => Promise<void>
+          }
+          void orientation?.lock?.('landscape').catch(() => {})
+        },
+        () => {},
+      )
+    }
     loop()
   } catch (err) {
     fail(err instanceof Error ? err.message : String(err))

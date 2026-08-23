@@ -55,7 +55,7 @@ try {
   await page.goto(`${url}?room=shot${Math.floor(Math.random() * 1e6)}`)
   await page.type('#name', 'shot')
   // `node test/shot.mjs out.png 0300 2` photographs a couch match.
-  if (process.argv[4] === '2') await page.select('#players', '2')
+  if (process.argv[4] === '2') await page.click('#players button[data-value="2"]')
   await page.click('#play-guest')
   await new Promise((r) => setTimeout(r, 5000))
 

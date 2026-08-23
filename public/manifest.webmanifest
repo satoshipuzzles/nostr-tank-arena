@@ -1,0 +1,18 @@
+{
+  "name": "Nostr Tank Arena",
+  "short_name": "Tank Arena",
+  "description": "Four-player tank deathmatch with no game server. Identity, netcode and scores all ride on Nostr relays.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "fullscreen",
+  "display_override": ["fullscreen", "standalone"],
+  "orientation": "landscape",
+  "background_color": "#05070c",
+  "theme_color": "#0d1119",
+  "categories": ["games"],
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
