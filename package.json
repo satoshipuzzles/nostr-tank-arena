@@ -9,7 +9,8 @@
     "preview": "vite preview --port 4173 --strictPort",
     "test:live": "node test/two-player.mjs",
     "test:sound": "node test/sound.mjs",
-    "shot": "node test/shot.mjs"
+    "shot": "node test/shot.mjs",
+    "test:controls": "node test/controls.mjs"
   },
   "dependencies": {
     "nostr-tools": "^2.10.4",
