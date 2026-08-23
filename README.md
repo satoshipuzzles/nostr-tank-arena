@@ -1,10 +1,42 @@
 # Nostr Tank Arena
 
-Four-player top-down tank deathmatch with **no game server**. Your npub is your
-identity, Nostr relays are the netcode, and your score is an event you signed
-yourself.
+Four-player tank deathmatch on a board, with **no game server**. Your npub is
+your identity, Nostr relays are the netcode, and your score is an event you
+signed yourself.
 
 Slow shells, 3 hits to kill, cover you can hide behind, instant respawn.
+
+## The board
+
+The arena renders in three.js: a chunky toy board in daylight, plastic tanks
+with real shadows, and confetti when somebody goes down.
+
+The camera never scrolls. Everybody sees the whole board at once, the way four
+people see the same television — that is the couch-multiplayer feel this game is
+built around, and it is unchanged from the 2D version.
+
+The simulation is still two-dimensional and stays that way. Arena `(x, y)` maps
+to world `(x, height, y)`, so nothing in `sim.ts`, `arena.ts` or the netcode had
+to learn about a third axis; `render.ts` is the only file that knows the game is
+drawn in 3D at all. Effects are derived by diffing state between frames rather
+than by adding callbacks to the game — a shell id that is new means somebody
+fired, an id that vanished means it hit something, a tank that flipped to dead
+means confetti.
+
+Two things worth knowing:
+
+- **Aim is a ray, not a divide.** The cursor is unprojected through the camera
+  onto a horizontal plane at turret height, so pointing at a tank aims at that
+  tank rather than at the ground behind it.
+- **The renderer gives up quality on a slow device, on purpose.** `main.ts`
+  clamps the simulation step to 50ms so a backgrounded tab cannot teleport
+  everybody on return — which means a client rendering at 5fps also *simulates*
+  at a quarter speed, and its tank crawls while everyone else's moves normally.
+  So a sustained frame time over 30ms drops shadows and the pixel ratio, one way,
+  once. Playing at the same speed as everyone else beats a prettier board.
+
+WebGL is now required. A browser that cannot open a context says so in words
+rather than failing into a black screen.
 
 ## Why tanks and not an arena FPS
 
@@ -130,11 +162,40 @@ src/sim.ts       tank and shell physics, all the feel constants
 src/game.ts      netcode: subscribe, interpolate, hit detection, authority
 src/nostr.ts     identity (real key + session key) and relay pool
 src/protocol.ts  wire format for every custom kind
-src/render.ts    canvas 2D
+src/render.ts    three.js: the board, the tanks, the confetti, the camera
 src/scores.ts    signed score records and the leaderboard query
 src/main.ts      lobby, HUD, game loop
 test/two-player.mjs  headless two-browser smoke test against live relays
 ```
+
+## Testing
+
+```bash
+npm run build && npm run preview &
+npm run test:live
+```
+
+Two real browsers, two guest npubs, one room, live public relays. It waits for
+the clients to find each other, drives one tank into the other, and asserts the
+kill came back as a signed death event.
+
+Three of its checks exist because 3D fails quietly:
+
+- a pixel out at the edge of the window and one in the middle, at the same
+  height. The sky is a vertical gradient, so an empty scene makes them identical
+  — the board is the only thing that can make them differ.
+- the tank is sent to the arena position under a chosen pixel, and that pixel is
+  read back. If the unprojection is right the tank is there and the pixels
+  changed; if it is wrong the tank is elsewhere and that grass looks the same.
+  Comparing the gun angle against `toWorld` instead proves nothing, because
+  `toWorld` is the thing under test — a deliberately broken flat mapping passed
+  that version of the check.
+- the gun then has to swing to the cursor, which covers the rest of the chain.
+
+Headless Chrome needs `--use-gl=angle --use-angle=swiftshader
+--enable-unsafe-swiftshader` to produce a context at all; the flags are in the
+test. Software rasterisation is slow enough that the game visibly simulates in
+slow motion, which is what the adaptive quality drop above is for.
 
 ## Tuning
 

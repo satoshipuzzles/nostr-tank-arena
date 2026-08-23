@@ -92,12 +92,26 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     const game = new Game(identity, net, room, name, color)
     await game.start()
 
-    const renderer = new Renderer(canvas)
+    // The board is WebGL now. A browser that cannot give us a context needs to
+    // hear that in words, not as "Error creating WebGL context" from a library
+    // it has never heard of.
+    let renderer: Renderer
+    try {
+      renderer = new Renderer(canvas)
+    } catch (err) {
+      game.dispose()
+      throw new Error(
+        'This browser could not open a WebGL context, so the 3D board cannot draw. ' +
+          'Check that hardware acceleration is on, or try another browser. ' +
+          (err instanceof Error ? `(${err.message})` : ''),
+      )
+    }
     const input = new Input(canvas)
     running = { game, renderer, input }
     // Exposed on purpose: the two-player smoke test in test/ drives the match
     // through this handle, and it is genuinely useful in the console.
-    ;(window as unknown as { __game: Game }).__game = game
+    ;(window as unknown as { __game: Game; __renderer: Renderer }).__game = game
+    ;(window as unknown as { __renderer: Renderer }).__renderer = renderer
 
     canvas.addEventListener('mousemove', (e) => {
       input.mouseWorld = renderer.toWorld(e.clientX, e.clientY)

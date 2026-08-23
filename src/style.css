@@ -119,11 +119,25 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
   left: 14px;
   display: flex;
   flex-direction: column;
+  align-items: flex-start;
   gap: 4px;
   font-size: 13px;
   text-shadow: 0 1px 3px #000;
 }
 
+#feed div {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 12px;
+}
+
+/*
+ * The HUD floats over a daylight sky now, not over a near-black canvas. Dim
+ * text and transparent buttons were legible against #07090f and vanish against
+ * a bright board, so anything sitting directly on the scene carries its own
+ * dark plate.
+ */
 #controls-hint {
   position: absolute;
   bottom: 14px;
@@ -132,6 +146,10 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
   gap: 16px;
   flex-wrap: wrap;
   color: var(--dim);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 7px 14px;
   font-size: 12px;
 }
 #controls-hint b { color: var(--text); }
@@ -145,6 +163,9 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
   flex-wrap: wrap;
 }
 #hud-actions button { padding: 7px 12px; font-size: 12px; }
+/* Ghost buttons over the sky need a plate of their own for the same reason. */
+#hud-actions button.ghost { background: var(--panel); border-color: var(--line); }
+#hud-actions button.ghost:hover { background: #1b2536; filter: none; }
 
 #board-rows { margin: 16px 0; display: flex; flex-direction: column; gap: 4px; }
 #board-rows .score-row { border-bottom: 1px solid rgba(255,255,255,0.05); }

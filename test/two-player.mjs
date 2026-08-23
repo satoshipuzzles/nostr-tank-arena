@@ -32,7 +32,15 @@ if (!executablePath) {
 const FLAGS = [
   '--no-sandbox',
   '--window-size=1280,800',
-  '--use-gl=swiftshader',
+  // The board is three.js now, so headless Chrome has to produce a real WebGL
+  // context or the game never leaves the lobby. `--use-gl=swiftshader` alone
+  // stopped being enough: current Chrome refuses the software rasteriser
+  // without --enable-unsafe-swiftshader and reports only
+  // "BindToCurrentSequence failed", which looks like a game bug and is not.
+  '--use-gl=angle',
+  '--use-angle=swiftshader',
+  '--enable-unsafe-swiftshader',
+  '--disable-gpu-sandbox',
   // Chrome only gives requestAnimationFrame to the frontmost tab. Without
   // these the "other player" silently stops simulating and the test proves
   // nothing at all.
@@ -70,7 +78,12 @@ async function join(browser, label, name) {
   await page.type('#name', name)
   await page.type('#room', ROOM)
   await page.click('#play-guest')
-  await page.waitForSelector('#hud:not([hidden])', { timeout: 15000 })
+  try {
+    await page.waitForSelector('#hud:not([hidden])', { timeout: 15000 })
+  } catch {
+    const why = await page.evaluate(() => document.getElementById('lobby-error')?.textContent)
+    throw new Error(`${label} never got past the lobby: ${why || 'no message'}`)
+  }
   return page
 }
 
@@ -136,12 +149,14 @@ try {
       }
     })
     await a.keyboard.down('Space')
-    await wait(140)
+    await wait(240)
     await a.keyboard.up('Space')
-    await wait(1400)
+    await wait(2600)
     if ((await snap(b)).deaths > 0) break
   }
-  await wait(2000)
+  // RESPAWN_DELAY is 2.5s and the death is detected at the end of a poll, so a
+  // 2s wait here was a coin flip on whether bravo was back yet.
+  await wait(3800)
 
   const finalA = await snap(a)
   const finalB = await snap(b)
@@ -149,7 +164,91 @@ try {
   check('alpha credited with the kill', finalA.kills >= 1, JSON.stringify(finalA.feed))
   check('kill feed names the killer', finalA.feed.some((t) => t.includes('alpha') && t.includes('bravo')))
   check('bravo respawned at full hp', !finalB.dead && finalB.hp === 3, `hp=${finalB.hp} dead=${finalB.dead}`)
+  // The board renders in WebGL, and the aim is a ray cast through the cursor
+  // onto a plane rather than a divide. Both are new, and both fail silently: a
+  // dead context still runs the simulation, and a wrong unprojection just aims
+  // somewhere plausible.
+  //
+  // Last in the run, deliberately. Moving the mouse leaves the gun tracking
+  // wherever the cursor ended up, and the duel above needs it pointed down the
+  // lane — an earlier version of this block quietly turned alpha's turret away
+  // and the kill checks failed for a reason that had nothing to do with them.
+  const gl = await a.evaluate(() => {
+    const c = document.getElementById('stage')
+    return { w: c.width, h: c.height, ctx: !!(c.getContext('webgl2') || c.getContext('webgl')) }
+  })
+  check('the 3D board has a live WebGL context', gl.ctx && gl.w > 0 && gl.h > 0, `${gl.w}x${gl.h}`)
+
+  // Two pixels at the same height: one out at the edge where only sky can be,
+  // one in the middle where the board has to be. The sky is a vertical
+  // gradient, so an empty scene makes these two identical — the board is the
+  // only thing that can make them differ.
+  const [sky, mid] = await a.evaluate(() => [
+    window.__renderer.probePixels(40, 400),
+    window.__renderer.probePixels(640, 400),
+  ])
+  const apart = Math.abs(sky[0] - mid[0]) + Math.abs(sky[1] - mid[1]) + Math.abs(sky[2] - mid[2])
+  check('and the board is actually on the screen', sky[3] > 0 && mid[3] > 0 && apart > 60,
+    `sky ${sky.join()} board ${mid.join()} apart ${apart}`)
+
+  // Does the cursor point where it looks like it points?
+  //
+  // Comparing the gun angle against `toWorld` would prove nothing — that is the
+  // function under test, and an unprojection that is wrong in a self-consistent
+  // way passes it. (It did: a deliberately broken flat mapping sailed through
+  // an earlier version of this check.) So close the loop through the rendered
+  // image instead. Send the tank to the spot under a chosen pixel, and look at
+  // that pixel: if the unprojection is right, the tank is now there and the
+  // pixels changed. If it is wrong, the tank is somewhere else on the board and
+  // that patch of grass looks exactly as it did.
+  const PIXEL = [380, 400]
+  const PATCH = [PIXEL[0] - 22, PIXEL[1] - 34, 44, 44]
+  const park = (x, y) => a.evaluate(([px, py]) => {
+    const g = window.__game
+    g.tank.x = px
+    g.tank.y = py
+    g.tank.dead = false
+    g.tank.hp = 3
+  }, [x, y])
+  const patch = () => a.evaluate((r) => window.__renderer.probePixels(r[0], r[1], r[2], r[3]), PATCH)
+  const spread = (u, v) => u.reduce((acc, n, i) => acc + Math.abs(n - v[i]), 0) / u.length
+
+  await park(1430, 170)
+  await wait(500)
+  const empty = await patch()
+  const aimed = await a.evaluate((p) => window.__renderer.toWorld(p[0], p[1]), PIXEL)
+  await park(aimed.x, aimed.y)
+  await wait(500)
+  const occupied = await patch()
+  const landed = await a.evaluate(() => ({ x: window.__game.tank.x, y: window.__game.tank.y }))
+  check('a tank sent to where a pixel points appears at that pixel',
+    spread(empty, occupied) > 12,
+    `arena ${Math.round(aimed.x)},${Math.round(aimed.y)} → landed ${Math.round(landed.x)},${Math.round(landed.y)}, pixels moved ${spread(empty, occupied).toFixed(1)}`)
+
+  // And with the unprojection trusted, the gun follows the cursor to it.
+  const angleGap = (x, y) => Math.abs(Math.atan2(Math.sin(x - y), Math.cos(x - y)))
+  // Generous waits: under software rasterisation a frame can take 200ms, and
+  // `main.ts` clamps the simulation step to 50ms so a backgrounded tab cannot
+  // teleport everyone — which means a slow renderer also simulates in slow
+  // motion. On a real GPU this settles in a fraction of the time.
+  for (const [px, py, where] of [[900, 250, 'up and right'], [300, 620, 'down and left']]) {
+    await park(400, 300)
+    await a.mouse.move(px, py)
+    await wait(2600)
+    const r = await a.evaluate(([x, y]) => {
+      const g = window.__game
+      const w = window.__renderer.toWorld(x, y)
+      return { gun: g.tank.gun, want: Math.atan2(w.y - g.tank.y, w.x - g.tank.x) }
+    }, [px, py])
+    check(`the gun swings to the cursor ${where}`, angleGap(r.gun, r.want) < 0.25,
+      `gun ${r.gun.toFixed(2)} want ${r.want.toFixed(2)}`)
+  }
+
   check('no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '))
+
+  // Not a pass/fail: on a GPU this stays 'full', and under swiftshader it is
+  // expected to drop. Printed so a slow run is legible rather than mysterious.
+  console.log('      render quality settled at:', await a.evaluate(() => window.__renderer.renderQuality))
 
   if (process.env.TANK_SHOTS) {
     await a.screenshot({ path: process.env.TANK_SHOTS + '/alpha.png' })
