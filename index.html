@@ -20,6 +20,19 @@
         <span><b>WASD</b> drive</span><span><b>mouse</b> aim</span><span><b>click / space</b> fire</span
         ><span><b>gamepad</b> supported</span>
       </div>
+      <div id="podium" hidden>
+        <div class="card">
+          <h2 id="podium-title">Round over</h2>
+          <p class="fine" id="podium-sub"></p>
+          <div id="podium-rows"></div>
+          <div class="row">
+            <button id="podium-publish">Sign and publish this round</button>
+            <button id="podium-close" class="ghost">Keep playing</button>
+          </div>
+          <p class="fine" id="podium-note"></p>
+        </div>
+      </div>
+
       <div id="hud-actions">
         <button id="copy-link" class="ghost">Copy invite link</button>
         <button id="publish-score" class="ghost">Publish score</button>
@@ -37,6 +50,17 @@
 
         <label>Callsign<input id="name" maxlength="16" placeholder="tank" /></label>
         <label>Room<input id="room" maxlength="24" placeholder="lobby" /></label>
+
+        <details id="pads-panel">
+          <summary>Controllers</summary>
+          <div id="pads">No gamepad detected. Plug one in or press a button on it.</div>
+          <p class="fine">
+            Browsers only reveal a controller after you press something on it — that is the
+            pairing step, and there is nothing for this game to configure. Left stick drives,
+            right stick aims, right trigger or <b>A</b> fires. Four pads on one machine all
+            work; each one drives the tank of whoever is signed in on that tab.
+          </p>
+        </details>
 
         <details>
           <summary>Relays</summary>
@@ -66,6 +90,10 @@
           Self-reported and signed by each player. Anyone can publish any number — see
           <b>How to cheat this</b> in the README.
         </p>
+        <div class="row tabs">
+          <button id="board-tab-block" class="ghost">This block</button>
+          <button id="board-tab-all" class="ghost">All time</button>
+        </div>
         <div id="board-rows">loading…</div>
         <button id="board-close" class="ghost">Close</button>
       </div>

@@ -39,6 +39,12 @@ import {
 import type { Controls } from './input'
 
 const TICK_MS = 100 // 10Hz state broadcast
+/** Kills in a row that earn a full repair. */
+const STREAK_REPAIR = 3
+/** Seconds without taking a hit before one point of hull comes back. */
+const REGEN_AFTER = 8
+/** How long the podium sits between rounds. */
+export const INTERMISSION_MS = 9_000
 const SESSION_REBROADCAST_MS = 12_000
 const INTERP_MS = 130
 const MAX_EXTRAPOLATE_MS = 260
@@ -75,6 +81,14 @@ export interface FeedEntry {
   at: number
 }
 
+/** A finished round, kept so the podium has something to show. */
+export interface RoundResult {
+  height: number
+  layout: string
+  standings: { name: string; kills: number; deaths: number; color: number; you: boolean }[]
+  endedAt: number
+}
+
 /** Six hues nobody can confuse for each other, even as 40px tanks. */
 const PALETTE = [48, 190, 320, 100, 20, 265]
 
@@ -91,6 +105,16 @@ export class Game {
   readonly feed: FeedEntry[] = []
   kills = 0
   deaths = 0
+  /** Consecutive kills without dying. Resets on death, drives the repair. */
+  streak = 0
+  bestStreak = 0
+  /** performance.now() of the last hit we took, for the regen timer. */
+  private lastHitAt = 0
+  /** The block this round belongs to. 0 until the chain tip arrives. */
+  round = 0
+  /** Set when a block lands; the podium is up until it clears. */
+  lastRound: RoundResult | null = null
+  intermissionUntil = 0
   /** Our own hue after spreading. Always gets first pick, so it never moves. */
   displayColor: number
   /** Set when a relay subscription has produced at least one event. */
@@ -299,8 +323,10 @@ export class Game {
           ? (this.peers.get(p.k)?.name ?? 'someone')
           : null
 
-    if (p.k === this.identity.sessionPubkey) this.kills++
-    else if (p.k) {
+    if (p.k === this.identity.sessionPubkey) {
+      this.kills++
+      this.onOwnKill()
+    } else if (p.k) {
       const killer = this.peers.get(p.k)
       if (killer) killer.kills++
     }
@@ -308,6 +334,58 @@ export class Game {
     this.pushFeed(
       killerName ? `${killerName} killed ${victim.name}` : `${victim.name} self-destructed`,
     )
+  }
+
+  /**
+   * A kill we were credited with.
+   *
+   * The repair is deliberately self-authoritative: our own HP is the one number
+   * this client is already allowed to decide, so a streak reward needs no new
+   * trust, no new event kind and no agreement with anybody. It rides out in the
+   * next state tick like any other HP change, and a cheater who hands themselves
+   * hull points was already able to do exactly that.
+   */
+  private onOwnKill(): void {
+    this.streak++
+    this.bestStreak = Math.max(this.bestStreak, this.streak)
+    if (this.streak === STREAK_REPAIR && this.tank.hp < MAX_HP) {
+      this.tank.hp = MAX_HP
+      this.repairedAt = performance.now()
+      this.pushFeed(`${STREAK_REPAIR} in a row — hull repaired`)
+    } else if (this.streak > STREAK_REPAIR) {
+      this.pushFeed(`${this.streak} in a row`)
+    }
+  }
+
+  /** Set when a repair or a regen tick lands, so the renderer can show it. */
+  repairedAt = 0
+
+  /**
+   * Seconds without being hit before a hull point comes back.
+   *
+   * A field rather than a constant because it is a balance number, and because
+   * it interacts with everything: set it too low and a duel cannot be finished,
+   * which is exactly what happened the first time the smoke test ran with regen
+   * enabled — the victim healed between shells and no kill ever landed. The
+   * test now turns it off to assert the kill path and back on to assert regen,
+   * rather than the two quietly fighting.
+   */
+  regenAfter = REGEN_AFTER
+
+  /**
+   * One hull point back after a spell without being hit.
+   *
+   * Changes the pacing more than it looks: it makes breaking off a losing fight
+   * a real option instead of a slow death, which on a board this open is the
+   * difference between four players circling and four players committing.
+   */
+  private regen(now: number): void {
+    if (this.tank.dead || this.tank.hp >= MAX_HP) return
+    if (now - this.lastHitAt < this.regenAfter * 1000) return
+    this.tank.hp++
+    this.lastHitAt = now
+    this.repairedAt = now
+    this.pushFeed(`patched up — ${this.tank.hp}/${MAX_HP}`)
   }
 
   private pushFeed(text: string): void {
@@ -325,6 +403,7 @@ export class Game {
     } else {
       stepTank(this.tank, controls.throttle, controls.steer, controls.aim, dt)
       if (controls.fire && now >= this.tank.reloadAt) this.fire(now)
+      this.regen(now)
     }
 
     for (const shell of this.shells.values()) {
@@ -361,6 +440,7 @@ export class Game {
     ) {
       this.shells.delete(shell.id)
       this.tank.hp--
+      this.lastHitAt = performance.now()
       if (this.tank.hp <= 0) this.die(shell.owner)
       return
     }
@@ -387,6 +467,8 @@ export class Game {
   private die(killer: string | null): void {
     this.tank.dead = true
     this.tank.hp = 0
+    this.streak = 0
+    this.lastHitAt = performance.now()
     this.tank.respawnAt = performance.now() + RESPAWN_DELAY * 1000
     this.deaths++
     const payload: DeathPayload = {
@@ -533,6 +615,42 @@ export class Game {
       d: this.tank.dead,
     }
     this.publishAsSession(KIND_STATE, payload)
+  }
+
+  /**
+   * A block landed: bank the round and start the next one.
+   *
+   * Everything resets except who is in the room. Nobody sends a "round over"
+   * message and nobody is the host — every client is watching the same chain
+   * tip, so they all do this within a few seconds of each other. That is the
+   * whole reason the block is the clock.
+   */
+  endRound(height: number, layoutName: string): RoundResult {
+    const result: RoundResult = {
+      height: this.round || height - 1,
+      layout: layoutName,
+      standings: this.scoreboard(),
+      endedAt: Date.now(),
+    }
+    this.lastRound = result
+    this.intermissionUntil = performance.now() + INTERMISSION_MS
+    this.round = height
+    this.kills = 0
+    this.deaths = 0
+    this.streak = 0
+    this.bestStreak = 0
+    // Peer tallies are ours to keep, not theirs to send, so they reset here too.
+    for (const peer of this.peers.values()) {
+      peer.kills = 0
+      peer.deaths = 0
+    }
+    this.pushFeed(`block ${height} — new round on ${layoutName}`)
+    return result
+  }
+
+  /** True while the podium is up. */
+  get intermission(): boolean {
+    return performance.now() < this.intermissionUntil
   }
 
   scoreboard(): { name: string; kills: number; deaths: number; color: number; you: boolean }[] {

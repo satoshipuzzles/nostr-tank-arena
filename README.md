@@ -6,6 +6,45 @@ signed yourself.
 
 Slow shells, 3 hits to kill, cover you can hide behind, instant respawn.
 
+## Rounds are Bitcoin blocks
+
+A round lasts one block. That is not decoration — it is the only round timer
+available to a game with no server. Every client discovers the same height at
+roughly the same moment, nobody is the host, nobody broadcasts "round over",
+and a player who joins halfway through knows exactly which round they are in.
+
+When the tip moves:
+
+1. the round ends and a podium shows the standings,
+2. scores reset to zero,
+3. **the map changes** — the board is `blockHash % 4`, so every client
+   generates the same arena from the same number with no message passing at
+   all. Four boards ship: Crossroads, The Lanes, Pillars, The Ring.
+
+Publishing a result writes an addressable record whose `d` tag carries the
+block height, so there is one signed record per player per round, and a `t` tag
+of `tankblock-<height>` so a whole round's results are a single `#t` query.
+Only single-letter tags are indexed by relays, which is why the height is not
+in a `["block", ...]` tag where it would look right and be unqueryable.
+
+The chain tip comes from a block explorer over HTTPS (mempool.space, with
+blockstream.info as a second opinion; `?blocks=https://your.node/api` overrides
+both). What that trusts is worth saying plainly: an explorer that is wrong or
+offline means the round simply never ends and the default map stays up, and an
+explorer that lies shifts *when* rounds flip for everyone reading it rather
+than desynchronising anybody. It cannot touch the simulation, hit detection or
+scores.
+
+## Kill streaks and repairs
+
+- Three kills without dying repairs your hull to full.
+- Eight seconds without taking a hit gives one hull point back.
+
+Both are self-authoritative, which is the point: your own HP is already the one
+number this client decides, so neither needed a new event kind, a new trust
+assumption, or agreement with anybody. They ride out in the next state tick like
+any other HP change. `Game.regenAfter` is the knob.
+
 ## The board
 
 The arena renders in three.js: a chunky toy board in daylight, plastic tanks
@@ -154,14 +193,63 @@ and make tanks stutter. A relay you control on a machine near your players will
 always feel better. The game publishes 10 state events per second per player,
 which is polite by game standards and rude by relay standards.
 
+## Relays, and what they actually accept
+
+A tick stream is **10 events per second per player**, and most public relays cap
+a key far below that. This was invisible until the client started reading the
+`OK` frames it gets back: the old `publish()` did `p.catch(() => {})` on every
+relay promise, so `["OK", <id>, false, "rate-limited: ..."]` was indistinguishable
+from success, and a dropped tick looked like a laggy opponent.
+
+With that fixed, a live game on the relays this project shipped with was having
+**69.8% of its publishes rejected**:
+
+| relay | verdict |
+|-------|---------|
+| `relay.damus.io` | `rate-limited: you are noting too much`, and 503 on the day |
+| `nos.lol` | `pow: 28 bits needed` — NIP-13 proof of work, which a position tick will never pay |
+| `relay.nostr.band` | connection timeouts, no `OK` frame either way |
+| `relay.primal.net` | fine |
+
+So the defaults were re-measured rather than re-guessed. `.scratch/relay-probe.mjs`
+sends 400 ephemeral kind-21000 events at 10Hz — forty seconds of one player's
+tick stream — and counts the `OK` frames:
+
+```
+relay.primal.net          400/400 accepted
+nostr.mom                 400/400
+purplerelay.com           400/400
+relay.fountain.fm         400/400
+relay.nostr.net            60/400   rate-limited: too many events from this key (60/60s)
+nostr-pub.wellorder.net    13/400   blocked: spam not permitted
+```
+
+The first four are the defaults now, and the same game measures **0% rejected**.
+
+Two things follow from this and both are in the client:
+
+- The status panel names any relay that is refusing events, in the relay's own
+  words. "Why is everyone teleporting" now has an answer on screen.
+- A relay that refuses fifteen in a row is dropped from the publish set for the
+  session. It has a policy, not a bad minute, and continuing to send it ten
+  events a second delays the relays that are listening. Subscriptions stay open:
+  refusing our events says nothing about whether it forwards somebody else's.
+
+**Run your own relay if you care about this.** No cap you did not set, and the
+whole class of problem goes away — [newlay](https://code.relay.tools/opensauce/newlay)
+takes whatever kinds you throw at it, and [feeds.relay.tools](https://feeds.relay.tools)
+will host one. Put yours first in the Relays box and leave the public ones as
+fallback.
+
 ## Layout
 
 ```
-src/arena.ts     static geometry, collision, spawn points
+src/arena.ts     the four boards, collision, spawn points, block-hash selection
 src/sim.ts       tank and shell physics, all the feel constants
 src/game.ts      netcode: subscribe, interpolate, hit detection, authority
 src/nostr.ts     identity (real key + session key) and relay pool
 src/protocol.ts  wire format for every custom kind
+src/blocks.ts    the chain tip, which is the round clock
 src/render.ts    three.js: the board, the tanks, the confetti, the camera
 src/scores.ts    signed score records and the leaderboard query
 src/main.ts      lobby, HUD, game loop

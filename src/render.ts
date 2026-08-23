@@ -22,7 +22,7 @@
 
 import * as THREE from 'three'
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js'
-import { ARENA_H, ARENA_W, WALLS } from './arena'
+import { ARENA_H, ARENA_W, WALLS, onLayoutChange } from './arena'
 import type { Game, Peer } from './game'
 import { MAX_HP, RELOAD, TANK_RADIUS } from './sim'
 
@@ -379,6 +379,16 @@ export class Renderer {
   private raycaster = new THREE.Raycaster()
   /** Scratch camera used to test a candidate framing without disturbing the real one. */
   private probe = new THREE.PerspectiveCamera()
+  /**
+   * Everything the board is made of, in one group.
+   *
+   * The layout changes every Bitcoin block now, so the scenery has to be
+   * throwable-away. Geometries are disposed on the way out — four boards an
+   * hour for as long as a tab stays open is exactly the shape of leak that
+   * looks fine in a five-minute test.
+   */
+  private board = new THREE.Group()
+  private lastRepairAt = 0
 
   constructor(private canvas: HTMLCanvasElement) {
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' })
@@ -393,7 +403,9 @@ export class Renderer {
     this.camera = new THREE.PerspectiveCamera(40, 1, 60, 8000)
     this.scene.add(this.camera)
 
+    this.scene.add(this.board)
     this.buildBoard()
+    onLayoutChange(() => this.buildBoard())
     this.buildLights()
     this.scene.add(this.confetti.mesh)
     this.scene.add(this.you.root)
@@ -414,6 +426,15 @@ export class Renderer {
   // ------------------------------------------------------------- the board
 
   private buildBoard(): void {
+    for (const child of [...this.board.children]) {
+      this.board.remove(child)
+      const mesh = child as THREE.Mesh
+      mesh.geometry?.dispose()
+      const material = mesh.material as THREE.Material | THREE.Material[] | undefined
+      if (Array.isArray(material)) material.forEach((m) => m.dispose())
+      else material?.dispose()
+    }
+
     // A slab with a rim, so the arena reads as a physical board sitting in the
     // world rather than as a floor that happens to stop.
     const base = new THREE.Mesh(
@@ -422,7 +443,7 @@ export class Renderer {
     )
     base.position.set(ARENA_W / 2, -BOARD_DROP / 2 + 2, ARENA_H / 2)
     base.receiveShadow = true
-    this.scene.add(base)
+    this.board.add(base)
 
     const felt = new THREE.Mesh(
       new THREE.PlaneGeometry(ARENA_W, ARENA_H),
@@ -431,7 +452,7 @@ export class Renderer {
     felt.rotation.x = -Math.PI / 2
     felt.position.set(ARENA_W / 2, 2.5, ARENA_H / 2)
     felt.receiveShadow = true
-    this.scene.add(felt)
+    this.board.add(felt)
 
     // The outer ring is the board's fence and gets its own height and colour;
     // the inner cover is what you actually hide behind.
@@ -464,7 +485,7 @@ export class Renderer {
       mesh.position.set(w.x + w.w / 2, height / 2, w.y + w.h / 2)
       mesh.castShadow = !fence
       mesh.receiveShadow = true
-      this.scene.add(mesh)
+      this.board.add(mesh)
     }
   }
 
@@ -612,6 +633,19 @@ export class Renderer {
 
     if (game.tank.hp < this.lastHp && !game.tank.dead) this.shake = Math.max(this.shake, 9)
     this.lastHp = game.tank.hp
+
+    // Green, and rising rather than scattering, so a repair never reads as an
+    // explosion. Same particle pool, different physics.
+    if (game.repairedAt > this.lastRepairAt) {
+      this.lastRepairAt = game.repairedAt
+      this.confetti.burst(game.tank.x, game.tank.y, 18, 130, {
+        speed: 60,
+        up: 300,
+        y: 30,
+        size: 0.8,
+        life: 1.0,
+      })
+    }
 
     this.confetti.update(dt)
     this.applyShake(dt)

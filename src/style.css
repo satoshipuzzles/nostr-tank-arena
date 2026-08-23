@@ -8,6 +8,17 @@
   --accent: #ffc44d;
 }
 
+/*
+ * `hidden` has to actually hide.
+ *
+ * The browser's `[hidden] { display: none }` lives in the UA stylesheet, so any
+ * author rule that sets `display` beats it however weak its selector is. The
+ * podium is `display: grid`, so setting the attribute on it did nothing at all
+ * and the round-over card sat over the board permanently.
+ */
+[hidden] { display: none !important; }
+
+
 * { box-sizing: border-box; }
 
 html, body {
@@ -166,6 +177,47 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
 /* Ghost buttons over the sky need a plate of their own for the same reason. */
 #hud-actions button.ghost { background: var(--panel); border-color: var(--line); }
 #hud-actions button.ghost:hover { background: #1b2536; filter: none; }
+
+/* ------------------------------------------------------------- podium */
+
+/*
+ * The end of a round, which is the end of a Bitcoin block. It sits over the
+ * board rather than replacing it, because the next round has already started
+ * underneath — the podium is a scoreboard you can walk away from, not a modal
+ * that stops the game.
+ */
+#podium {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  z-index: 6;
+}
+#podium .card {
+  pointer-events: auto;
+  width: min(440px, calc(100vw - 32px));
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 20px 22px;
+  backdrop-filter: blur(6px);
+}
+#podium-rows { display: flex; flex-direction: column; gap: 4px; margin: 14px 0; }
+#podium-rows .score-row { padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.06); }
+#podium-rows .score-row:last-child { border-bottom: none; }
+#podium-rows .rank { color: var(--dim); width: 22px; display: inline-block; }
+#podium-rows .score-row.win .name { color: var(--accent, #ffc44d); font-weight: 700; }
+
+#pads .pad { display: flex; justify-content: space-between; gap: 10px; padding: 4px 0; font-size: 12px; }
+#pads .pad .lit { color: #3fb950; }
+
+/* Relay complaints in the status panel. Amber, not red: a rate-limited tick
+   is a thing to know about, not an error to panic over. */
+.bad { color: #ffc44d; }
+
+.tabs { margin-bottom: 4px; }
+.tabs button.on { background: var(--line); }
 
 #board-rows { margin: 16px 0; display: flex; flex-direction: column; gap: 4px; }
 #board-rows .score-row { border-bottom: 1px solid rgba(255,255,255,0.05); }

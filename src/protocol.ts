@@ -16,7 +16,19 @@ export const KIND_SCORE = 30078 // addressable (NIP-78): persistent score record
 
 export const SCORE_D_TAG = 'nostr-tank-arena/score'
 
+/**
+ * The addressable slot for one player's result in one block's round.
+ *
+ * Addressable events are keyed by (kind, pubkey, d), so a `d` that carries the
+ * block height gives every player exactly one record per round — repost a
+ * correction and it replaces, play the next block and it does not.
+ */
+export const blockScoreTag = (height: number) => `nostr-tank-arena/score/${height}`
+
 export const roomTag = (room: string) => `tankarena-${room}`
+
+/** Indexed so a whole block's results are one `#t` query. Single letter on purpose. */
+export const blockTag = (height: number) => `tankblock-${height}`
 
 /** Session attestation: "session pubkey S is playing as me until `exp`." */
 export interface SessionPayload {

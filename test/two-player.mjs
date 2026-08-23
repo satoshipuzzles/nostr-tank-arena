@@ -123,13 +123,21 @@ try {
 
   // Movement propagates.
   const beforeMove = (await snap(b)).peers[0]
+  // Long enough to clear the threshold even when the renderer is in software
+  // and the simulation is therefore running at a fraction of wall-clock speed.
   await a.keyboard.down('KeyW')
-  await wait(1600)
+  await wait(3200)
   await a.keyboard.up('KeyW')
-  await wait(1200)
+  await wait(1800)
   const afterMove = (await snap(b)).peers[0]
   const moved = beforeMove && afterMove ? Math.hypot(afterMove.x - beforeMove.x, afterMove.y - beforeMove.y) : 0
   check('B sees A move', moved > 60, `${Math.round(moved)}px`)
+
+  // Regen off for the duel. With it on, the victim heals between shells under
+  // software rasterisation and no kill ever lands — which is a real interaction
+  // between two features, not a flaky test, so it is turned off explicitly here
+  // and asserted on its own below.
+  await b.evaluate(() => (window.__game.regenAfter = 9999))
 
   // Duel: park them in a clear lane and put three shells into bravo.
   for (let i = 0; i < 5; i++) {
@@ -164,6 +172,71 @@ try {
   check('alpha credited with the kill', finalA.kills >= 1, JSON.stringify(finalA.feed))
   check('kill feed names the killer', finalA.feed.some((t) => t.includes('alpha') && t.includes('bravo')))
   check('bravo respawned at full hp', !finalB.dead && finalB.hp === 3, `hp=${finalB.hp} dead=${finalB.dead}`)
+  // Now the other half of that interaction: a hull point comes back after a
+  // spell without being hit.
+  await b.evaluate(() => {
+    const g = window.__game
+    g.tank.hp = 1
+    g.tank.dead = false
+    g.regenAfter = 1
+  })
+  await wait(3000)
+  const healed = await b.evaluate(() => ({ hp: window.__game.tank.hp, feed: window.__game.feed.map((f) => f.text) }))
+  check('a tank left alone patches itself up', healed.hp > 1, `hp=${healed.hp}`)
+  check('and says so in the feed', healed.feed.some((t) => /patched up/.test(t)), JSON.stringify(healed.feed))
+
+  // A round is one Bitcoin block. Nobody announces the change and nobody is the
+  // host: both clients watch the same chain tip and both act on it. Driven here
+  // through `BlockClock.accept`, which is the same entry point a real poll uses,
+  // because waiting ten minutes for the chain is not a test.
+  const beforeBlock = await Promise.all([a, b].map((p) => p.evaluate(() => ({
+    kills: window.__game.kills,
+    deaths: window.__game.deaths,
+    map: document.getElementById('hud-map')?.textContent ?? '',
+  }))))
+  check('alpha has kills to lose', beforeBlock[0].kills >= 1, JSON.stringify(beforeBlock))
+
+  // A hash ending 00 and one ending 03 pick different boards, so this also
+  // proves the map is a pure function of the tip rather than a broadcast.
+  const HEIGHT = 999001
+  await Promise.all([a, b].map((p) => p.evaluate((h) => {
+    window.__clock.accept({ height: h, hash: 'ab'.repeat(31) + '03' })
+  }, HEIGHT)))
+  await wait(1200)
+
+  const afterBlock = await Promise.all([a, b].map((p) => p.evaluate(() => ({
+    kills: window.__game.kills,
+    deaths: window.__game.deaths,
+    round: window.__game.round,
+    podium: !document.getElementById('podium').hidden,
+    shown: getComputedStyle(document.getElementById('podium')).display !== 'none',
+    map: document.getElementById('hud-map')?.textContent ?? '',
+    rows: document.getElementById('podium-rows').textContent.replace(/\s+/g, ' ').trim(),
+  }))))
+  check('a block ends the round on both clients',
+    afterBlock.every((r) => r.round === HEIGHT), JSON.stringify(afterBlock.map((r) => r.round)))
+  check('and resets the scores', afterBlock.every((r) => r.kills === 0 && r.deaths === 0),
+    JSON.stringify(afterBlock.map((r) => `${r.kills}/${r.deaths}`)))
+  check('and both land on the same map, without telling each other',
+    afterBlock[0].map === afterBlock[1].map && afterBlock[0].map === 'The Ring',
+    afterBlock.map((r) => r.map).join(' vs '))
+  check('the podium shows the round that just ended',
+    afterBlock.every((r) => r.podium && r.shown), JSON.stringify(afterBlock.map((r) => [r.podium, r.shown])))
+  check('and names who was in it', /alpha|bravo/.test(afterBlock[0].rows), afterBlock[0].rows)
+
+  // `hidden` is not enough on its own: an author `display` rule outranks the
+  // UA sheet's `[hidden] { display: none }`, and this podium is `display: grid`.
+  // It sat permanently over the board until a rule with `!important` was added,
+  // so the check has to ask for the computed style, not the attribute.
+  await a.click('#podium-close')
+  await wait(300)
+  const closed = await a.evaluate(() => {
+    const n = document.getElementById('podium')
+    return { attr: n.hidden, display: getComputedStyle(n).display, h: n.getBoundingClientRect().height }
+  })
+  check('and closing it actually removes it from the page',
+    closed.attr && closed.display === 'none' && closed.h === 0, JSON.stringify(closed))
+
   // The board renders in WebGL, and the aim is a ray cast through the cursor
   // onto a plane rather than a divide. Both are new, and both fail silently: a
   // dead context still runs the simulation, and a wrong unprojection just aims
