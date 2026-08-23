@@ -415,6 +415,7 @@ src/render.ts    three.js: the board, the tanks, the confetti, the camera
 src/scores.ts    signed score records and the leaderboard query
 src/main.ts      lobby, HUD, game loop
 test/two-player.mjs  headless two-browser smoke test against live relays
+test/sound.mjs       taps the master bus and measures what each sound emits
 ```
 
 ## Testing
@@ -422,6 +423,7 @@ test/two-player.mjs  headless two-browser smoke test against live relays
 ```bash
 npm run build && npm run preview &
 npm run test:live
+npm run test:sound
 ```
 
 Two real browsers, two guest npubs, one room, live public relays. It waits for
@@ -445,6 +447,57 @@ Headless Chrome needs `--use-gl=angle --use-angle=swiftshader
 --enable-unsafe-swiftshader` to produce a context at all; the flags are in the
 test. Software rasterisation is slow enough that the game visibly simulates in
 slow motion, which is what the adaptive quality drop above is for.
+
+### Measuring the sound, rather than trusting it
+
+`npm run test:sound` is a second suite, and it exists because the sound checks
+in `two-player.mjs` cannot fail.
+
+Those checks assert that an `AudioContext` reached `running` and that the game
+*asked* for a sound. Both stay green when the game is completely silent: the two
+ways Web Audio actually breaks are a node nobody connected to the destination
+and a context nobody resumed, and neither of them throws or refuses a call. A
+voice missing one `.connect(out)` passes every existing check.
+
+So this one taps the master gain with an `AudioWorklet` and measures the samples
+that come out of `Sfx.play()` for real — peak, RMS, when it starts, how long it
+stays audible — through the panner, the distance falloff, the envelopes and the
+mute. `src/` is not modified to make this possible.
+
+Three controls, because a measurement that has never returned zero proves
+nothing:
+
+- a shot placed past `EARSHOT` must be silent, and the same shot up close must
+  not be — that is the distance model checked against itself
+- nothing may reach the bus while muted
+- sound must come back after unmuting, which is a real risk: `toggle()` has to
+  restore the master gain, not only flip the flag
+
+It was confirmed to fail before being trusted. Deleting `.connect(out)` from
+`tone()` silences six voices and turns twelve checks red; `two-player.mjs`
+passes that same build without a murmur.
+
+**Do not poll an `AnalyserNode` from `requestAnimationFrame` here.** Under
+swiftshader the page runs at roughly six frames a second, so a 140ms gunshot
+falls entirely between two polls and measures as silence. The first version of
+this suite reported nine failures that were all the harness missing the sound
+rather than the sound missing. A worklet runs on the audio thread and sees every
+sample.
+
+#### The autoplay policy cannot be tested here
+
+`two-player.mjs` launches Chrome with `--autoplay-policy=no-user-gesture-
+required`, but the flag is not what makes that assertion vacuous. Chrome under
+Puppeteer reports `navigator.userActivation.hasBeenActive === true` before
+anything is clicked — headless, headful, and with `user-gesture-required`
+explicitly set. A context always starts `running` regardless of what the page
+does, so `an AudioContext is actually running, not suspended` can never go red.
+
+The gesture rule is real and the code gets it right; it just is not what that
+line is checking. `test/sound.mjs` checks the invariant behind it instead: it
+counts every `AudioContext` the page constructs and requires zero before the
+first click. Moving the constructor into `new Sfx()` turns it red, which is
+exactly the bug the rule exists to prevent.
 
 ## Tuning
 

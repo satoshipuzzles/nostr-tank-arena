@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --port 4173 --strictPort",
-    "test:live": "node test/two-player.mjs"
+    "test:live": "node test/two-player.mjs",
+    "test:sound": "node test/sound.mjs"
   },
   "dependencies": {
     "nostr-tools": "^2.10.4",
