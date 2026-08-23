@@ -11,17 +11,33 @@
 //
 // ## What a modifier is allowed to touch
 //
-// Only things a client already decides for itself. HP, reload, speed and
-// respawn are local — your own tank has always been authoritative over them —
-// and the pickup schedule is derived from the same hash on every client. So a
-// modifier adds no trust and cannot desync anybody.
+// The rule is not "only local things" — that was the original wording here and
+// cowboy was right that it is too loose. The real invariant is sharper:
 //
-// Shell bounces are the one exception, because a shell is re-simulated by
-// everyone who receives the fire event. It is *not* read from the current
-// modifier when a shell is re-created from the wire: the bounce budget travels
-// in the fire event itself. Otherwise a shell fired seconds before a block
-// landed would bounce once on the shooter's screen and three times on
-// everybody else's, for the four seconds it takes the boundary to settle.
+//   **Anything derived from the round's rules that another client also derives
+//   must be anchored to the same input on both.**
+//
+// HP, reload, speed and respawn pass that trivially, because nobody else
+// derives them: your own tank has always been authoritative over its own hull.
+//
+// Two things do not pass trivially, and both were wrong at some point.
+//
+// Shell bounces are re-simulated by everyone who receives the fire event, so
+// the bounce budget travels *in that event* rather than being read from the
+// current modifier on arrival. Otherwise a shell fired seconds before a block
+// landed bounces once on the shooter's screen and three times on everybody
+// else's, for the four seconds it takes the boundary to settle.
+//
+// `waveSeconds` and `emptyPads` feed the pickup schedule, and the wave index
+// ends up inside the pickup id — so two clients disagreeing about the modifier
+// compute different ids for the same pad and silently discard each other's
+// claims. This was listed as "cannot desync" and it could. It is anchored now
+// (see `pickups.ts`), which leaves only the block boundary itself: for the few
+// seconds one client has seen the new tip and another has not, they disagree
+// about the map, the rules and the schedule alike. That window is inherent to
+// having no host, it is bounded by the poll interval, and it costs a pad.
+//
+// The test for anything added here is that second sentence, not "is it local".
 
 export interface Modifier {
   id: string

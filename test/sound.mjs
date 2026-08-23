@@ -62,7 +62,10 @@ const FLAGS = [
 ]
 
 /** Every member of the `Sound` union in src/audio.ts. */
-const SOUNDS = ['fire', 'hit', 'shield', 'kill', 'death', 'pickup', 'streak', 'block', 'respawn']
+const SOUNDS = [
+  'fire', 'hit', 'shield', 'kill', 'death',
+  'pickup', 'scatter', 'siege', 'streak', 'block', 'respawn',
+]
 
 const failures = []
 const check = (name, ok, detail = '') => {

@@ -8,6 +8,24 @@
 // player who joins mid-round derives the same board state as everyone else
 // from the tip alone.
 //
+// ## Which clock, and why it matters more than it looks
+//
+// "The round clock" has to mean a clock the *chain* supplies, not one each
+// client starts for itself. This code originally measured `elapsed` from
+// `performance.now()` at the moment that client's poll first saw the tip — and
+// cowboy found what that costs. The wave index is inside the pickup id, so two
+// clients whose 20-second polls are out of phase compute *different ids for the
+// same pad*, `onClaim` finds no match, and the claim is dropped in silence. The
+// pad stays live on one screen and gone on the other, all round. A player
+// joining six minutes into a block was at `elapsed ≈ 0` against everyone else's
+// `≈ 360` — a different wave, guaranteed, for their entire first round.
+//
+// So `elapsed` now comes from `BlockClock.secondsSinceTip()`: seconds since the
+// block was *mined*, which every client reads from the same explorer field. The
+// block timestamp is miner-chosen and may legally sit two hours off real time.
+// That does not matter here — the requirement is that everyone agrees, not that
+// the number is accurate, and they are all reading the same one.
+//
 // ## What is published, and what is not
 //
 // Only the claim. When your tank touches a live pickup you take it immediately
@@ -80,6 +98,22 @@ export const DEFAULT_WAVES: WaveRules = { waveSeconds: WAVE_SECONDS, emptyPads: 
 
 /** How long a pickup sits unclaimed before the board clears for the next wave. */
 export const PICKUP_LINGER = 20
+
+/**
+ * The wave clock, in seconds, on a timeline every client agrees on.
+ *
+ * `sinceTip` is seconds since the block was mined, when the explorer gave us a
+ * timestamp. When it did not, this falls back to absolute unix seconds — which
+ * is *also* a shared timeline, and that is the whole requirement. It shifts
+ * where wave zero begins, and no client disagrees with any other about which
+ * wave it is now, which is the only property the pickup id needs.
+ *
+ * What it must never fall back to is a local `performance.now()` origin. That
+ * is a timeline of one.
+ */
+export function waveClock(sinceTip: number | null, nowMs = Date.now()): number {
+  return sinceTip === null ? nowMs / 1000 : sinceTip
+}
 
 export interface Pickup {
   /** `<height>:<wave>:<padIndex>`. Unique for the whole round, and derivable. */

@@ -379,6 +379,38 @@ on is not worth crossing the map for. At 34 seconds a stocked pad is a decision
 and that decision is the entire reason pickups are in the game. Supply Run turns
 it back down to 10 and stocks every pad, deliberately.
 
+### Which clock the wave runs on, and why it is not obvious
+
+A pickup's pad, type and wave are a pure function of the block hash and the
+round clock — and "the round clock" has to mean a clock the **chain** supplies,
+not one each client starts for itself.
+
+It originally measured from `performance.now()` at the moment that client's poll
+first saw the tip, and cowboy found what that costs. The wave index is inside the
+pickup id, so two clients whose 20-second polls are out of phase compute
+*different ids for the same pad*. `onClaim` finds no match and drops the claim in
+silence: the pad stays live on one screen and gone on the other, for the whole
+round, and everybody gets every pickup. It was guaranteed for a late joiner —
+someone arriving six minutes into a block sat at `elapsed ≈ 0` against everyone
+else's `≈ 360`.
+
+The anchor is now `BlockClock.chainSeconds()`: seconds since the block was
+*mined*, read from the same explorer field by every client. That method refuses
+to guess, which is the difference between it and `secondsSinceTip()` — the HUD's
+version falls back to local first-sighting and marks it with a `~`, which is fine
+to display and fatal to compute a shared id from. When the timestamp is missing
+the schedule falls back to **absolute unix seconds** instead, which is still a
+timeline everybody shares; it only shifts where wave zero begins.
+
+The block timestamp is miner-chosen and may legally sit two hours off real time.
+That does not matter here. The requirement is that everyone agrees, not that the
+number is accurate, and they are all reading the same one.
+
+The other half of the same hole: a claim naming a pad this client has not derived
+yet is now **remembered and applied when the pad appears**, rather than dropped.
+That ordering is not an edge case — it is what a late joiner's `REQ` backfill
+always looks like, and dropping it made storing the claim pointless.
+
 Each type has its own silhouette as well as its own colour. Six items that were
 all the same octahedron in six colours made reading a pad from across the board a
 colour-match puzzle, and an impossible one for anyone who cannot separate the
@@ -407,12 +439,19 @@ a board you know well can still surprise you.
 | Supply Run | Pickup waves every 9 seconds, and every pad is stocked. |
 | Ricochet | Shells bounce three times instead of once. |
 
-A modifier is only allowed to touch things a client already decides for itself.
-HP, reload, speed and respawn are local — your own tank has always been
-authoritative over them — and the pickup schedule is derived from the same hash
-on every client. So a modifier adds no trust and cannot desync anybody. Shell
-bounces are the one exception, which is why the budget rides on the fire event
-rather than being looked up on arrival.
+The rule for adding one is not "only touch local things" — that wording was too
+loose. It is: **anything derived from the round's rules that another client also
+derives must be anchored to the same input on both.**
+
+HP, reload, speed and respawn pass trivially, because nobody else derives them.
+Two things did not. Shell bounces are re-simulated by whoever receives the fire
+event, so the budget rides *on that event*. And `waveSeconds` / `emptyPads` feed
+the pickup schedule, whose wave index ends up inside the pickup id — that one was
+filed under "cannot desync" and could, until the schedule was anchored to the
+chain. What is left is the block boundary itself: for the few seconds one client
+has seen the new tip and another has not, they disagree about the map, the rules
+and the schedule alike. That is inherent to having no host, it is bounded by the
+poll interval, and it costs a pad.
 
 ## Who is that? Kind 0, and NIP-05
 

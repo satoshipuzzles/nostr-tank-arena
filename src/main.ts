@@ -183,6 +183,11 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     // The round clock. Starting it before the first frame means the board is
     // already the right one for the current block by the time anybody drives.
     const clock = new BlockClock(params.get('blocks'))
+    // The pickup schedule reads its clock from the chain, not from when this
+    // client happened to poll. The wave index ends up inside the pickup id, so
+    // a local origin means two clients compute different ids for the same pad
+    // and every claim between them is discarded without a word.
+    game.chainClock = () => clock.chainSeconds()
     clock.onBlock((tip, previous) => {
       setLayout(layoutForBlock(tip.hash))
       if (!previous) {

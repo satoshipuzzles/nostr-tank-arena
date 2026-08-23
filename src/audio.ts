@@ -30,6 +30,8 @@ export type Sound =
   | 'kill'
   | 'death'
   | 'pickup'
+  | 'scatter'
+  | 'siege'
   | 'streak'
   | 'block'
   | 'respawn'
@@ -163,6 +165,28 @@ export class Sfx {
             gain: 0.24 * volume,
           })
         }
+        break
+      case 'scatter':
+        // Three taps, because it is three shells. The sound tells you what
+        // changed about your gun without reading the banner.
+        for (const i of [0, 1, 2]) {
+          this.noise(ctx, out, t + i * 0.045, { dur: 0.05, gain: 0.32 * volume, from: 5200, to: 1400 })
+          this.tone(ctx, out, t + i * 0.045, {
+            type: 'square',
+            from: 900,
+            to: 640,
+            dur: 0.07,
+            gain: 0.16 * volume,
+          })
+        }
+        break
+      case 'siege':
+        // Heavy and low, and slower than anything else in the game. Siege
+        // shells are the only pickup that changes what your shots do to
+        // somebody else, so it gets the one sound with weight behind it.
+        this.tone(ctx, out, t, { type: 'sawtooth', from: 120, to: 52, dur: 0.5, gain: 0.34 * volume })
+        this.tone(ctx, out, t + 0.06, { type: 'triangle', from: 330, to: 330, dur: 0.34, gain: 0.14 * volume })
+        this.noise(ctx, out, t, { dur: 0.28, gain: 0.26 * volume, from: 1500, to: 200 })
         break
       case 'streak':
         for (const [i, f] of [440, 587.33, 739.99, 1046.5].entries()) {

@@ -166,6 +166,24 @@ export class BlockClock {
   }
 
   /**
+   * Seconds since the tip was mined, or `null` if that is not actually known.
+   *
+   * The difference from `secondsSinceTip()` is the whole point. That one is for
+   * the HUD and falls back to local first-sighting, which is honest to show and
+   * marked with a `~`. This one refuses to guess, because its caller is the
+   * pickup schedule: a wave index computed from *when this client happened to
+   * poll* is a timeline of one, and two clients out of phase then compute
+   * different ids for the same pad and silently discard each other's claims.
+   *
+   * `null` is not a failure here — the caller has a shared fallback (absolute
+   * unix seconds) that a local origin could never be.
+   */
+  chainSeconds(nowMs = Date.now()): number | null {
+    const mined = this.tip?.time
+    return typeof mined === 'number' ? Math.max(0, nowMs / 1000 - mined) : null
+  }
+
+  /**
    * Take a tip from anywhere and, if it is newer, start a round on it.
    *
    * Public because polling a real explorer is not the only way to get one. The

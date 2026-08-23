@@ -19,6 +19,7 @@ import {
   hasBuff,
   noBuffs,
   scheduleFor,
+  waveClock,
   type Buffs,
   type ClaimPayload,
   type Pickup,
@@ -147,8 +148,31 @@ export class Game {
   round = 0
   /** The tip's hash, which seeds the pickup schedule. */
   roundHash = ''
-  /** performance.now() when this round started, for the pickup clock. */
+  /** performance.now() when this round started. Local, and for local things only. */
   roundStartedAt = performance.now()
+  /**
+   * Seconds since the current block was mined, from `BlockClock`.
+   *
+   * Wired in by `main.ts`. This is what the pickup schedule is anchored to, and
+   * it has to be: the wave index goes into the pickup id, so a client measuring
+   * from its own first sighting of the tip computes different ids for the same
+   * pad and every claim it sends or receives is silently discarded. Default is
+   * `null`, which `waveClock` turns into absolute unix seconds — still a shared
+   * timeline, unlike a local performance origin.
+   */
+  chainClock: () => number | null = () => null
+  /**
+   * Pickup ids claimed by somebody, whether or not that pad exists here yet.
+   *
+   * The missing half of the stored-claim design. A late joiner `REQ`s the
+   * round's claims and they arrive *before* the local schedule has caught up to
+   * the wave they belong to — and matching a claim only against the pickups that
+   * happen to exist this frame threw every one of them away. Remembered here and
+   * applied when the pad appears.
+   */
+  private claimed = new Set<string>()
+  /** Claims that named a pad this client never derived. Non-zero means drift. */
+  unmatchedClaims = 0
   /** Pickups currently on the board, by id. Derived, never received. */
   readonly pickups = new Map<string, Pickup>()
   /** Timed effects on our own tank. */
@@ -477,7 +501,7 @@ export class Game {
       if (controls.fire && now >= this.tank.reloadAt) this.fire(now)
       this.sweepPickups(now)
     }
-    this.refreshPickups(now)
+    this.refreshPickups()
 
     for (const shell of this.shells.values()) {
       stepShell(shell, dt)
@@ -738,6 +762,11 @@ export class Game {
     this.roundHash = hash
     this.roundStartedAt = performance.now()
     this.pickups.clear()
+    // Claim ids carry the block hash, so they cannot collide across rounds —
+    // but there is no reason to keep last round's, and a bounded set is one
+    // less thing to reason about.
+    this.claimed.clear()
+    this.unmatchedClaims = 0
     this.modifier = modifierForBlock(hash)
     // Glass Cannon narrows the hull; a tank carrying three points into a
     // one-hit round would be invincible for two shots and nobody would know
@@ -785,9 +814,9 @@ export class Game {
    * state that is not a function of the block hash, and it is carried forward
    * across rebuilds so a claimed pad stays empty until the next wave.
    */
-  private refreshPickups(now: number): void {
+  private refreshPickups(): void {
     if (!this.roundHash) return
-    const elapsed = (now - this.roundStartedAt) / 1000
+    const elapsed = waveClock(this.chainClock())
     const want = scheduleFor(this.roundHash, elapsed, {
       waveSeconds: this.modifier.waveSeconds,
       emptyPads: this.modifier.emptyPads,
@@ -800,6 +829,10 @@ export class Game {
     for (const pickup of want) {
       const existing = this.pickups.get(pickup.id)
       if (existing) continue
+      // A claim may have arrived before this pad was derived — a late joiner's
+      // backfill always does. Honour it now rather than spawning something
+      // somebody already took.
+      if (this.claimed.has(pickup.id)) pickup.taken = true
       this.pickups.set(pickup.id, pickup)
     }
   }
@@ -813,6 +846,7 @@ export class Game {
       if (dx * dx + dy * dy > PICKUP_RADIUS * PICKUP_RADIUS) continue
 
       pickup.taken = true
+      this.claimed.add(pickup.id)
       const spec = PICKUPS[pickup.kind]
       if (pickup.kind === 'repair') {
         this.tank.hp = this.maxHp
@@ -820,7 +854,10 @@ export class Game {
       } else {
         applyPickup(this.buffs, pickup.kind, now)
       }
-      this.sound('pickup')
+      // Scattershot and Siege change what your gun does rather than what your
+      // tank does, and a shared chime made them indistinguishable at the moment
+      // it matters — when you are already driving away.
+      this.sound(pickup.kind === 'scatter' ? 'scatter' : pickup.kind === 'siege' ? 'siege' : 'pickup')
       this.announce(
         spec.label.toUpperCase(),
         pickup.kind === 'repair' ? spec.blurb : `${spec.blurb} — ${spec.seconds}s`,
@@ -862,9 +899,20 @@ export class Game {
   private onClaim(e: Event): void {
     if (e.pubkey === this.identity.sessionPubkey) return
     const p = parsePayload<ClaimPayload>(e.content)
-    if (!p || typeof p.p !== 'string') return
+    if (!p || typeof p.p !== 'string' || p.p.length > 64) return
+    // Recorded first, matched second. The pad this names may not exist here yet
+    // — for a late joiner's backfill it never does — and dropping the claim
+    // because the schedule has not caught up is exactly the silent divergence
+    // stored claims were supposed to end.
+    this.claimed.add(p.p)
+    if (this.claimed.size > 400) this.claimed.delete(this.claimed.values().next().value as string)
+
     const pickup = this.pickups.get(p.p)
-    if (!pickup || pickup.taken) return
+    if (!pickup) {
+      this.unmatchedClaims++
+      return
+    }
+    if (pickup.taken) return
     pickup.taken = true
     const who = this.peers.get(e.pubkey)?.name ?? 'someone'
     this.pushFeed(`${who} took ${PICKUPS[pickup.kind]?.label ?? 'a pickup'}`)

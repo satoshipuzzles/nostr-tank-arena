@@ -137,10 +137,15 @@ try {
   // have nothing to do with the kill path. `0500` is Crossroads and Straight
   // Deathmatch. The point of block-derived rules is that they are a pure
   // function of the hash, which is exactly what makes them pinnable here.
-  await Promise.all([a, b].map((p) => p.evaluate(() => {
-    window.__clock.accept({ height: 999000, hash: 'ef'.repeat(30) + '0500' })
+  // Every fake tip here carries a `time`, because that is the production path:
+  // the pickup wave is anchored to when the block was *mined*, and a tip
+  // without one falls back to absolute unix seconds — shared between clients,
+  // but at an arbitrary phase, which would make "is there a pickup right now"
+  // a coin flip in this suite.
+  await Promise.all([a, b].map((p) => p.evaluate((t) => {
+    window.__clock.accept({ height: 999000, hash: 'ef'.repeat(30) + '0500', time: t })
     document.getElementById('podium').hidden = true
-  })))
+  }, Math.floor(Date.now() / 1000))))
   await wait(600)
   const pinned = await Promise.all([a, b].map((p) => p.evaluate(() => ({
     rules: window.__game.modifier.id,
@@ -310,9 +315,9 @@ try {
   // two hex digits before those pick the round's rule change, independently —
   // `ab` is 171, and 171 % 5 lands on Glass Cannon.
   const HEIGHT = 999001
-  await Promise.all([a, b].map((p) => p.evaluate((h) => {
-    window.__clock.accept({ height: h, hash: 'ab'.repeat(31) + '03' })
-  }, HEIGHT)))
+  await Promise.all([a, b].map((p) => p.evaluate(([h, t]) => {
+    window.__clock.accept({ height: h, hash: 'ab'.repeat(31) + '03', time: t })
+  }, [HEIGHT, Math.floor(Date.now() / 1000)])))
   await wait(1200)
 
   const afterBlock = await Promise.all([a, b].map((p) => p.evaluate(() => ({
@@ -370,9 +375,9 @@ try {
   // A second block, chosen to land on different rules and a different board.
   // `05` is 5, and 5 % 5 is Straight Deathmatch; `01` picks The Lanes. Nothing
   // was sent between the two clients to make either of them agree.
-  await Promise.all([a, b].map((p) => p.evaluate((h) => {
-    window.__clock.accept({ height: h, hash: 'cd'.repeat(30) + '0501' })
-  }, HEIGHT + 1)))
+  await Promise.all([a, b].map((p) => p.evaluate(([h, t]) => {
+    window.__clock.accept({ height: h, hash: 'cd'.repeat(30) + '0501', time: t })
+  }, [HEIGHT + 1, Math.floor(Date.now() / 1000)])))
   await wait(1400)
   const secondBlock = await Promise.all([a, b].map((p) => p.evaluate(() => ({
     rules: window.__game.modifier.id,
@@ -411,6 +416,57 @@ try {
   check('and both clients derived the identical set, having sent nothing',
     JSON.stringify(spawned[0]) === JSON.stringify(spawned[1]),
     `${JSON.stringify(spawned[0])} vs ${JSON.stringify(spawned[1])}`)
+
+  // The late joiner, which is where this used to break every single time.
+  //
+  // The wave index is inside the pickup id, and it used to be measured from
+  // `performance.now()` at the moment *this* client's poll first saw the tip.
+  // Someone joining six minutes into a block sat at elapsed≈0 against everyone
+  // else's ≈360 — a different wave, so different ids for the same pads, so
+  // every claim they sent or received matched nothing and was dropped without a
+  // word. They took every pickup on the board and nobody else saw it happen.
+  //
+  // Simulated by moving one client's local round origin a long way. If the
+  // schedule is anchored to the chain, moving it changes nothing at all.
+  await b.evaluate(() => { window.__game.roundStartedAt = performance.now() - 400_000 })
+  await wait(900)
+  const skewed = await Promise.all([a, b].map((p) => p.evaluate(() =>
+    [...window.__game.pickups.keys()].sort(),
+  )))
+  check('a client whose local clock started 400s earlier derives the same pads',
+    skewed[0].length > 0 && JSON.stringify(skewed[0]) === JSON.stringify(skewed[1]),
+    `${JSON.stringify(skewed[0])} vs ${JSON.stringify(skewed[1])}`)
+
+  // The other half of the stored-claim design, and it was missing.
+  //
+  // Claims were matched only against the pads that happened to exist that
+  // frame, so a claim arriving before its pad was derived — which is *always*
+  // the case for a late joiner's REQ backfill — was thrown away. The whole
+  // reason the claim is a stored event rather than an ephemeral one is that a
+  // late joiner can ask for it; dropping it on arrival made that pointless.
+  const early = await b.evaluate((id) => {
+    const g = window.__game
+    // Forget the pad entirely, then hear about the claim. This is the backfill
+    // ordering: claim first, schedule second.
+    g.pickups.delete(id)
+    g.onEvent({
+      id: 'early' + Math.random(),
+      kind: 30078,
+      pubkey: 'ee'.repeat(32),
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [['d', 'x'], ['t', 'x']],
+      content: JSON.stringify({ p: id, kind: 'shield' }),
+    })
+    return { gone: !g.pickups.has(id), unmatched: g.unmatchedClaims }
+  }, spawned[0][spawned[0].length - 1].id)
+  await wait(900)
+  const backfilled = await b.evaluate((id) => {
+    const p = window.__game.pickups.get(id)
+    return { back: !!p, taken: !!p?.taken }
+  }, spawned[0][spawned[0].length - 1].id)
+  check('a claim that arrives before its pad does is remembered, not dropped',
+    early.gone && backfilled.back && backfilled.taken,
+    `${JSON.stringify(early)} -> ${JSON.stringify(backfilled)}`)
 
   // Drive alpha onto one and watch what happens on both sides.
   const target = spawned[0][0]
@@ -632,6 +688,26 @@ try {
   await wait(4000)
   const stillHurt = await b.evaluate(() => window.__game.tank.hp)
   check('a tank left alone does not heal by itself any more', stillHurt === 1, `hp=${stillHurt}`)
+
+  // The production path. Every fake tip above omits `time`, so the schedule has
+  // been running on the absolute-unix fallback — shared, but not the real thing.
+  // A tip that carries a mined-at timestamp must anchor the wave to it, on both
+  // clients, from the same explorer field.
+  const MINED = Math.floor(Date.now() / 1000) - 111
+  await Promise.all([a, b].map((p) => p.evaluate(([h, t]) => {
+    window.__clock.accept({ height: h, hash: 'be'.repeat(30) + '0500', time: t })
+    document.getElementById('podium').hidden = true
+  }, [HEIGHT + 2, MINED])))
+  await wait(1200)
+  const anchored = await Promise.all([a, b].map((p) => p.evaluate(() => ({
+    chain: Math.round(window.__clock.chainSeconds() ?? -1),
+    waves: [...window.__game.pickups.keys()].map((id) => id.split(':')[1]),
+  }))))
+  check('a tip that knows when it was mined anchors the wave to the chain',
+    anchored.every((r) => r.chain >= 111 && r.chain < 130) &&
+      anchored.every((r) => r.waves.every((w) => Number(w) === 3)) &&
+      JSON.stringify(anchored[0].waves) === JSON.stringify(anchored[1].waves),
+    JSON.stringify(anchored))
 
   // The board renders in WebGL, and the aim is a ray cast through the cursor
   // onto a plane rather than a divide. Both are new, and both fail silently: a
