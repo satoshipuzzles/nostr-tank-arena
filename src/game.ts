@@ -79,6 +79,15 @@ const EXPIRED_CLAIM_STREAK = 2
  */
 const READ_SILENCE_MS = 12_000
 
+/**
+ * Below this age, a dropped pre-EOSE event was almost certainly live.
+ *
+ * The two populations are hundreds of seconds apart, so this only has to land
+ * somewhere in the gap — it is not a threshold anybody tuned, and it is
+ * deliberately far from both edges.
+ */
+const FRESH_DROP_MS = 2_000
+
 /** The most damage one shell may claim, however the event was written. */
 const MAX_HULL = 3
 /**
@@ -334,6 +343,8 @@ export class Game {
    * trade rather than a fact, and why this number is worth being able to read.
    */
   storedDropped = 0
+  /** Of those, the ones that looked live. See `onEvent` — age, not rate. */
+  storedFresh = 0
   /** performance.now() of the last event any relay delivered. Drives the watchdog. */
   lastInboundAt = 0
   /**
@@ -529,9 +540,22 @@ export class Game {
    * anyway. Accepting a stored one costs a ghost match — shells with full
    * damage, somebody else's deaths in the feed, phantom tanks.
    *
-   * `storedDropped` counts them, per session, so the trade is observable rather
-   * than a silent assumption. A number that keeps climbing after the join is a
-   * relay ordering its buffer the other way.
+   * `storedDropped` counts them so the trade is observable, and `storedFresh`
+   * is the half that says which population they came from.
+   *
+   * Rate does not distinguish the two, which is a correction cowboy made to an
+   * earlier version of this comment. A relay that flushes its live buffer onto
+   * the stored side does it **once per subscription registration** and then goes
+   * live — bounded by however long its historical query took, exactly the same
+   * shape as a stored replay: a burst at join, then nothing. So a *sustained*
+   * climb is not ordering at all, it is churn: something resubscribing over and
+   * over, each pass re-opening its own little pre-EOSE window.
+   *
+   * **Age is the discriminator.** A stored ghost is seconds to minutes old; a
+   * live event flushed early is milliseconds old, and no plausible clock skew
+   * closes a gap that wide. Read as a relative signal only — the subtraction is
+   * against our own clock, so a skewed client shifts every reading by its own
+   * offset, which is the exact failure this game spent a day on.
    */
   onEvent(e: Event, stored = false): void {
     if (this.disposed) return
@@ -546,6 +570,10 @@ export class Game {
     // cost of nothing, because a stale roster entry is a lie about who is here.
     if (stored) {
       this.storedDropped++
+      // Milliseconds old rather than minutes: this was a live event the relay
+      // put on the wrong side of EOSE, and dropping it is the cost of the trade
+      // rather than the point of it.
+      if (Date.now() - e.created_at * 1000 < FRESH_DROP_MS) this.storedFresh++
       return
     }
     if (this.seen.has(e.id) || this.seenPrev.has(e.id)) return

@@ -574,6 +574,12 @@ function drawHud(game: Game): void {
     })
     .filter(Boolean)
     .join(' · ')
+  // The half of `storedDropped` that looked live is the half that cost a real
+  // event, so that is the half that goes on screen. `storedDropped` on its own
+  // is unreadable — a burst at join is the trade working exactly as intended —
+  // and a counter nothing displays is not an instrument. Every local player's,
+  // for the same reason the trouble line is.
+  const ghosted = (running?.players ?? []).reduce((n, p) => n + p.game.storedFresh, 0)
   $('status').innerHTML = [
     clock?.tip
       ? `block <b>${clock.tip.height}</b> ${blockClock(clock)}`
@@ -589,6 +595,12 @@ function drawHud(game: Game): void {
     trouble
       ? `<span class="bad">${escapeHtml(trouble)}</span>`
       : `${game.net.relays.length} relays${(running?.players.length ?? 1) > 1 ? ' ×2' : ''}`,
+    // Symptom first: the player is looking at updates that went missing, not at
+    // a subscription boundary. The cause is one clause underneath, in the words
+    // it would take to search for it.
+    ghosted
+      ? `<span class="bad" id="hud-ghosted">${ghosted} live update${ghosted === 1 ? '' : 's'} dropped &mdash; a relay filed them as replays</span>`
+      : '',
   ]
     .filter(Boolean)
     .join('<br>')
@@ -667,14 +679,28 @@ function drawClockAlarm(): void {
   if (deaf) {
     // Relays echo our own events back to our own subscription, so a healthy read
     // path is never silent even alone in a room. Silence means the ear is gone.
-    const closed = deaf.game.net.deafRelays
+    //
+    // Two different sentences, because they are two different facts and only one
+    // of them has a speaker. A relay that declined our filter said something and
+    // gets quoted; a relay we never reached said nothing at all, and rendering
+    // the library's account of that silence as "the relay said" invents one.
+    const declined = deaf.game.net.deafRelays
+    const unreachable = deaf.game.net.unreachableRelays
     node.innerHTML =
       `<b>YOU HAVE STOPPED HEARING THE ROOM</b>` +
       `<span>Nothing has come back from any relay for ${READ_SILENCE_S} seconds. ` +
       `Other players may still see you — this side of the connection is the one that ` +
       `died. Reload to reconnect.</span>` +
-      (closed.length
-        ? `<code>${escapeHtml(closed.map((r) => `${host(r.url)}: ${r.reason}`).join(' · '))}</code>`
+      (declined.length
+        ? `<code>${escapeHtml(declined.map((r) => `${host(r.url)} declined us: ${r.reason}`).join(' · '))}</code>`
+        : '') +
+      (unreachable.length
+        ? `<code>${escapeHtml(
+            `${unreachable.length === 1 ? '1 relay' : `${unreachable.length} relays`} unreachable, still retrying: ${unreachable.map((r) => host(r.url)).join(', ')}`,
+          )}</code>`
+        : '') +
+      (declined.length || unreachable.length
+        ? ''
         : '<code>no relay said why — the socket simply went quiet</code>')
     return
   }

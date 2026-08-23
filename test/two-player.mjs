@@ -58,6 +58,33 @@ const FLAGS = [
 ]
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms))
+
+/**
+ * Read the same thing off every page until a condition holds, then hand back
+ * the last sample whether it held or not.
+ *
+ * A fixed `wait()` is a bet that some window contains the behaviour, and a
+ * headless renderer runs this whole simulation at roughly a third speed — on a
+ * loaded machine the bet stops paying and the suite reports a bug that is not
+ * there. A block transition that had simply not landed yet has failed here
+ * twice now, and the second time it left the pickup set empty and crashed the
+ * run on `spawned[0][…].id`, costing every check downstream of it.
+ *
+ * `settled` is deliberately the *transition* and not the assertion: wait for
+ * the round to move off the value it had, then let the checks say what it moved
+ * to. Polling until the assertion itself passes would leave a check that can
+ * only ever fail by timeout.
+ */
+const until = async (pages, read, settled, timeout = 15_000) => {
+  const deadline = Date.now() + timeout
+  let last = await Promise.all(pages.map((p) => p.evaluate(read)))
+  while (!settled(last) && Date.now() < deadline) {
+    await wait(150)
+    last = await Promise.all(pages.map((p) => p.evaluate(read)))
+  }
+  return last
+}
+
 const failures = []
 const check = (name, ok, detail = '') => {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  ' + detail : ''}`)
@@ -121,24 +148,26 @@ async function join(browser, label, name, skewSeconds = 0) {
   return page
 }
 
-const snap = (p) =>
-  p.evaluate(() => {
-    const g = window.__game
-    return {
-      hp: g.tank.hp,
-      dead: g.tank.dead,
-      kills: g.kills,
-      deaths: g.deaths,
-      shells: g.shells.size,
-      feed: g.feed.map((f) => f.text),
-      peers: [...g.peers.values()].map((pe) => ({
-        name: pe.name,
-        verified: pe.pubkey !== null,
-        x: Math.round(pe.view.x),
-        y: Math.round(pe.view.y),
-      })),
-    }
-  })
+/** Everything the checks read off a page, in one shape. Runs in the browser. */
+const SNAP = () => {
+  const g = window.__game
+  return {
+    hp: g.tank.hp,
+    dead: g.tank.dead,
+    kills: g.kills,
+    deaths: g.deaths,
+    shells: g.shells.size,
+    feed: g.feed.map((f) => f.text),
+    peers: [...g.peers.values()].map((pe) => ({
+      name: pe.name,
+      verified: pe.pubkey !== null,
+      x: Math.round(pe.view.x),
+      y: Math.round(pe.view.y),
+    })),
+  }
+}
+
+const snap = (p) => p.evaluate(SNAP)
 
 try {
   console.log(`room ${ROOM} @ ${URL}`)
@@ -147,9 +176,18 @@ try {
 
   // Discovery: each side has to learn the other exists, and verify the session
   // attestation that binds the tick key to a real npub.
-  await wait(6000)
-  const seenA = await snap(a)
-  const seenB = await snap(b)
+  //
+  // Polled, not waited out, for the same reason as everything else in here: six
+  // seconds is a bet, and on a machine already running four headless Chromes it
+  // is a bet that loses. When it lost, discovery had simply not finished — and
+  // every check downstream of it failed too, so one slow join reads as eleven
+  // broken features.
+  //
+  // The condition is that each side has *a verified peer*, which is discovery
+  // finishing. What that peer is called, whether there is exactly one of them,
+  // and whether the attestation bound it to a real npub are left to the checks.
+  const [seenA, seenB] = await until([a, b], SNAP,
+    (r) => r.every((x) => x.peers.some((pe) => pe.verified)), 30_000)
   check('A sees bravo', seenA.peers.some((p) => p.name === 'bravo'), JSON.stringify(seenA.peers))
   check('B sees alpha', seenB.peers.some((p) => p.name === 'alpha'), JSON.stringify(seenB.peers))
   check('sessions verified', seenA.peers.every((p) => p.verified) && seenB.peers.every((p) => p.verified))
@@ -375,9 +413,8 @@ try {
   await Promise.all([a, b].map((p) => p.evaluate(([h, t]) => {
     window.__clock.accept({ height: h, hash: 'ab'.repeat(31) + '03', time: t })
   }, [HEIGHT, Math.floor(Date.now() / 1000)])))
-  await wait(1200)
 
-  const afterBlock = await Promise.all([a, b].map((p) => p.evaluate(() => ({
+  const afterBlock = await until([a, b], () => ({
     kills: window.__game.kills,
     deaths: window.__game.deaths,
     round: window.__game.round,
@@ -392,7 +429,10 @@ try {
       ? ''
       : document.getElementById('rules').textContent.replace(/\s+/g, ' ').trim(),
     rows: document.getElementById('podium-rows').textContent.replace(/\s+/g, ' ').trim(),
-  }))))
+    // Settle on the model *and* the view: `drawHud` throttles to 120ms, so a
+    // round that has changed under a HUD that has not repainted yet would have
+    // the next checks reading the previous block's map off the screen.
+  }), (r) => r.every((x) => x.round === HEIGHT && x.map && x.map !== beforeBlock[0].map))
   check('a block ends the round on both clients',
     afterBlock.every((r) => r.round === HEIGHT), JSON.stringify(afterBlock.map((r) => r.round)))
   check('and resets the scores', afterBlock.every((r) => r.kills === 0 && r.deaths === 0),
@@ -435,14 +475,14 @@ try {
   await Promise.all([a, b].map((p) => p.evaluate(([h, t]) => {
     window.__clock.accept({ height: h, hash: 'cd'.repeat(30) + '0501', time: t })
   }, [HEIGHT + 1, Math.floor(Date.now() / 1000)])))
-  await wait(1400)
-  const secondBlock = await Promise.all([a, b].map((p) => p.evaluate(() => ({
+  const secondBlock = await until([a, b], () => ({
+    round: window.__game.round,
     rules: window.__game.modifier.id,
     maxHp: window.__game.maxHp,
     map: document.getElementById('hud-map')?.textContent ?? '',
     chipHidden: document.getElementById('rules').hidden,
     chipDisplay: getComputedStyle(document.getElementById('rules')).display,
-  }))))
+  }), (r) => r.every((x) => x.round === HEIGHT + 1 && x.map && x.map !== afterBlock[0].map))
   check('the next block changes the rules again, in step, with nothing on the wire',
     secondBlock.every((r) => r.rules === 'standard' && r.maxHp === 3) &&
       secondBlock[0].map === secondBlock[1].map && secondBlock[0].map === 'The Lanes',
@@ -459,9 +499,10 @@ try {
   // from the block hash both clients already have. The only thing on the wire
   // is the claim, and the claim is a *stored* event precisely so a client that
   // connected a moment later still learns the pad is empty.
-  const spawned = await Promise.all([a, b].map((p) => p.evaluate(() =>
+  const spawned = await until([a, b], () =>
     [...window.__game.pickups.values()].map((x) => ({ id: x.id, kind: x.kind, x: Math.round(x.at.x), y: Math.round(x.at.y) })),
-  )))
+    (r) => r.every((x) => x.length > 0),
+  )
   check('pickups appear on the board', spawned[0].length > 0, JSON.stringify(spawned[0]))
   // Same invariant as the tank ring, on the other mesh that had the same bug.
   const padY = await a.evaluate(() => {
@@ -473,6 +514,20 @@ try {
   check('and both clients derived the identical set, having sent nothing',
     JSON.stringify(spawned[0]) === JSON.stringify(spawned[1]),
     `${JSON.stringify(spawned[0])} vs ${JSON.stringify(spawned[1])}`)
+
+  // Everything below reaches into that set, and a run where it came back empty
+  // died on `.id` and took every remaining check with it — sixty per cent of the
+  // suite, reported as one crash. A missing pad is one loud failure and the rest
+  // of the run still happens.
+  const lastPadId = spawned[0][spawned[0].length - 1]?.id ?? null
+  // Stand-in coordinates rather than `null`, so the checks below fail on their
+  // own terms — "the pad was not taken" — instead of throwing inside evaluate,
+  // which is the crash this is here to prevent.
+  const firstPad = spawned[0][0] ?? { id: null, kind: null, x: 0, y: 0 }
+  if (!lastPadId) {
+    check('a board with pads on it to run the claim checks against', false,
+      JSON.stringify(spawned[0]))
+  }
 
   // The late joiner, which is where this used to break every single time.
   //
@@ -486,7 +541,22 @@ try {
   // Simulated by moving one client's local round origin a long way. If the
   // schedule is anchored to the chain, moving it changes nothing at all.
   await b.evaluate(() => { window.__game.roundStartedAt = performance.now() - 400_000 })
-  await wait(900)
+  // Give the bug room to appear, counted in frames rather than milliseconds.
+  //
+  // `refreshPickups` runs once a frame, so the broken version reshuffles the
+  // board on the very next one — but a headless renderer under swiftshader runs
+  // at a handful of frames a second, and a wall-clock wait short enough to keep
+  // the suite quick is not reliably long enough to contain one. Waiting on the
+  // frames themselves is the same guarantee without the bet: if the schedule is
+  // anchored to the chain it has now had every chance to move and has not.
+  await b.evaluate(() => Promise.race([
+    new Promise((r) => {
+      let n = 0
+      const tick = () => (++n >= 5 ? r(n) : requestAnimationFrame(tick))
+      requestAnimationFrame(tick)
+    }),
+    new Promise((r) => setTimeout(() => r(-1), 10_000)),
+  ]))
   const skewed = await Promise.all([a, b].map((p) => p.evaluate(() =>
     [...window.__game.pickups.keys()].sort(),
   )))
@@ -515,18 +585,18 @@ try {
       content: JSON.stringify({ p: id, kind: 'shield' }),
     })
     return { gone: !g.pickups.has(id), unmatched: g.unmatchedClaims }
-  }, spawned[0][spawned[0].length - 1].id)
+  }, lastPadId)
   await wait(900)
   const backfilled = await b.evaluate((id) => {
     const p = window.__game.pickups.get(id)
     return { back: !!p, taken: !!p?.taken }
-  }, spawned[0][spawned[0].length - 1].id)
+  }, lastPadId)
   check('a claim that arrives before its pad does is remembered, not dropped',
     early.gone && backfilled.back && backfilled.taken,
     `${JSON.stringify(early)} -> ${JSON.stringify(backfilled)}`)
 
   // Drive alpha onto one and watch what happens on both sides.
-  const target = spawned[0][0]
+  const target = firstPad
   await a.evaluate((t) => {
     const g = window.__game
     g.tank.dead = false
@@ -753,10 +823,14 @@ try {
   check('two relays calling two claims expired, while ticks land, does it',
     afterTwo !== null && afterTwo.behindBySeconds === 600, JSON.stringify(afterTwo))
 
-  const behind = await a.evaluate(() => {
+  // The model has the alarm by now — the check above just read it — but the
+  // panel is painted in the frame loop, and a headless renderer gets through a
+  // handful of frames a second. Poll for the paint rather than assuming the
+  // evaluate above bought enough time for one.
+  const [behind] = await until([a], () => {
     const n = document.getElementById('alarm')
     return { display: getComputedStyle(n).display, text: n.textContent.replace(/\s+/g, ' ').trim() }
-  })
+  }, (r) => r.every((x) => x.display !== 'none' && x.text.length > 0))
   // The quiet regime gets the opposite headline, because the opposite thing is
   // broken: the match is fine and only the pads misbehave.
   check('the quiet failure leads with the pads, not the clock',
@@ -862,12 +936,28 @@ try {
   // moments after the subscription opens.
   //
   // A fresh block first, mined *now*, so the pads are at the start of their wave
-  // — joining a third browser takes ten seconds and a pad only lives twenty.
+  // — and then the wave is pinned open, because "start of the wave" was never
+  // enough. A pad lives twenty seconds; publishing the claim, measuring the
+  // NIP-40 headroom and launching a third browser costs more than that on a
+  // loaded machine, and when it does the pad rolls to the next wave, both ids
+  // change, and a backfill that worked perfectly reports `derived: false`.
+  //
+  // The wave length is a schedule input, identical on every client by
+  // construction, so widening it here changes nothing about what is being
+  // measured and removes a stopwatch nobody meant to be running. Same rule as
+  // pinning the tip: the environment gets fixed before the behaviour is
+  // measured, or the measurement is of the environment.
   const LATE_MINED = Math.floor(Date.now() / 1000)
-  await Promise.all([a, b].map((p) => p.evaluate(([h, t]) => {
+  const PIN_WAVE = 600
+  await Promise.all([a, b].map((p) => p.evaluate(([h, t, w]) => {
+    // After `accept`, not before: the tip starts the round, and starting a round
+    // reads the modifier back off the block hash. Overriding first would be
+    // overwritten a line later and the pin would silently do nothing.
     window.__clock.accept({ height: h, hash: 'da'.repeat(30) + '0500', time: t })
+    window.__realWave = window.__game.modifier.waveSeconds
+    window.__game.modifier = { ...window.__game.modifier, waveSeconds: w }
     document.getElementById('podium').hidden = true
-  }, [HEIGHT + 3, LATE_MINED])))
+  }, [HEIGHT + 3, LATE_MINED, PIN_WAVE])))
   await wait(1500)
 
   const fresh = await a.evaluate(() =>
@@ -920,11 +1010,16 @@ try {
     ttl !== null && ttl.ttl === 600, JSON.stringify(ttl))
 
   const c = await join(browsers[2], 'C', 'charlie')
-  await c.evaluate(([h, t]) => {
-    // Same block as the other two, so it derives the same pads.
+  await c.evaluate(([h, t, w]) => {
+    // Same block *and* the same wave length as the other two, so it derives the
+    // same pads. The wave is part of the schedule input: a client on a different
+    // one computes different ids and matches nobody, which is the exact bug the
+    // anchor work was about.
     window.__clock.accept({ height: h, hash: 'da'.repeat(30) + '0500', time: t })
+    window.__realWave = window.__game.modifier.waveSeconds
+    window.__game.modifier = { ...window.__game.modifier, waveSeconds: w }
     document.getElementById('podium').hidden = true
-  }, [HEIGHT + 3, LATE_MINED])
+  }, [HEIGHT + 3, LATE_MINED, PIN_WAVE])
 
   let late = null
   for (let i = 0; i < 8; i++) {
@@ -950,6 +1045,19 @@ try {
   // fetched nothing at all.
   check('and it actually received claims rather than quietly fetching none',
     late.received > 0, JSON.stringify(late))
+
+  // Hand the wave back before anything else runs against these clients.
+  //
+  // A pin that outlives the thing it was pinned for is a fixture leaking into
+  // the next check, and this one leaked: the fallback-clock check below waits up
+  // to twenty seconds for a board, which is patience against a 34-second wave
+  // and no patience at all against a ten-minute one. It failed with `pads 0`
+  // against a client whose schedule I had quietly stopped.
+  await Promise.all([a, b, c].map((p) => p.evaluate(() => {
+    if (window.__realWave !== undefined) {
+      window.__game.modifier = { ...window.__game.modifier, waveSeconds: window.__realWave }
+    }
+  })))
 
   // The other half of the anchor: what the schedule does while it does not yet
   // know when the block was mined.
@@ -1253,8 +1361,13 @@ try {
     !!sees && sees.peers.length > 0, JSON.stringify(sees))
   // And the other direction of the same failure: the room has to see them too,
   // which it always did — that asymmetry is what made it invisible.
-  const seenBack = await a.evaluate(() =>
-    [...window.__game.peers.values()].map((p) => p.name))
+  // Polled: delta being visible *here* is a second discovery, and sampling it
+  // the instant delta's own loop broke measures the round trip rather than the
+  // asymmetry. The bug this guards is a direction that never arrives, so a
+  // bounded poll still catches it.
+  const [seenBack] = await until([a], () =>
+    [...window.__game.peers.values()].map((p) => p.name),
+    (r) => r[0].includes('delta'), 20_000)
   check('and the room can see them, which it always could',
     seenBack.includes('delta'), JSON.stringify(seenBack))
 
@@ -1272,6 +1385,7 @@ try {
     const g = window.__game
     const before = { shells: g.shells.size, feed: g.feed.length, peers: g.peers.size }
     const droppedBefore = g.storedDropped
+    const freshBefore = g.storedFresh
     const stamp = () => Math.floor(Date.now() / 1000)
     const ghost = 'aa'.repeat(32)
     // Exactly what a relay hands back out of its store on join.
@@ -1292,6 +1406,7 @@ try {
       after: { shells: g.shells.size, feed: g.feed.length, peers: g.peers.size },
       ghostPeer: g.peers.has(ghost),
       dropped: g.storedDropped - droppedBefore,
+      fresh: g.storedFresh - freshBefore,
     }
   })
   check('a shell replayed out of the store does not become a shell',
@@ -1306,6 +1421,60 @@ try {
   // climbing long after the join is a relay ordering its buffer the other way.
   check('and the drop is counted rather than silent', replay.dropped === 3,
     `${replay.dropped} dropped`)
+  // Those three were stamped `now`, so they are the population a relay
+  // flushing live events onto the stored side would produce — which is the case
+  // that says the trade is costing something, as opposed to the case where it
+  // is earning its keep. Rate cannot tell them apart; age can.
+  check('and a drop that looked live is counted apart from a stale one',
+    replay.fresh === 3, `${replay.fresh} of ${replay.dropped} looked live`)
+
+  const stale = await a.evaluate(() => {
+    const g = window.__game
+    const before = { dropped: g.storedDropped, fresh: g.storedFresh }
+    g.onEvent({
+      id: 'old' + Math.random(), kind: 21001, pubkey: 'cc'.repeat(32),
+      // Four minutes old: strfry will hand you up to five minutes of this.
+      created_at: Math.floor(Date.now() / 1000) - 240,
+      tags: [], content: JSON.stringify({ id: 'oldshell', t0: performance.now(), x: 500, y: 500, a: 0 }),
+    }, true)
+    return { dropped: g.storedDropped - before.dropped, fresh: g.storedFresh - before.fresh }
+  })
+  check('while a four-minute-old one counts as the ghost it is',
+    stale.dropped === 1 && stale.fresh === 0, JSON.stringify(stale))
+
+  // A counter nothing displays is not an instrument, and this suite is the only
+  // thing that has ever read `storedFresh`. Poll for the line rather than
+  // sampling once: drawHud throttles to 120ms and a headless renderer runs the
+  // whole simulation at roughly a third speed.
+  //
+  // Both halves are read in one evaluate, and the poll is on them *agreeing*.
+  // The counter is live and the line is whatever the last paint left behind —
+  // `drawHud` throttles to 120ms — so a single sample compares a number to a
+  // stale render of an older one, and this check duly failed with `fresh: 4`
+  // against a line reading `1`. It is not polling until the assertion passes:
+  // the failure this guards is a counter that never reaches the screen at all,
+  // and that one never agrees, however long you wait.
+  const [shown] = await until([a], () => {
+    const line = document.getElementById('hud-ghosted')?.textContent ?? null
+    return { fresh: window.__game.storedFresh, line }
+  }, (r) => r[0].line !== null && r[0].line.startsWith(`${r[0].fresh} live update`))
+  // Asserted against the counter rather than the literal 3: a real relay may
+  // flush one of our own events onto the stored side at any moment, and the
+  // claim under test is that whatever the number is, it reaches a person.
+  check('and the count reaches the screen, in the words of what was lost',
+    shown.line !== null && shown.line.startsWith(`${shown.fresh} live update`) &&
+      shown.line.includes('dropped'),
+    JSON.stringify(shown))
+
+  // The other direction, as a biconditional so it holds whichever way player
+  // two's session went: no drops, no line. A warning that is always on screen
+  // is not a warning.
+  const quiet = await b.evaluate(() => ({
+    fresh: window.__game.storedFresh,
+    present: document.getElementById('hud-ghosted') !== null,
+  }))
+  check('and a session that lost nothing is not warned about it',
+    quiet.present === (quiet.fresh > 0), JSON.stringify(quiet))
 
   // The other direction: a *live* event of the same shape must still work, or
   // "nothing replays" would pass against a client that had stopped listening.
