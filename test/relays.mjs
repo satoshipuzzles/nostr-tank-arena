@@ -218,6 +218,16 @@ try {
   check('game starts against twelve fake relays', started)
   if (!started) throw new Error('never reached the arena')
 
+  // The other direction, so "the alarm shows" cannot pass by always showing:
+  // this session is publishing to twelve relays that mostly work, and the panel
+  // must be absent from the page rather than merely empty.
+  const quiet = await page.evaluate(() => {
+    const n = document.getElementById('alarm')
+    return { attr: n.hidden, display: getComputedStyle(n).display }
+  })
+  check('no clock alarm on a session whose events are landing',
+    quiet.attr && quiet.display === 'none', JSON.stringify(quiet))
+
   const using = await page.evaluate(() => window.__game.net.relays)
   check('it is talking to the fakes, not the public set', using.every((u) => u.startsWith('ws://localhost')), using.length + ' relays')
 
@@ -746,6 +756,35 @@ try {
       'and the alarm quotes the relay rather than paraphrasing',
       !!alarm && /invalid:/.test(alarm.reason),
       alarm ? alarm.reason : '',
+    )
+
+    // The HUD half. A flag nobody can see is the same failure as a flag nobody
+    // acts on — and this is the one problem in the whole game a player can go
+    // and fix, so it has to actually reach the screen. Computed style, not the
+    // attribute: `#alarm` is `display: grid`, which outranks the UA sheet's
+    // `[hidden]` rule without an `!important` behind it.
+    const onScreen = await page2.evaluate(() => {
+      const n = document.getElementById('alarm')
+      const cs = getComputedStyle(n)
+      return {
+        attr: n.hidden,
+        display: cs.display,
+        height: Math.round(n.getBoundingClientRect().height),
+        text: n.textContent.replace(/\s+/g, ' ').trim(),
+      }
+    })
+    if (process.env.TANK_SHOTS) {
+      await page2.screenshot({ path: `${process.env.TANK_SHOTS}/clock-alarm.png` })
+    }
+    check(
+      'the clock alarm is on the screen, not just in the client',
+      !onScreen.attr && onScreen.display !== 'none' && onScreen.height > 20,
+      JSON.stringify({ ...onScreen, text: onScreen.text.slice(0, 60) }),
+    )
+    check(
+      'and it tells the player it is their machine and quotes the relay',
+      /clock/i.test(onScreen.text) && /invalid:/.test(onScreen.text),
+      onScreen.text.slice(0, 160),
     )
 
     // Pin the shipped interval before compressing it, so this cannot pass

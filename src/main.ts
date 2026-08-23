@@ -388,6 +388,7 @@ function drawHud(game: Game): void {
     .join('')
 
   drawRules(game)
+  drawClockAlarm()
 
   const others = game.peers.size
   const clock = running?.clock
@@ -451,6 +452,44 @@ function blockClock(clock: BlockClock): string {
   const ss = Math.floor(seconds % 60)
   const text = `${clock.tipTimeKnown ? '' : '~'}${mm}:${String(ss).padStart(2, '0')}`
   return `<span class="clock${seconds >= 600 ? ' due' : ''}">${text}</span>`
+}
+
+/**
+ * "Your clock is wrong", when every relay says so.
+ *
+ * This is the only failure in the whole game a player can go and fix, which is
+ * why it gets the middle of the screen and does not time out. Everything else
+ * the HUD warns about is somebody else's machine — a relay refusing, a peer
+ * dropping — and the honest response to those is to keep playing.
+ *
+ * The relay's own words are quoted rather than paraphrased. `created_at too far
+ * in the future (window 900000 ms)` is a sentence a player can act on; "network
+ * error" is not, and inventing a friendlier version would throw away the only
+ * part with a number in it.
+ *
+ * Every local player's uplink is checked. Two players on one machine share a
+ * clock by definition, so either alarm is the same alarm — but reading only
+ * player one's would miss it entirely if player two happened to publish first.
+ */
+function drawClockAlarm(): void {
+  const node = $('alarm')
+  const alarm = (running?.players ?? [])
+    .map((p) => p.game.net.clockAlarm)
+    .find((a) => a !== null)
+  if (!alarm) {
+    node.hidden = true
+    return
+  }
+  const ahead = /future/i.test(alarm.reason)
+  const window = alarm.reason.match(/window (\d+) ms/)
+  const by = window ? ` by more than ${Math.round(Number(window[1]) / 60000)} minutes` : ''
+  node.hidden = false
+  node.innerHTML =
+    `<b>THIS MACHINE'S CLOCK IS WRONG</b>` +
+    `<span>Every relay is rejecting our events${
+      ahead ? `, because the clock here is ahead${by}` : ''
+    }. Nothing you do in the game will fix it — set the clock, or turn on automatic time, and this will clear itself.</span>` +
+    `<code>${escapeHtml(alarm.reason)}</code>`
 }
 
 /**

@@ -666,6 +666,31 @@ down and is emphatically not proof of a fake. Those stay grey and unverified
 rather than being marked wrong. Only a domain that actively names a *different*
 key gets the strike-through.
 
+## When it is your clock, the game says so
+
+Every other warning in this game is about somebody else's machine — a relay
+refusing, a peer dropping — and the honest response to those is to keep playing.
+One is not. If **every** relay calls our events `invalid:` several publishes in a
+row, that is not a relay having an opinion, it is a fact about this computer:
+newlay's window is 365 days behind and fifteen minutes ahead, so realistically
+the clock here is fast.
+
+The classifier is right not to mute for it — a bad event is our fault, not the
+relay's — which means without a separate lever the client hammers every relay for
+the whole session. Correct behaviour, worst outcome. So `Net` raises a
+`clockAlarm`, publishing holds except for one probe every 20 seconds, and the HUD
+puts it in the middle of the screen where it does not time out. It is the only
+failure in the whole game a player can go and fix.
+
+The relay's own words are quoted rather than paraphrased. `invalid: created_at
+too far in the future (window 900000 ms)` is a sentence somebody can act on;
+"network error" is not, and inventing a friendlier version would throw away the
+only part with a number in it.
+
+The suite checks the screen, not the flag — computed style, non-zero height, and
+the text — plus the other direction, that a session whose events are landing has
+no alarm on the page at all.
+
 ## The block clock
 
 The HUD counts *up* from when the tip was mined, because there is nothing honest

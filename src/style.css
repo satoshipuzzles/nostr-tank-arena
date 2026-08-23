@@ -259,6 +259,10 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
   top: 14px;
   left: 50%;
   transform: translateX(-50%);
+  /* Kept clear of the scoreboard and the status panel either side of it. On a
+   * 800px window the centre band between them is about 360px, and without a
+   * cap the chip runs underneath both. */
+  max-width: min(420px, calc(100vw - 480px));
   display: grid;
   justify-items: center;
   gap: 1px;
@@ -305,6 +309,39 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
   display: block;
 }
 .p2-row .pips i.on { background: var(--pip, #ffc44d); }
+
+/*
+ * The clock alarm.
+ *
+ * Loud on purpose, and it does not time out. Every other warning in this game
+ * is about somebody else's machine — a relay refusing, a peer dropping — and
+ * the honest response to those is to keep playing. This one is about *your*
+ * machine and it is the only failure here a player can go and fix, so it gets
+ * the middle of the screen and stays until it is fixed.
+ */
+#alarm {
+  position: absolute;
+  top: 30%;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: min(560px, 88vw);
+  display: grid;
+  gap: 6px;
+  padding: 14px 20px;
+  border-radius: 14px;
+  background: #2a1216;
+  border: 1px solid #b8474f;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.55);
+  text-align: center;
+  z-index: 6;
+}
+#alarm b { font-size: 17px; letter-spacing: 0.5px; color: #ff9aa2; }
+#alarm span { font-size: 13px; color: #e8eef8; }
+#alarm code {
+  font-size: 11px;
+  color: var(--dim);
+  word-break: break-word;
+}
 
 #buffs {
   position: absolute;
