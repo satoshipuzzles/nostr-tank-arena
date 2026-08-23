@@ -12,6 +12,7 @@
     "shot": "node test/shot.mjs",
     "test:couch": "node test/couch.mjs",
     "test:controls": "node test/controls.mjs",
+    "test:cockpit": "node test/cockpit.mjs",
     "test:relays": "node test/relays.mjs"
   },
   "dependencies": {

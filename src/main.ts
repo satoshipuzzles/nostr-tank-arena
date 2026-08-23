@@ -6,7 +6,7 @@ import { Game } from './game'
 import { Input, PLAYER_TWO, SOLO, type Scheme } from './input'
 
 import { DEFAULT_RELAYS, Identity, Net } from './nostr'
-import { Renderer } from './render'
+import { Renderer, type ViewMode } from './render'
 import type { ClockDirection } from './nostr'
 import { modifierForBlock } from './modifiers'
 import { type Buffs, PICKUPS, type PickupKind } from './pickups'
@@ -82,6 +82,57 @@ window.addEventListener('keydown', (e) => {
   sfx.toggle()
   soundInput.value = sfx.muted ? 'off' : 'on'
   paintSoundButton()
+})
+
+/**
+ * Board view or cockpit.
+ *
+ * Kept on the page rather than inside `start()` so the choice survives a
+ * rematch, and remembered across sessions: somebody who plays in the cockpit
+ * wants to be in the cockpit next time without hunting for the button.
+ */
+let view: ViewMode = stored('tank.view') === 'cockpit' ? 'cockpit' : 'board'
+/**
+ * False during a couch match.
+ *
+ * There is one camera and two people looking at it. The board view is the whole
+ * arena, so it is genuinely a shared picture; a cockpit is one player's eyes and
+ * leaves the other driving a tank they cannot see. Split-screen would fix it and
+ * is a bigger change than this — until then the toggle is off rather than
+ * quietly ruining player two's match.
+ */
+let cockpitAllowed = true
+
+function paintView(): void {
+  const button = $('view-toggle') as HTMLButtonElement
+  button.textContent = view === 'cockpit' ? 'View: cockpit' : 'View: board'
+  button.disabled = !cockpitAllowed
+  button.title = cockpitAllowed
+    ? 'Board view or cockpit (V)'
+    : 'Cockpit is single-player for now — there is only one camera'
+  // Only meaningful while a match is on screen; the HUD itself is hidden in the
+  // lobby, and this lives inside it.
+  $('crosshair').hidden = view !== 'cockpit'
+}
+
+function setView(next: ViewMode): void {
+  if (next === 'cockpit' && !cockpitAllowed) return
+  view = next
+  store('tank.view', view)
+  running?.renderer.setView(view)
+  paintView()
+}
+paintView()
+
+$('view-toggle').addEventListener('click', () => {
+  setView(view === 'cockpit' ? 'board' : 'cockpit')
+})
+
+window.addEventListener('keydown', (e) => {
+  if (e.code !== 'KeyV' || e.repeat) return
+  const target = e.target as HTMLElement | null
+  if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return
+  setView(view === 'cockpit' ? 'board' : 'cockpit')
 })
 
 function readRelays(): string[] {
@@ -310,7 +361,17 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     ;(window as unknown as { __profiles: Profiles }).__profiles = profiles
     ;(window as unknown as { __players: Player[] }).__players = players
 
+    // Faces on the tanks. The renderer asks by pubkey and never learns what a
+    // relay is; `Profiles.get` queues an unknown npub for the next batch and
+    // answers with a placeholder, so calling it once per tank per frame is free.
+    renderer.setPictureSource((pubkey) => (pubkey ? profiles.get(pubkey).picture : null))
+    cockpitAllowed = !twoPlayer
+    if (!cockpitAllowed) view = 'board'
+    renderer.setView(view)
+    paintView()
+
     canvas.addEventListener('mousemove', (e) => {
+      cursor = { x: e.clientX, y: e.clientY }
       const world = renderer.toWorld(e.clientX, e.clientY)
       for (const p of players) if (p.input.binding.mouse) p.input.mouseWorld = world
     })
@@ -332,6 +393,16 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
 // ------------------------------------------------------------------- loop
 
 let last = 0
+/**
+ * The last place the mouse was seen, in client pixels.
+ *
+ * Board view only needs this on `mousemove`, because the point the cursor picks
+ * out on the board does not move when the tank does. Cockpit view does: the aim
+ * arc is measured from the hull, and the hull turns while the cursor sits
+ * perfectly still. Without re-reading it every frame the turret holds a stale
+ * world angle and then snaps the next time the mouse twitches.
+ */
+let cursor: { x: number; y: number } | null = null
 
 function loop(now = performance.now()): void {
   if (!running) return
@@ -341,6 +412,10 @@ function loop(now = performance.now()): void {
   last = now
 
   const { players, renderer } = running
+  if (renderer.viewMode === 'cockpit' && cursor) {
+    const world = renderer.toWorld(cursor.x, cursor.y)
+    for (const p of players) if (p.input.binding.mouse) p.input.mouseWorld = world
+  }
   // Every local player steps in the same frame, before anything is drawn.
   // Player two's events reach player one's game inside `update` — see
   // `Game.localMirror` — so drawing after both have stepped is what makes the
