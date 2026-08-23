@@ -150,6 +150,33 @@ export class Identity {
 export type FailureKind = 'refused' | 'no-verdict' | 'malformed' | 'unknown'
 
 /**
+ * What happened to one event across every relay it was sent to.
+ *
+ * `publish()` stays fire-and-forget for the ten-times-a-second traffic — a tick
+ * that lands nowhere is replaced by the next tick and nobody needs to be told.
+ * This exists for the one kind that is published exactly **once**, where the
+ * difference between "everybody refused it" and "nobody answered yet" decides
+ * whether local state is wrong.
+ *
+ * `refused` here means *unanimously* refused: every relay that was asked looked
+ * at the event and said no. Anything else — one acceptance, one silence, one
+ * relay we could not classify — is not grounds for acting, because the event may
+ * well have landed.
+ */
+export interface PublishOutcome {
+  /** Relays the event was actually sent to. Zero when everything is muted. */
+  sent: number
+  accepted: number
+  refused: number
+  /** Silence, timeouts, and reasons we could not classify. */
+  unclear: number
+  /** True only when every relay asked refused it outright. */
+  unanimouslyRefused: boolean
+  /** The last refusal reason, in the relay's own words. */
+  reason: string | null
+}
+
+/**
  * NIP-01's machine-readable OK prefixes, plus `auth-required:` from NIP-42.
  *
  * The set is closed, which is the whole reason to match on it. The previous
@@ -361,19 +388,36 @@ export class Net {
    * "why is everyone teleporting" has an answer on screen instead of being a
    * mystery about the netcode.
    */
-  publish(event: Event): void {
+  /**
+   * Send an event to every relay that is not currently muted.
+   *
+   * Returns a promise so a caller with something to undo can wait for the
+   * verdict — see `PublishOutcome`. It never rejects: a publish that failed
+   * everywhere is a result, not an exception, and the ten-per-second callers
+   * ignore it entirely.
+   */
+  publish(event: Event): Promise<PublishOutcome> {
     const now = Date.now()
     for (const [url, m] of this.muted) if (now >= m.until) this.muted.delete(url)
     const targets = this.relays.filter((url) => !this.muted.has(url))
-    if (!targets.length) return
+    const outcome: PublishOutcome = {
+      sent: targets.length,
+      accepted: 0,
+      refused: 0,
+      unclear: 0,
+      unanimouslyRefused: false,
+      reason: null,
+    }
+    if (!targets.length) return Promise.resolve(outcome)
     const results = this.pool.publish(targets, event)
     this.published += results.length
-    results.forEach((p, i) => {
+    const settled = results.map((p, i) => {
       const url = targets[i]
-      p.then(
+      return p.then(
         () => {
           this.strikes.set(url, 0)
           this.entry(url).accepted++
+          outcome.accepted++
           const known = this.trouble.get(url)
           // One clean publish is not proof the relay is happy, but a run of
           // them is: let an old complaint age out rather than sticking forever.
@@ -387,7 +431,14 @@ export class Net {
             // promise and is not a failure, so it is not counted as one.
             this.strikes.set(url, 0)
             this.entry(url).accepted++
+            outcome.accepted++
             return
+          }
+          if (kind === 'refused') {
+            outcome.refused++
+            outcome.reason = reason
+          } else {
+            outcome.unclear++
           }
           this.rejected++
           const known = this.trouble.get(url)
@@ -415,6 +466,10 @@ export class Net {
           if (strikes >= Net.MUTE_AFTER) this.mute(url)
         },
       )
+    })
+    return Promise.all(settled).then(() => {
+      outcome.unanimouslyRefused = outcome.refused === outcome.sent && outcome.sent > 0
+      return outcome
     })
   }
 

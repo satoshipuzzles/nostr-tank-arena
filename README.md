@@ -193,6 +193,29 @@ did, which looks exactly like the ordering bug rather than a clock. It is ten
 minutes now, about one block, and it is a fixed offset from `created_at` rather
 than a second reading of the clock straddling the signature.
 
+### When nobody accepts the claim
+
+`sweepPickups` marks a pad taken *before* publishing — it has to, or grabbing an
+item would stall for a round trip. So a claim nobody accepted leaves this client
+alone in believing the pad is gone while every remote player still sees it live.
+
+`publish()` returns an outcome for exactly this reason. The pad is restored on a
+**unanimous refusal** — every relay that was asked looked at the event and said
+no — and never on silence or a timeout, because the event may well have landed
+and putting the pad back would be inventing a divergence rather than repairing
+one. Splitting refusal from silence is what makes the rollback safe to write at
+all.
+
+Two things it deliberately does not do. It does not take the pickup's effect
+back: nobody outside this client ever saw the grab, so nothing out there
+disagrees about it, and a game that confiscates a shield for a network reason
+feels broken in a way leaving it does not. And it does not make the pad
+available *to us* again — the tank is still parked on it, and `sweepPickups`
+runs every frame, so restoring it without marking it spent re-grabs it,
+re-publishes, is refused again, and loops at frame rate. The first version did
+exactly that: nine refusals in a second and a half, caught by the check that was
+written alongside it.
+
 Nothing here is ordered by `created_at`, because the publisher picks it. A
 simultaneous double-grab is resolved by not resolving it: both players get the
 pickup. The window is one relay round trip, and a party game that occasionally

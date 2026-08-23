@@ -165,8 +165,8 @@ try {
     const realOne = one.game.net.publish.bind(one.game.net)
     const realTwo = two.game.net.publish.bind(two.game.net)
     const sent = { one: [], two: [] }
-    one.game.net.publish = (e) => { sent.one.push(e.pubkey); realOne(e) }
-    two.game.net.publish = (e) => { sent.two.push(e.pubkey); realTwo(e) }
+    one.game.net.publish = (e) => { sent.one.push(e.pubkey); return realOne(e) }
+    two.game.net.publish = (e) => { sent.two.push(e.pubkey); return realTwo(e) }
     return new Promise((r) =>
       setTimeout(() => {
         one.game.net.publish = realOne
@@ -305,8 +305,12 @@ try {
   const offline = await page.evaluate(async () => {
     const [one, two] = window.__players
     const sent = []
-    one.game.net.publish = (e) => sent.push(e.kind)
-    two.game.net.publish = (e) => sent.push(e.kind)
+    // Returns a resolved outcome rather than nothing: `publishClaim` waits on
+    // this now, and a wrapper that returns undefined throws on `.then`.
+    const nowhere = () =>
+      Promise.resolve({ sent: 0, accepted: 0, refused: 0, unclear: 0, unanimouslyRefused: false, reason: null })
+    one.game.net.publish = (e) => { sent.push(e.kind); return nowhere() }
+    two.game.net.publish = (e) => { sent.push(e.kind); return nowhere() }
     two.game.tank.dead = false
     two.game.tank.reloadAt = 0
     const before = one.game.shells.size

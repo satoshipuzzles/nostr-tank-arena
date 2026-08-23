@@ -9,6 +9,7 @@
 // The cheat that survives this is a client that refuses to die. See README.
 
 import type { Event } from 'nostr-tools'
+import type { PublishOutcome } from './nostr'
 import { ARENA_H, ARENA_W, SPAWNS, hasLineOfSight } from './arena'
 import {
   PICKUPS,
@@ -200,6 +201,15 @@ export class Game {
    */
   private claimed = new Set<string>()
   /**
+   * Pads this client already consumed but could not tell anybody about.
+   *
+   * A pad restored by `settleClaim` is live for the room again, which is the
+   * point — but it is not live for *us*, because we already took it. Without
+   * that distinction the restored pad is immediately re-swept by the tank still
+   * parked on it.
+   */
+  private spent = new Set<string>()
+  /**
    * Diagnostics for the claim path. Both numbers, because either alone lies.
    *
    * `unmatchedClaims` counts claims that arrived before their pad existed —
@@ -211,6 +221,8 @@ export class Game {
    */
   unmatchedClaims = 0
   claimsReceived = 0
+  /** Claims every relay refused, so the pad was put back. Non-zero is worth reading. */
+  refusedClaims = 0
   /** Pickups currently on the board, by id. Derived, never received. */
   readonly pickups = new Map<string, Pickup>()
   /** Timed effects on our own tank. */
@@ -944,7 +956,7 @@ export class Game {
   /** Anything we are standing on, taken immediately and announced afterwards. */
   private sweepPickups(now: number): void {
     for (const pickup of this.pickups.values()) {
-      if (pickup.taken) continue
+      if (pickup.taken || this.spent.has(pickup.id)) continue
       const dx = pickup.at.x - this.tank.x
       const dy = pickup.at.y - this.tank.y
       if (dx * dx + dy * dy > PICKUP_RADIUS * PICKUP_RADIUS) continue
@@ -1000,12 +1012,48 @@ export class Game {
       ],
       content: JSON.stringify(payload),
     })
-    this.net.publish(event)
     // A pad taken by the player next to you must go empty on their screen now,
     // not after a round trip — otherwise two people on one couch routinely both
     // take the same item, which is the one case where the deliberate
     // both-players-get-it tie is not a fair trade.
     this.mirror(event)
+    void this.net.publish(event).then((outcome) => this.settleClaim(pickup, outcome))
+  }
+
+  /**
+   * What to do when a claim did not make it.
+   *
+   * The claim is the one thing this game publishes exactly once, so it is the
+   * one thing with nothing to self-heal it. `sweepPickups` marks the pad taken
+   * *before* publishing — it has to, or grabbing an item would stall for a
+   * round trip — which means a claim nobody accepted leaves this client alone in
+   * believing that pad is gone.
+   *
+   * Rolled back only on a **unanimous refusal**: every relay that was asked
+   * looked at the event and said no. Never on silence or a timeout, because the
+   * event may well have landed and putting the pad back would be inventing a
+   * divergence rather than repairing one. That distinction is the whole reason
+   * `classifyFailure` exists.
+   *
+   * The buff is deliberately *not* taken back. Nobody outside this client ever
+   * saw the grab, so nothing out there disagrees about it, and a game that
+   * confiscates a shield for a network reason feels broken in a way the
+   * alternative does not. What is restored is the pad — which makes this client
+   * agree with the room again, and lets the grab be retried by driving over it.
+   */
+  private settleClaim(pickup: Pickup, outcome: PublishOutcome): void {
+    if (!outcome.unanimouslyRefused) return
+    // Spent before the pad is restored, and that ordering is the whole of it.
+    // `sweepPickups` runs every frame and the tank is still standing on the pad
+    // — putting it back without this re-grabs it, re-publishes, is refused
+    // again, and loops at frame rate. The first version of this did exactly
+    // that: nine refusals in a second and a half before the test caught it.
+    this.spent.add(pickup.id)
+    const live = this.pickups.get(pickup.id)
+    this.claimed.delete(pickup.id)
+    if (live) live.taken = false
+    this.refusedClaims++
+    this.pushFeed(`claim refused — ${PICKUPS[pickup.kind]?.label ?? 'that pad'} is back`)
   }
 
   private onClaim(e: Event): void {

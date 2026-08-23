@@ -511,6 +511,94 @@ try {
   check('and the other client sees that pad go empty', seen.taken,
     JSON.stringify(seen.feed.slice(-3)))
 
+  // ------------------------------------------------ a claim nobody accepted
+  //
+  // The claim is the one thing this game publishes exactly once, so it is the
+  // one thing with nothing to self-heal it — and `sweepPickups` marks the pad
+  // taken *before* publishing, because grabbing an item cannot stall for a round
+  // trip. So a claim nobody accepted leaves this client alone in believing that
+  // pad is gone, while every remote player still sees it live.
+  //
+  // Rolled back only on a unanimous refusal. Silence must not roll anything
+  // back: the event may well have landed, and putting the pad back would be
+  // inventing a divergence rather than repairing one. Both directions are
+  // checked, because only asserting the first would pass against a rollback
+  // that fires on everything.
+  const forceOutcome = (outcome) =>
+    a.evaluate((o) => {
+      const g = window.__game
+      if (!window.__realPublish) window.__realPublish = g.net.publish.bind(g.net)
+      g.net.publish = (e) => {
+        const p = window.__realPublish(e)
+        // Only the claim is forced; the tick stream must keep behaving normally
+        // or the rest of the match stops working underneath the check.
+        return e.kind === 30078 && e.tags.some((t) => t[0] === 'expiration')
+          ? Promise.resolve(o)
+          : p
+      }
+    }, outcome)
+
+  const grabAnother = () =>
+    a.evaluate(() => {
+      const g = window.__game
+      // Skip anything already consumed-but-unannounced: a pad restored by the
+      // rollback is live for the room and not for us, so parking on it again
+      // publishes nothing and the next check would measure the wrong pad.
+      const next = [...g.pickups.values()].find((p) => !p.taken && !g.spent.has(p.id))
+      if (!next) return null
+      g.tank.dead = false
+      g.tank.hp = g.maxHp
+      g.tank.x = next.at.x
+      g.tank.y = next.at.y
+      return next.id
+    })
+
+  await forceOutcome({
+    sent: 4, accepted: 0, refused: 4, unclear: 0,
+    unanimouslyRefused: true, reason: 'blocked: not accepted here',
+  })
+  const refusedId = await grabAnother()
+  await wait(1600)
+  const rolled = refusedId
+    ? await a.evaluate((id) => {
+        const g = window.__game
+        const p = g.pickups.get(id)
+        return {
+          back: !!p && !p.taken,
+          refusedClaims: g.refusedClaims,
+          keptSomething: Object.values(g.buffs).some((v) => v > performance.now()) || g.tank.hp === g.maxHp,
+          feed: g.feed.map((f) => f.text).slice(-2),
+        }
+      }, refusedId)
+    : null
+  check('a claim every relay refused puts the pad back',
+    !!rolled && rolled.back && rolled.refusedClaims === 1, JSON.stringify(rolled))
+  // Nobody outside this client ever saw the grab, so nothing out there disagrees
+  // about the effect — and a game that confiscates a shield for a network reason
+  // feels broken in a way leaving it does not.
+  check('and does not confiscate what the player already picked up',
+    !!rolled && rolled.keptSomething, JSON.stringify(rolled))
+  check('and says so rather than silently reshuffling the board',
+    !!rolled && rolled.feed.some((t) => t.includes('claim refused')), JSON.stringify(rolled))
+
+  await forceOutcome({
+    sent: 4, accepted: 0, refused: 0, unclear: 4,
+    unanimouslyRefused: false, reason: null,
+  })
+  const silentId = await grabAnother()
+  await wait(1600)
+  const held = silentId
+    ? await a.evaluate((id) => {
+        const g = window.__game
+        return { stillTaken: !!g.pickups.get(id)?.taken, refusedClaims: g.refusedClaims }
+      }, silentId)
+    : null
+  check('a claim nobody answered is left alone, because it may well have landed',
+    !!held && held.stillTaken && held.refusedClaims === 1, JSON.stringify(held))
+  await a.evaluate(() => {
+    window.__game.net.publish = window.__realPublish
+  })
+
   // ------------------------------------------------------- backfill, for real
   //
   // The check the other two cannot make. A and B were both in the room when the
@@ -557,9 +645,11 @@ try {
     const g = window.__game
     const real = g.net.publish.bind(g.net)
     let seen = null
+    // Returns the real promise — `publishClaim` waits on it now, and a wrapper
+    // that swallows the return value makes it throw on `undefined.then`.
     g.net.publish = (e) => {
       if (e.kind === 30078 && e.tags.some((t) => t[0] === 'expiration')) seen = e
-      real(e)
+      return real(e)
     }
     // Take another pad so a fresh claim goes out under the wrapper.
     const next = [...g.pickups.values()].find((p) => !p.taken)
