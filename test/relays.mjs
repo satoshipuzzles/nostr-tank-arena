@@ -75,6 +75,12 @@ const BEHAVIOURS = {
   blocked: () => ({ ok: false, msg: 'blocked: spam not permitted' }),
   expired: () => ({ ok: false, msg: 'invalid: event expired' }),
   future: () => ({ ok: false, msg: 'invalid: created_at too far in the future' }),
+  // strfry's wording, measured against relay.primal.net, purplerelay.com and
+  // relay.mostr.pub. `too late` contains neither "future" nor "expired".
+  strfryBehind: () => ({ ok: false, msg: 'invalid: ephemeral event expired' }),
+  strfryAhead: () => ({ ok: false, msg: 'invalid: created_at too late' }),
+  // Rejected on shape, before the relay ever looked at the timestamp.
+  tagcount: () => ({ ok: false, msg: 'invalid: too many tags: 5' }),
   // newlay's per-event moderation gate. The reason contains the words "timed
   // out", which an earlier substring-first classifier read as silence — so the
   // single most explicit per-pubkey refusal there is could never mute.
@@ -853,24 +859,135 @@ try {
       alarm: window.__game.net.clockAlarm ?? null,
       muted: window.__game.net.mutedRelays.length,
     }))
-    // This one passes against the old rule too, and for a different reason:
-    // there, *any* refusal cleared the streak. It is a guard against
-    // over-tightening the fix rather than a demonstration of it — the check
-    // above is the one that discriminates.
+    // This used to assert the opposite, and the rule it encoded has been
+    // superseded on purpose rather than deleted for being inconvenient.
+    //
+    // A `blocked:` refusal does mean the relay read the timestamp and passed
+    // it, which is real evidence. But three relays independently naming the
+    // clock is stronger than one relay's window being wide enough — exactly the
+    // reasoning that stops relay.fountain.fm's acceptance sinking the alarm,
+    // and a relay that passes a timestamp may simply have a laxer bound. So a
+    // quorum outvotes it. Below-gate refusals still matter for *clearing*, when
+    // nobody has named the timestamp at all.
     check(
-      'a relay that read the timestamp and passed it holds the alarm off',
-      early.alarm === null && early.muted === 0,
-      early.alarm ? `alarm raised while a blocker was still voting` : `no alarm, ${early.muted} muted`,
+      'a quorum on the clock outvotes one relay that passed the timestamp',
+      early.alarm !== null,
+      early.alarm ? `alarm up: ${early.alarm.reason}` : 'no alarm — one blocker vetoed three accusers',
     )
-    // Once it mutes it stops voting, and the three that agree are half the list.
-    await wait(12_000)
-    const late = await gatePage.evaluate(() => window.__game.net.clockAlarm ?? null)
+    // And it has to be able to let go. A relay list that starts complaining and
+    // then stops is a clock somebody just fixed, and an alarm that cannot clear
+    // would make the fix invisible — which is the failure it exists to prevent,
+    // inverted.
+    for (const r of gateInvalid) r.behaviour = 'good'
+    // While the alarm is up, publishing holds and one relay is probed per
+    // cycle — sixty seconds by default. An eight-second window cannot contain a
+    // sixty-second probe, so without compressing this the check reports "the
+    // alarm never clears" about a mechanism it never let run. Rule four, in the
+    // test written to prove rule four.
+    await gatePage.evaluate(() => {
+      window.__game.net.malformedProbeMs = 1200
+    })
+    await wait(9000)
+    const cleared = await gatePage.evaluate(() => window.__game.net.clockAlarm ?? null)
     check(
-      'and once it is gone the remaining three agree',
-      late !== null,
-      late ? `alarm up: ${late.reason}` : 'no alarm',
+      'and the alarm lets go once the relays stop naming the clock',
+      cleared === null,
+      cleared ? `still up: ${cleared.reason}` : 'cleared',
     )
     await gatePage.close()
+  }
+
+  // --- the production shape, measured rather than imagined -------------------
+  //
+  // At 61 seconds behind, three of the four shipped relays answer
+  // `invalid: ephemeral event expired` and relay.fountain.fm accepts the same
+  // event — it took a backdate of an hour and a forward date of half an hour
+  // without complaint, so it has no timestamp gate at all. Under a unanimity
+  // rule that single acceptance sank the alarm on every publish, and cleared
+  // the streak besides.
+  const prodBad = [startRelay('strfryBehind'), startRelay('strfryBehind'), startRelay('strfryBehind')]
+  const prodGood = startRelay('good')
+  const prodPage = await openAgainst([...prodBad.map((r) => r.url), prodGood.url], 'prod')
+  check('a session shaped like the real relay list starts', prodPage !== null)
+
+  if (prodPage) {
+    await wait(8000)
+    const st = await prodPage.evaluate(() => window.__game.net.clockAlarm ?? null)
+    check(
+      'three relays naming the clock outvote one that accepts',
+      st !== null,
+      st
+        ? `alarm up, ${st.agreed} agreed, direction ${st.direction}`
+        : 'no alarm — one relay with no timestamp gate sank three that have one',
+    )
+    check('and the direction is behind', st?.direction === 'behind', st?.direction ?? 'none')
+    check(
+      'and it quotes a reason the relays actually gave',
+      st?.reason === 'invalid: ephemeral event expired',
+      st?.reason ?? '',
+    )
+    await prodPage.close()
+  }
+
+  // --- strfry's "ahead" wording, which matches neither word a client looks for
+  const aheadPage = await openAgainst(
+    [startRelay('strfryAhead').url, startRelay('strfryAhead').url, startRelay('strfryAhead').url],
+    'ahead',
+  )
+  if (aheadPage) {
+    await wait(8000)
+    const st = await aheadPage.evaluate(() => window.__game.net.clockAlarm ?? null)
+    check(
+      '`created_at too late` is read as ahead',
+      st?.direction === 'ahead',
+      st ? `${st.direction} — ${st.reason}` : 'no alarm',
+    )
+    await aheadPage.close()
+  }
+
+  // --- a shape rejection is not a verdict on the clock ------------------------
+  //
+  // Both implementations check tags and content length *before* the timestamp.
+  // Two relays configured tighter than the tick is two relays agreeing, and
+  // under a rule that counts the kind rather than the cause that is a quorum —
+  // publishing held, and the screen telling a player to fix a correct clock.
+  const shapePage = await openAgainst(
+    [startRelay('tagcount').url, startRelay('tagcount').url, startRelay('tagcount').url],
+    'shape',
+  )
+  check('a session where every relay rejects on shape starts', shapePage !== null)
+  if (shapePage) {
+    await wait(8000)
+    const st = await shapePage.evaluate(() => ({
+      alarm: window.__game.net.clockAlarm ?? null,
+      muted: window.__game.net.mutedRelays.length,
+    }))
+    check(
+      'rejecting on tag count does not accuse the clock',
+      st.alarm === null,
+      st.alarm ? `ALARM: ${st.alarm.reason} — the relay never read the timestamp` : 'no alarm',
+    )
+    await shapePage.close()
+  }
+
+  // --- the quorum has to agree on the cause, not just the kind ---------------
+  const mixedTag = startRelay('tagcount')
+  const mixedLate = [startRelay('strfryAhead'), startRelay('strfryAhead')]
+  const mixedPage = await openAgainst([mixedTag.url, ...mixedLate.map((r) => r.url)], 'mixed')
+  if (mixedPage) {
+    await wait(8000)
+    const st = await mixedPage.evaluate(() => window.__game.net.clockAlarm ?? null)
+    check(
+      'the quoted reason is one at least two relays gave',
+      st !== null && st.reason === 'invalid: created_at too late',
+      st ? `${st.reason} (${st.agreed} agreed)` : 'no alarm',
+    )
+    check(
+      'and the relay that never read the timestamp is not counted',
+      st?.agreed === 2,
+      `${st?.agreed ?? 0} agreed of 3 rejecting`,
+    )
+    await mixedPage.close()
   }
 
   // --- the genuine case ------------------------------------------------------

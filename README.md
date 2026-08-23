@@ -1196,6 +1196,39 @@ So five consecutive publishes that every asked relay calls invalid raise
 `net.clockAlarm`, publishing holds, and the relay's own words go on the screen.
 It is the only failure in this game a player can go and fix.
 
+### What the shipped relays actually do, measured
+
+Three of the four run **strfry**, not newlay, and one runs something that
+identifies itself as nothing at all:
+
+```
+relay.primal.net     strfry 1.0.3-1-g60d35a6
+purplerelay.com      strfry 1.0.4-60-g453bbee
+relay.mostr.pub      strfry 1.0.4
+relay.fountain.fm    (no software field)
+```
+
+Publishing an ephemeral kind 21000 with a backdated `created_at`:
+
+```
+                       -0s   -30s   -61s   -90s   -300s  -3600s  +1800s
+relay.primal.net        ok     ok  REJECT REJECT  REJECT  REJECT  REJECT
+purplerelay.com         ok     ok  REJECT REJECT  REJECT  REJECT  REJECT
+relay.mostr.pub         ok     ok  REJECT REJECT  REJECT  REJECT  REJECT
+relay.fountain.fm       ok     ok      ok     ok      ok      ok      ok
+```
+
+**Sixty seconds.** Every hot kind in this game is ephemeral, and strfry rejects
+an ephemeral event more than a minute old — `invalid: ephemeral event expired` —
+against a three-year window for stored ones. A laptop a minute out of sync is
+not a broken machine, and on three of four relays it stops publishing entirely.
+
+Two things fall out of that table. `invalid: created_at too late` is how strfry
+says *ahead*, and it contains neither "future" nor "expired" — a client reading
+direction by looking for those words learns nothing from three of its four
+relays. And `relay.fountain.fm` has **no timestamp gate at all**: it took an
+hour backdated and half an hour forward without complaint.
+
 **Only relays that examined the timestamp get a vote.** newlay checks whether
 you are going too fast before it checks whether you are wrong: the events bucket
 and the per-IP gate both run above the `created_at` check, and they are the only
@@ -1218,7 +1251,27 @@ So the denominator is relays that voted on the clock — acceptances, malformed
 verdicts, and refusals from below the gate — and an acquittal needs one of the
 same. A relay that told us to slow down has not vouched for us.
 
-**Two distinct relays have to agree, and half the list has to be visible.**
+**Quorum, not unanimity, and the difference is the whole production case.** Two
+relays independently naming the same direction raise the alarm even if another
+accepts, because an acceptance is weak evidence — it means the relay did not
+object, and a relay with no gate never will. Under a unanimity rule
+`relay.fountain.fm` sank the alarm on every publish and cleared the streak
+besides: three quarters of the list refusing every event, the game invisible to
+anyone not connected through the fourth, and the screen silent.
+
+**Only an `invalid:` that names the timestamp votes on it.** Both
+implementations reject on shape *before* they look at `created_at` — newlay's
+`too many tags`, `content too long` and `missing required tag`, strfry's `too
+many tags`. Two relays configured tighter than the tick is two relays agreeing,
+and under a rule that counts the kind rather than the cause that is a quorum:
+publishing held, and the screen telling a player to fix a clock that is correct.
+
+**And the quoted reason is one at least two of them gave.** It used to be
+last-writer-wins across every relay and every cause, so relay A rejecting on tag
+count and relay B on the timestamp read as agreement and the screen quoted
+whichever landed last.
+
+**Half the list has to be visible.**
 "Every relay we asked" is not "every relay", and the difference is biased in
 exactly the wrong direction: a relay that only ever answers `invalid:` can never
 be muted — malformed does not strike, because our own bad event is not the

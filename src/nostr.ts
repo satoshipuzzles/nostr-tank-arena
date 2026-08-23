@@ -184,11 +184,60 @@ export type FailureKind = 'refused' | 'no-verdict' | 'malformed' | 'unknown'
  * It is also the only failure in this game a player can go and fix, which is
  * the argument for stopping and saying so rather than retrying into a wall.
  */
+/**
+ * Which way a relay says our timestamp is wrong, and only when it says so.
+ *
+ * Not every `invalid:` is a verdict on the clock. Both implementations reject
+ * on shape *before* they look at the timestamp — newlay's `too many tags`,
+ * `content too long` and `missing required tag`, strfry's `too many tags` — and
+ * counting those as votes about the clock is the accuser bug with its own fix
+ * applied to half of it. Two relays configured tighter than the tick is two
+ * relays agreeing, quorum satisfied, and the screen telling a player to fix a
+ * clock that is correct.
+ *
+ * So the rule is positive rather than a blocklist: only an `invalid:` that names
+ * the timestamp votes on the timestamp.
+ *
+ * The strings, measured against the four relays this game ships with rather
+ * than read from one implementation's source:
+ *
+ *   strfry   invalid: ephemeral event expired          behind, 60s window
+ *            invalid: created_at too early             behind, stored kinds
+ *            invalid: created_at too late              ahead
+ *   newlay   invalid: created_at too far in the past    behind
+ *            invalid: created_at too far in the future  ahead
+ *   NIP-40   invalid: event expired                     behind, our own deadline
+ *
+ * `created_at too late` is the one worth noticing: it contains neither "future"
+ * nor "expired", so a client that reads direction by looking for those words
+ * gets nothing from three of the four relays in the shipped list.
+ */
+export type ClockDirection = 'behind' | 'ahead'
+
+export function clockVerdict(reason: string): ClockDirection | null {
+  const r = reason.trim().toLowerCase()
+  if (!r.startsWith('invalid:')) return null
+  if (r.includes('too late') || r.includes('in the future') || r.includes('too far ahead')) {
+    return 'ahead'
+  }
+  if (r.includes('expired') || r.includes('too early') || r.includes('in the past')) {
+    return 'behind'
+  }
+  return null
+}
+
 export interface ClockAlarm {
   /** The relay's own words, so the screen can quote rather than paraphrase. */
   reason: string
-  /** Consecutive publishes that every relay called invalid. */
+  /** Consecutive publishes that carried a quorum on the same direction. */
   streak: number
+  /**
+   * Which way, decided by the relays rather than by reading words off one
+   * string. Never null while the alarm is up: no direction, no quorum.
+   */
+  direction: ClockDirection
+  /** How many distinct relays named it. Never below two. */
+  agreed: number
 }
 
 export interface PublishOutcome {
@@ -500,6 +549,9 @@ export class Net {
   /** Consecutive publishes that every asked relay called malformed. */
   private allMalformedStreak = 0
   private lastMalformedReason = ''
+  /** The direction a quorum last agreed on, and a reason two of them gave. */
+  private clockDirection: ClockDirection | null = null
+  private clockAgreed = 0
   private lastMalformedProbeAt = 0
   /**
    * How many all-relay rejections before we stop and blame the machine.
@@ -683,6 +735,10 @@ export class Net {
     // prefix out of eight means the opposite of the other seven.
     let aboveClockGate = 0
     let belowClockGate = 0
+    // Distinct relays naming the timestamp, by direction. A URL can only vote
+    // once per publish, so a relay answering twice cannot form its own quorum.
+    const saidBehind = new Map<string, string>()
+    const saidAhead = new Map<string, string>()
     const settled = results.map((p, i) => {
       const url = targets[i]
       return p.then(
@@ -740,7 +796,9 @@ export class Net {
           else if (kind === 'no-verdict') led.noVerdict++
           else if (kind === 'malformed') {
             led.malformed++
-            this.lastMalformedReason = reason
+            const verdict = clockVerdict(reason)
+            if (verdict === 'behind') saidBehind.set(url, reason)
+            else if (verdict === 'ahead') saidAhead.set(url, reason)
           }
           else led.unknown++
 
@@ -802,18 +860,51 @@ export class Net {
       // "not unanimous" *and* the streak was zeroed on every publish. The
       // player's clock is wrong, three relays refuse everything at -4 apiece,
       // and the screen says nothing for the whole session.
-      const clockEvidence = outcome.accepted + outcome.malformed + belowClockGate
-      const enoughAgree = outcome.malformed >= 2 && outcome.malformed === clockEvidence
+      // Quorum, not unanimity — and the difference is not academic.
+      //
+      // Measured against the four relays this game ships with: at 61 seconds
+      // behind, `relay.primal.net`, `purplerelay.com` and `relay.mostr.pub` all
+      // answer `invalid: ephemeral event expired`, and `relay.fountain.fm`
+      // accepts the same event happily — it took a backdate of an hour and a
+      // forward date of thirty minutes without complaint. It has no timestamp
+      // gate at all.
+      //
+      // Under a unanimity rule that one acceptance sank the alarm on every
+      // single publish, and `accepted > 0` cleared the streak besides. Three
+      // quarters of the relay list refusing every event, the game invisible to
+      // everyone not connected through the fourth, and the screen silent.
+      //
+      // An acceptance is weak evidence: it means the relay did not object, and
+      // a relay with no gate never will. Two relays independently naming the
+      // same direction is strong. So the quorum wins.
+      const behind = saidBehind.size
+      const ahead = saidAhead.size
+      const winner: ClockDirection | null =
+        behind >= 2 && behind >= ahead ? 'behind' : ahead >= 2 ? 'ahead' : null
       const enoughVisible = outcome.sent * 2 >= this.relays.length
-      // An acquittal needs evidence too: an acceptance, or a refusal from below
-      // the gate. A relay that told us to slow down has not vouched for us.
-      const acquits = outcome.accepted > 0 || belowClockGate > 0
-      if (enoughAgree && enoughVisible) {
+      if (winner && enoughVisible) {
         this.allMalformedStreak++
-      } else if (acquits) {
+        this.clockDirection = winner
+        const votes = winner === 'behind' ? saidBehind : saidAhead
+        this.clockAgreed = votes.size
+        // Quote a reason at least two relays actually gave, rather than
+        // whichever string happened to land last. The counter used to record
+        // the kind and not the cause: relay A rejecting on `max_event_tags` and
+        // relay B on the timestamp read as agreement, and the screen quoted
+        // either one at random.
+        const tally = new Map<string, number>()
+        for (const r of votes.values()) tally.set(r, (tally.get(r) ?? 0) + 1)
+        const shared = [...tally.entries()].sort((a, b) => b[1] - a[1])[0]
+        this.lastMalformedReason = shared[0]
+      } else if (behind + ahead === 0 && (outcome.accepted > 0 || belowClockGate > 0)) {
+        // Cleared only when nobody named the timestamp on this publish *and*
+        // somebody gave us evidence of any kind. A relay that told us to slow
+        // down has not vouched for us, and silence never did.
         // Anything the relays engaged with normally clears it. Silence does
         // not: an unreachable relay is no evidence the clock came right.
         this.allMalformedStreak = 0
+        this.clockDirection = null
+        this.clockAgreed = 0
       }
       return outcome
     })
@@ -923,8 +1014,13 @@ export class Net {
    * amount of retrying will fix a wrong clock.
    */
   get clockAlarm(): ClockAlarm | null {
-    return this.allMalformedStreak >= Net.MALFORMED_STREAK
-      ? { reason: this.lastMalformedReason, streak: this.allMalformedStreak }
+    return this.allMalformedStreak >= Net.MALFORMED_STREAK && this.clockDirection
+      ? {
+          reason: this.lastMalformedReason,
+          streak: this.allMalformedStreak,
+          direction: this.clockDirection,
+          agreed: this.clockAgreed,
+        }
       : null
   }
 
