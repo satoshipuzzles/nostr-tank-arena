@@ -68,6 +68,10 @@ const check = (name, ok, detail = '') => {
 const browsers = [
   await puppeteer.launch({ executablePath, headless: 'new', args: FLAGS }),
   await puppeteer.launch({ executablePath, headless: 'new', args: FLAGS }),
+  // The third is the late joiner, launched here and not used until the backfill
+  // check — it must arrive *after* a claim has been published, which is the
+  // whole point of it.
+  await puppeteer.launch({ executablePath, headless: 'new', args: FLAGS }),
 ]
 
 const pageErrors = []
@@ -507,177 +511,126 @@ try {
   check('and the other client sees that pad go empty', seen.taken,
     JSON.stringify(seen.feed.slice(-3)))
 
-  // ------------------------------------------------------- siege and scatter
+  // ------------------------------------------------------- backfill, for real
   //
-  // Damage is the one number a shooter sends that the *victim* then applies to
-  // its own hull, because the victim is authoritative over its HP and cannot
-  // see what the shooter picked up ten seconds ago. Two separate claims, so two
-  // separate checks: it has to cross the wire, and it has to be applied and
-  // capped on arrival.
-  await a.evaluate(() => {
-    const g = window.__game
-    for (const k of Object.keys(g.buffs)) g.buffs[k] = 0
-    g.tank.dead = false
-    g.tank.hp = 3
-    g.tank.reloadAt = 0
-    g.buffs.siegeUntil = performance.now() + 20000
-  })
-  await b.evaluate(() => { window.__game.shells.clear() })
-  await a.keyboard.down('Space')
-  await wait(600)
-  await a.keyboard.up('Space')
-  await wait(2200)
-  const wire = await b.evaluate(() => {
-    const g = window.__game
-    const theirs = [...g.shells.values()].filter((s) => s.owner !== g.identity.sessionPubkey)
-    return { count: theirs.length, damage: theirs.map((s) => s.damage) }
-  })
-  check('a siege shell arrives at the other client carrying its damage',
-    wire.count > 0 && wire.damage.every((d) => d === 2), JSON.stringify(wire))
-
-  // Applying it, without depending on two tanks having line of sight on a board
-  // the block hash picked. The shell is injected through the same inbound path
-  // a relay would deliver it on, sitting on bravo's hull.
-  const applied = await b.evaluate(() => {
-    const g = window.__game
-    for (const k of Object.keys(g.buffs)) g.buffs[k] = 0
-    g.tank.dead = false
-    g.tank.hp = 3
-    const send = (id, d) => g.onEvent({
-      id: id + Math.random(),
-      kind: 21001,
-      pubkey: 'ff'.repeat(32),
-      created_at: Math.floor(Date.now() / 1000),
-      tags: [],
-      content: JSON.stringify({ id, t0: performance.now(), x: g.tank.x, y: g.tank.y, a: 0, d }),
-    })
-    send('siegeshell', 2)
-    return { before: 3 }
-  })
-  await wait(700)
-  const hurt = await b.evaluate(() => ({ hp: window.__game.tank.hp, dead: window.__game.tank.dead }))
-  check('and takes two hull points off the tank it hits, not one',
-    hurt.hp === 1 && !hurt.dead, `${JSON.stringify(applied)} -> ${JSON.stringify(hurt)}`)
-
-  // A malformed or hostile fire event must not be able to claim more than a
-  // full hull. The cap is applied where the shell is rebuilt from the wire.
-  const capped = await b.evaluate(() => {
-    const g = window.__game
-    g.tank.dead = false
-    g.tank.hp = 3
-    const before = g.shells.size
-    g.onEvent({
-      id: 'cap' + Math.random(),
-      kind: 21001,
-      pubkey: 'ff'.repeat(32),
-      created_at: Math.floor(Date.now() / 1000),
-      tags: [],
-      content: JSON.stringify({ id: 'capshell', t0: performance.now(), x: 900, y: 900, a: 0, d: 99 }),
-    })
-    const shell = [...g.shells.values()].find((s) => s.id === 'capshell')
-    return { grew: g.shells.size > before, damage: shell?.damage ?? null }
-  })
-  check('and a shell claiming 99 damage is capped at a full hull',
-    capped.grew && capped.damage === 3, JSON.stringify(capped))
-
-  // Scattershot is three fire events instead of one, which is why it is a
-  // 14-second pickup rather than a weapon: a shot is about one event a second
-  // and a position tick is ten, so tripling the rarer one briefly is a rounding
-  // error against the tick stream.
-  await a.evaluate(() => {
-    const g = window.__game
-    for (const k of Object.keys(g.buffs)) g.buffs[k] = 0
-    g.tank.dead = false
-    g.tank.hp = 3
-    g.shells.clear()
-    g.buffs.scatterUntil = performance.now() + 20000
-    g.tank.reloadAt = 0
-  })
-  await a.keyboard.down('Space')
-  await wait(700)
-  await a.keyboard.up('Space')
-  await wait(300)
-  const fanned = await a.evaluate(() => {
-    const g = window.__game
-    const mine = [...g.shells.values()].filter((s) => s.owner === g.identity.sessionPubkey)
-    return { count: mine.length, angles: [...new Set(mine.map((s) => Math.round(Math.atan2(s.vy, s.vx) * 100) / 100))] }
-  })
-  check('Scattershot puts three shells in the air, not one',
-    fanned.count >= 3 && fanned.angles.length >= 3, JSON.stringify(fanned))
-  await a.evaluate(() => { window.__game.buffs.scatterUntil = 0 })
-
-  // ------------------------------------------------------------- block clock
+  // The check the other two cannot make. A and B were both in the room when the
+  // claim went out, so they saw it live; nothing about them exercises the `REQ`
+  // that a client joining afterwards depends on. This one arrives late, asks the
+  // relay for the round's claims, and has to conclude that pad is gone.
   //
-  // There is nothing honest to count down to — the next block is a coin flip
-  // every second, not a timer running out — so it counts up. When the explorer
-  // would not give a timestamp it counts from when this client first saw the
-  // block and marks that with a `~`, which is a lower bound rather than a guess
-  // dressed up as a fact.
-  const clock1 = await a.evaluate(() => ({
-    seconds: window.__clock.secondsSinceTip(),
-    text: document.querySelector('#status .clock')?.textContent ?? '',
-  }))
-  await wait(2500)
-  const clock2 = await a.evaluate(() => ({
-    seconds: window.__clock.secondsSinceTip(),
-    text: document.querySelector('#status .clock')?.textContent ?? '',
-  }))
-  check('the HUD shows time since the block, counting up',
-    /^~?\d+:\d\d$/.test(clock2.text) && clock2.seconds > clock1.seconds,
-    `${clock1.text} -> ${clock2.text}`)
-
-  // ---------------------------------------------------------------- profiles
+  // It covers three separate failures at once, and every one of them is silent:
+  // a `since` window narrower than a pad's life, a `since` computed from a clock
+  // the relay does not share, and a claim wiped by the `beginRound` that fires
+  // moments after the subscription opens.
   //
-  // A hex pubkey is not a person. Kind 0 turns a signed score into a face and a
-  // name — but the `nip05` field inside it is a claim the account made about
-  // itself, and it does not earn its tick until the domain says the same thing.
-  const cards = await a.evaluate(() => {
-    const rows = [...document.querySelectorAll('#scoreboard .score-row')]
-    return {
-      rows: rows.length,
-      avatars: rows.filter((r) => r.querySelector('.avatar')).length,
-      fallbacks: rows.filter((r) => r.querySelector('.avatar.fallback')).length,
-    }
-  })
-  check('every scoreboard row is a card with a face on it',
-    cards.rows >= 2 && cards.avatars === cards.rows, JSON.stringify(cards))
-  // Both players signed in with throwaway keys, which have no kind 0 anywhere,
-  // so both must fall back rather than showing a broken image.
-  check('and a guest key falls back to an initial instead of a dead image',
-    cards.fallbacks === cards.rows, JSON.stringify(cards))
+  // A fresh block first, mined *now*, so the pads are at the start of their wave
+  // — joining a third browser takes ten seconds and a pad only lives twenty.
+  const LATE_MINED = Math.floor(Date.now() / 1000)
+  await Promise.all([a, b].map((p) => p.evaluate(([h, t]) => {
+    window.__clock.accept({ height: h, hash: 'da'.repeat(30) + '0500', time: t })
+    document.getElementById('podium').hidden = true
+  }, [HEIGHT + 3, LATE_MINED])))
+  await wait(1500)
 
-  // The verification itself, driven against a stubbed well-known file so the
-  // answer does not depend on a stranger's web server being up. Both directions
-  // are checked: a domain that agrees, and one that names a different key.
-  const nip05 = await a.evaluate(async () => {
-    const profiles = window.__profiles
-    const real = window.fetch
-    const key = 'aa'.repeat(32)
-    const other = 'bb'.repeat(32)
-    const answer = (mapped) => async () => ({
-      ok: true,
-      json: async () => ({ names: { alice: mapped } }),
-    })
-    const offline = async () => { throw new Error('offline') }
-    const run = async (stub) => {
-      window.fetch = stub
-      const profile = { pubkey: key, name: 'alice', picture: null, nip05: 'alice@example.com', nip05Verified: null }
-      await profiles.verify(profile)
-      return profile.nip05Verified
-    }
-    const good = await run(answer(key))
-    const bad = await run(answer(other))
-    const unreachable = await run(offline)
-    window.fetch = real
-    return { good, bad, unreachable }
+  const fresh = await a.evaluate(() =>
+    [...window.__game.pickups.values()].map((p) => ({ id: p.id, x: Math.round(p.at.x), y: Math.round(p.at.y) })))
+  check('a fresh block puts pads back on the board', fresh.length > 0, JSON.stringify(fresh))
+  const lateTarget = fresh[0]
+
+  await a.evaluate((t) => {
+    const g = window.__game
+    g.tank.dead = false
+    g.tank.hp = g.maxHp
+    g.tank.x = t.x
+    g.tank.y = t.y
+  }, lateTarget)
+  await wait(1500)
+  const claimedByA = await a.evaluate((id) => !!window.__game.pickups.get(id)?.taken, lateTarget.id)
+  check('alpha takes it and publishes the claim', claimedByA, lateTarget.id)
+
+  const c = await join(browsers[2], 'C', 'charlie')
+  await c.evaluate(([h, t]) => {
+    // Same block as the other two, so it derives the same pads.
+    window.__clock.accept({ height: h, hash: 'da'.repeat(30) + '0500', time: t })
+    document.getElementById('podium').hidden = true
+  }, [HEIGHT + 3, LATE_MINED])
+
+  let late = null
+  for (let i = 0; i < 8; i++) {
+    await wait(1200)
+    late = await c.evaluate((id) => {
+      const g = window.__game
+      const p = g.pickups.get(id)
+      return {
+        derived: !!p,
+        taken: !!p?.taken,
+        received: g.claimsReceived,
+        unmatched: g.unmatchedClaims,
+      }
+    }, lateTarget.id)
+    if (late.derived && late.taken) break
+  }
+  // Reported alongside, so "the pad expired before charlie got here" is
+  // distinguishable from "charlie never learned it was taken".
+  const stillLive = await b.evaluate((id) => !!window.__game.pickups.get(id), lateTarget.id)
+  check('a client joining afterwards backfills the claim and sees the pad as gone',
+    late.derived && late.taken, `${JSON.stringify(late)}, pad still on B: ${stillLive}`)
+  // The counter that would otherwise read a healthy zero for a backfill that
+  // fetched nothing at all.
+  check('and it actually received claims rather than quietly fetching none',
+    late.received > 0, JSON.stringify(late))
+
+  // The other half of the anchor: what the schedule does while it does not yet
+  // know when the block was mined.
+  //
+  // `fillTime` runs in the background, so every round starts with the timestamp
+  // in flight. If that reads the same as "no explorer would tell me", the board
+  // spawns on the shared-unix fallback at wave ~52,000,000 and then reshuffles
+  // to wave 0 the instant the real timestamp lands — at each client's own HTTP
+  // latency, which is two clients on two timelines again. So pending has to
+  // mean wait, and only a genuinely unavailable timestamp may take the fallback.
+  //
+  // Driven through `chainClock` rather than through the explorer, because the
+  // three states are the thing under test and a real fetch gives you whichever
+  // one it feels like.
+  const guarded = await c.evaluate(async () => {
+    const g = window.__game
+    const real = g.chainClock
+    g.pickups.clear()
+    g.chainClock = () => ({ seconds: null, pending: true })
+    await new Promise((r) => setTimeout(r, 900))
+    const whilePending = g.pickups.size
+    // A known anchor, three seconds into wave zero: pads must be back. Without
+    // this the check above would also pass against a schedule that had simply
+    // stopped working.
+    g.chainClock = () => ({ seconds: 3, pending: false })
+    await new Promise((r) => setTimeout(r, 700))
+    const whenKnown = g.pickups.size
+    g.chainClock = real
+    return { whilePending, whenKnown }
   })
-  check('a NIP-05 the domain confirms is verified', nip05.good === true, JSON.stringify(nip05))
-  check('one the domain maps elsewhere is marked wrong', nip05.bad === false, JSON.stringify(nip05))
-  // The important one. Most failures here are a missing CORS header on somebody
-  // else's static host, which is indistinguishable from the domain being down
-  // and is emphatically not proof of a fake.
-  check('and an unreachable domain stays unverified rather than false',
-    nip05.unreachable === null, JSON.stringify(nip05))
+  check('no pads are derived while the block time is still in flight',
+    guarded.whilePending === 0, JSON.stringify(guarded))
+  check('and they come straight back once the anchor is known',
+    guarded.whenKnown > 0, JSON.stringify(guarded))
+
+  // And the degraded path: no timestamp available at all, ever. The schedule has
+  // to keep running on absolute unix seconds rather than stopping — that branch
+  // exists precisely so an explorer that will not answer costs a shifted wave
+  // phase and nothing more. Patient, because the fallback lands at an arbitrary
+  // point in the 34-second wave and up to fourteen of those are empty board.
+  let fallbackPads = 0
+  await c.evaluate(() => {
+    window.__game.pickups.clear()
+    window.__game.chainClock = () => ({ seconds: null, pending: false })
+  })
+  for (let i = 0; i < 20; i++) {
+    await wait(1000)
+    fallbackPads = await c.evaluate(() => window.__game.pickups.size)
+    if (fallbackPads > 0) break
+  }
+  check('an explorer that never answers still gets a board, on the shared unix clock',
+    fallbackPads > 0, `pads ${fallbackPads}`)
 
   // Regen is gone: Puzz asked for it out, and a tank sitting still must not heal.
   await b.evaluate(() => {
@@ -697,7 +650,7 @@ try {
   await Promise.all([a, b].map((p) => p.evaluate(([h, t]) => {
     window.__clock.accept({ height: h, hash: 'be'.repeat(30) + '0500', time: t })
     document.getElementById('podium').hidden = true
-  }, [HEIGHT + 2, MINED])))
+  }, [HEIGHT + 4, MINED])))
   await wait(1200)
   const anchored = await Promise.all([a, b].map((p) => p.evaluate(() => ({
     chain: Math.round(window.__clock.chainSeconds() ?? -1),

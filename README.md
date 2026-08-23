@@ -406,10 +406,56 @@ The block timestamp is miner-chosen and may legally sit two hours off real time.
 That does not matter here. The requirement is that everyone agrees, not that the
 number is accurate, and they are all reading the same one.
 
+There is a third state, and conflating it with the second was a bug of its own.
+The mined-at time is fetched in the background, so **every round begins with it
+in flight** — and if "not fetched yet" reads the same as "no explorer will tell
+me", the board spawns on the unix fallback at wave ~52,000,000 and then
+reshuffles to wave 0 the instant the real timestamp lands, at each client's own
+HTTP latency. That is the two-timelines bug again, from the inside. So `pending`
+is a distinct state and the schedule waits it out; an empty board for one round
+trip at the start of a round is invisible. `unavailable` is deliberately terminal
+per block and never retried, because a successful retry mid-round is exactly the
+reshuffle being avoided.
+
+### Getting the claims in the first place
+
+A claim is published **once**. It is the only thing in this game where a wrong
+backfill window is permanent for the round — sessions rebroadcast every 12
+seconds and state and shells are continuous, so those self-heal within seconds
+and hide the problem for four kinds out of five.
+
+It used to share their subscription, and that got it wrong twice, silently:
+
+- `since = now - 30`, against pads that live `waveSeconds - 2` = 32 seconds. A
+  claim 31 seconds old, for a pad still on the board and still taken, was simply
+  never asked for.
+- `since` came from *this* client's clock while the relay matches it against
+  `created_at` written by *other* clients. A joiner sixty seconds fast asks for
+  events from the future and backfills nothing at all.
+
+Claims now have their own subscription with no `since`, bounded by `limit`. The
+NIP-40 expiration already caps how long a relay keeps one, so the window is
+enforced where it can be enforced honestly — by the publisher, in the event —
+instead of by a subscriber guessing with a clock nobody else shares.
+
 The other half of the same hole: a claim naming a pad this client has not derived
-yet is now **remembered and applied when the pad appears**, rather than dropped.
-That ordering is not an edge case — it is what a late joiner's `REQ` backfill
-always looks like, and dropping it made storing the claim pointless.
+yet is **remembered and applied when the pad appears**, rather than dropped. That
+ordering is not an edge case — it is what a late joiner's `REQ` backfill always
+looks like, and dropping it made storing the claim pointless. The buffer
+deliberately survives `beginRound`, too: that fires on the first tip a session
+sees, a few hundred milliseconds after the subscription opened, so clearing it
+there would wipe the backfill with the very call that makes those pads
+derivable.
+
+Two counters, because either alone lies. `unmatchedClaims` counts claims that
+arrived before their pad existed — normal during backfill, drift afterwards. On
+its own it reads a healthy zero in the worst case there is, a backfill that
+fetched nothing, so `claimsReceived` sits beside it: a client that joined
+mid-round with that at zero is the suspicious reading.
+
+The suite carries a third browser purely for this. A and B are both in the room
+when the claim goes out, so nothing about them exercises the `REQ` at all —
+`charlie` joins afterwards, asks the relay, and has to conclude the pad is gone.
 
 Each type has its own silhouette as well as its own colour. Six items that were
 all the same octahedron in six colours made reading a pad from across the board a

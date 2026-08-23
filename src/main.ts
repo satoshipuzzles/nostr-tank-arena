@@ -187,7 +187,7 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     // client happened to poll. The wave index ends up inside the pickup id, so
     // a local origin means two clients compute different ids for the same pad
     // and every claim between them is discarded without a word.
-    game.chainClock = () => clock.chainSeconds()
+    game.chainClock = () => ({ seconds: clock.chainSeconds(), pending: clock.chainPending })
     clock.onBlock((tip, previous) => {
       setLayout(layoutForBlock(tip.hash))
       if (!previous) {

@@ -8,7 +8,7 @@
 //     claim a kill; you can only be told you died.
 // The cheat that survives this is a client that refuses to die. See README.
 
-import type { Event, Filter } from 'nostr-tools'
+import type { Event } from 'nostr-tools'
 import { ARENA_H, ARENA_W, SPAWNS, hasLineOfSight } from './arena'
 import {
   PICKUPS,
@@ -59,6 +59,15 @@ const TICK_MS = 100 // 10Hz state broadcast
 const SCATTER_SPREAD = 0.16
 /** The most damage one shell may claim, however the event was written. */
 const MAX_HULL = 3
+/**
+ * How many stored claims to ask a relay for on join.
+ *
+ * Generous on purpose. Once an unrecognised claim is buffered rather than
+ * discarded, asking for too many costs a few hundred bytes and asking for too
+ * few is a pad that shows as live when it is gone — which is silent, and looks
+ * like netcode.
+ */
+const CLAIM_BACKFILL = 250
 /** Kills in a row that earn a full repair. */
 const STREAK_REPAIR = 3
 /** Kills in a row that earn rapid fire, and a glow so everyone can see it. */
@@ -160,7 +169,10 @@ export class Game {
    * `null`, which `waveClock` turns into absolute unix seconds — still a shared
    * timeline, unlike a local performance origin.
    */
-  chainClock: () => number | null = () => null
+  chainClock: () => { seconds: number | null; pending: boolean } = () => ({
+    seconds: null,
+    pending: false,
+  })
   /**
    * Pickup ids claimed by somebody, whether or not that pad exists here yet.
    *
@@ -171,8 +183,18 @@ export class Game {
    * applied when the pad appears.
    */
   private claimed = new Set<string>()
-  /** Claims that named a pad this client never derived. Non-zero means drift. */
+  /**
+   * Diagnostics for the claim path. Both numbers, because either alone lies.
+   *
+   * `unmatchedClaims` counts claims that arrived before their pad existed —
+   * which is normal during backfill and a sign of clock drift afterwards. On its
+   * own it reads a healthy zero in the worst case there is: a backfill that
+   * fetched nothing at all, where there were no claims to mismatch. So the total
+   * is kept beside it, and a client that joined mid-round with `claimsReceived`
+   * at zero is the reading to be suspicious of.
+   */
   unmatchedClaims = 0
+  claimsReceived = 0
   /** Pickups currently on the board, by id. Derived, never received. */
   readonly pickups = new Map<string, Pickup>()
   /** Timed effects on our own tank. */
@@ -226,18 +248,49 @@ export class Game {
     }
   }
 
-  /** Subscribe to the room and publish the session attestation. */
+  /**
+   * Subscribe to the room and publish the session attestation.
+   *
+   * Two subscriptions, not one, and the split matters.
+   *
+   * The live stream is ephemeral traffic. `since` is a courtesy there: sessions
+   * rebroadcast every 12 seconds and state and shells are continuous, so if the
+   * window is wrong by a minute nothing notices — it all self-heals within
+   * seconds.
+   *
+   * A claim is published exactly **once**. It is the only thing here that
+   * genuinely depends on the backfill window being right, and the only one
+   * where a wrong answer is permanent for the round. cowboy found two ways the
+   * old shared filter got it wrong, and both were silent:
+   *
+   *   - `since = now - 30` against pads that live `waveSeconds - 2` = 32
+   *     seconds. A claim 31 seconds old, for a pad still on the board and still
+   *     taken, was simply never asked for.
+   *   - `since` was computed from *this* client's clock while the relay matches
+   *     it against `created_at` written by *other* clients. A joiner sixty
+   *     seconds fast asks for events from the future and backfills nothing at
+   *     all.
+   *
+   * So claims drop `since` entirely and are bounded by `limit` instead. The
+   * NIP-40 expiration already caps how long a relay keeps one, so the window is
+   * enforced where it can be enforced honestly — by the publisher, in the event
+   * — rather than by a subscriber guessing with a clock nobody else shares.
+   * Over-fetching is free now that an unknown claim is buffered rather than
+   * dropped: a claim for a pad that never materialises just ages out.
+   */
   async start(): Promise<void> {
-    const since = Math.floor(Date.now() / 1000) - 30
-    const filter: Filter = {
-      // KIND_CLAIM is stored rather than ephemeral, so `since` genuinely
-      // backfills it for a client that just connected — which is the entire
-      // reason it is not on an ephemeral kind like everything else here.
-      kinds: [KIND_SESSION, KIND_STATE, KIND_SHELL, KIND_DEATH, KIND_CLAIM],
-      '#t': [roomTag(this.room)],
-      since,
-    }
-    this.net.subscribe(filter, (e) => this.onEvent(e))
+    this.net.subscribe(
+      {
+        kinds: [KIND_SESSION, KIND_STATE, KIND_SHELL, KIND_DEATH],
+        '#t': [roomTag(this.room)],
+        since: Math.floor(Date.now() / 1000) - 30,
+      },
+      (e) => this.onEvent(e),
+    )
+    this.net.subscribe(
+      { kinds: [KIND_CLAIM], '#t': [roomTag(this.room)], limit: CLAIM_BACKFILL },
+      (e) => this.onEvent(e),
+    )
     await this.broadcastSession()
   }
 
@@ -762,11 +815,15 @@ export class Game {
     this.roundHash = hash
     this.roundStartedAt = performance.now()
     this.pickups.clear()
-    // Claim ids carry the block hash, so they cannot collide across rounds —
-    // but there is no reason to keep last round's, and a bounded set is one
-    // less thing to reason about.
-    this.claimed.clear()
-    this.unmatchedClaims = 0
+    // The claim buffer is deliberately *not* cleared here.
+    //
+    // Claim ids carry the block hash, so last round's cannot collide with this
+    // round's and keeping them costs a bounded few kilobytes. Clearing them
+    // does cost something: `beginRound` fires on the first tip a session sees,
+    // which is a few hundred milliseconds after `start()` opened the backfill
+    // subscription — so a joiner's backfilled claims would be wiped by the very
+    // call that first makes the pads they refer to derivable. That is the same
+    // shape as dropping them on arrival, moved one step later.
     this.modifier = modifierForBlock(hash)
     // Glass Cannon narrows the hull; a tank carrying three points into a
     // one-hit round would be invincible for two shots and nobody would know
@@ -816,7 +873,14 @@ export class Game {
    */
   private refreshPickups(): void {
     if (!this.roundHash) return
-    const elapsed = waveClock(this.chainClock())
+    const anchor = this.chainClock()
+    // Wait rather than guess. Spawning a board off the shared-unix fallback and
+    // then recomputing it when the block's real timestamp lands changes every
+    // pickup id at once, at each client's own HTTP latency — which is the
+    // two-timelines bug this anchor was added to remove, reintroduced from the
+    // inside. An empty board for one round trip is invisible.
+    if (anchor.pending) return
+    const elapsed = waveClock(anchor.seconds)
     const want = scheduleFor(this.roundHash, elapsed, {
       waveSeconds: this.modifier.waveSeconds,
       emptyPads: this.modifier.emptyPads,
@@ -904,6 +968,7 @@ export class Game {
     // — for a late joiner's backfill it never does — and dropping the claim
     // because the schedule has not caught up is exactly the silent divergence
     // stored claims were supposed to end.
+    this.claimsReceived++
     this.claimed.add(p.p)
     if (this.claimed.size > 400) this.claimed.delete(this.claimed.values().next().value as string)
 

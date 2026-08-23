@@ -26,6 +26,20 @@
 // up, so "higher" is the one that has seen more of the chain. If your own node
 // is nicer, `?blocks=https://your.node/api` overrides both.
 
+/**
+ * What is known about one block's mined-at time.
+ *
+ * `unavailable` is deliberately terminal per hash and is never retried. A
+ * successful retry mid-round would be exactly the reshuffle this type exists to
+ * prevent — a round that has fallen back to the shared-unix clock stays there
+ * until the next block, which costs nothing and keeps every client on one
+ * timeline for the whole round.
+ */
+export type TimeState =
+  | { state: 'pending' }
+  | { state: 'known'; time: number }
+  | { state: 'unavailable' }
+
 export interface Tip {
   height: number
   hash: string
@@ -90,8 +104,20 @@ export class BlockClock {
   private timer: ReturnType<typeof setInterval> | null = null
   private controller = new AbortController()
   private listeners: ((tip: Tip, previous: Tip | null) => void)[] = []
-  /** Mined-at times we have already resolved, by hash. `null` while in flight. */
-  private timeFor = new Map<string, number | null>()
+  /**
+   * What we know about each block's mined-at time.
+   *
+   * Three states, and the third one is load-bearing. This used to be
+   * `Map<string, number | null>` where `null` meant both "the request is in
+   * flight" and "no explorer would tell me" — and the pickup schedule cannot
+   * treat those the same. Anything reading a `null` takes the shared-unix
+   * fallback, so a schedule that starts on the fallback and then gets a real
+   * timestamp 200ms later recomputes `elapsed` from about 1.79 billion down to
+   * about 300, changes every pickup id at once, and reshuffles the board — at
+   * each client's own HTTP latency, which is two clients on two timelines
+   * again. `pending` is what lets the caller wait instead of guessing.
+   */
+  private timeFor = new Map<string, TimeState>()
   /** Local clock when this client first saw the current tip, as a fallback. */
   private sawTipAt = Date.now()
   private readonly sources: string[]
@@ -131,19 +157,22 @@ export class BlockClock {
    * tip would set the clock backwards.
    */
   private async fillTime(hash: string): Promise<void> {
-    if (this.timeFor.has(hash)) {
-      const known = this.timeFor.get(hash)
-      if (this.tip?.hash === hash && known) this.tip.time = known
+    const held = this.timeFor.get(hash)
+    if (held) {
+      if (held.state === 'known' && this.tip?.hash === hash) this.tip.time = held.time
       return
     }
-    this.timeFor.set(hash, null)
+    this.timeFor.set(hash, { state: 'pending' })
     for (const base of this.sources) {
       const t = await readTime(base, hash, this.controller.signal)
       if (t === null) continue
-      this.timeFor.set(hash, t)
+      this.timeFor.set(hash, { state: 'known', time: t })
       if (this.tip?.hash === hash) this.tip.time = t
       return
     }
+    // Every source refused. Terminal: see `TimeState` for why this is never
+    // retried.
+    this.timeFor.set(hash, { state: 'unavailable' })
   }
 
   /**
@@ -184,6 +213,19 @@ export class BlockClock {
   }
 
   /**
+   * True while we are still waiting to find out when this block was mined.
+   *
+   * The pickup schedule must not derive anything during this window. An empty
+   * board for one HTTP round trip at the start of a round is invisible — wave
+   * zero has barely begun — and it is strictly better than a board that spawns
+   * on the fallback clock and reshuffles the instant the real timestamp lands.
+   */
+  get chainPending(): boolean {
+    if (!this.tip || this.tip.time !== undefined) return false
+    return (this.timeFor.get(this.tip.hash)?.state ?? 'pending') === 'pending'
+  }
+
+  /**
    * Take a tip from anywhere and, if it is newer, start a round on it.
    *
    * Public because polling a real explorer is not the only way to get one. The
@@ -194,7 +236,14 @@ export class BlockClock {
   accept(tip: Tip): void {
     if (this.tip && tip.height <= this.tip.height) return
     const previous = this.tip
-    this.tip = { ...tip, time: tip.time ?? this.timeFor.get(tip.hash) ?? undefined }
+    const held = this.timeFor.get(tip.hash)
+    const cached = held?.state === 'known' ? held.time : undefined
+    this.tip = { ...tip, time: tip.time ?? cached }
+    // A tip handed in with its own timestamp — the smoke test does this — is
+    // known immediately and must not spend a round trip pending.
+    if (this.tip.time !== undefined && !held) {
+      this.timeFor.set(tip.hash, { state: 'known', time: this.tip.time })
+    }
     this.sawTipAt = Date.now()
     for (const fn of this.listeners) fn(this.tip, previous)
   }
