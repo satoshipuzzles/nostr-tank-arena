@@ -185,6 +185,14 @@ cannot be asked for them afterwards, so a client that joined 200ms later would
 drive over a shield that is already gone. A stored claim can be `REQ`ed by a late
 joiner, and the expiration means the relay drops the litter on schedule.
 
+That expiration is **evaluated against the relay's clock, not ours**, which makes
+it headroom against clock skew rather than a tidy-up interval. At two minutes, a
+client two minutes slow had every claim refused on arrival forever — and one a
+hundred seconds slow was worse, because its claims died before its 32-second pads
+did, which looks exactly like the ordering bug rather than a clock. It is ten
+minutes now, about one block, and it is a fixed offset from `created_at` rather
+than a second reading of the clock straddling the signature.
+
 Nothing here is ordered by `created_at`, because the publisher picks it. A
 simultaneous double-grab is resolved by not resolving it: both players get the
 pickup. The window is one relay round trip, and a party game that occasionally
@@ -529,6 +537,33 @@ excuse, because the sender and the receiver are the same process. The suite
 checks it by cutting the relays off at the knees and asserting a shot still
 arrives in the same turn.
 
+### One `Net` per player, too
+
+They share the screen and the machine. They must not share an uplink, and the
+reason is not bandwidth.
+
+Every failure counter in `Net` is keyed by relay URL and was written when one
+socket meant one publisher. `strikes` resets on any success. So a relay that
+refuses **player two's key** and accepts player one's never accumulates fifteen
+consecutive strikes, never mutes, and never appears in `mutedRelays`. Player
+two's `restricted:` reason lands in `trouble` and player one's next success wipes
+it. `rejected` climbs and cannot say whose.
+
+The local mirror is what turns that from obvious into invisible. Without it, a
+fully-rejected player two is a tank *player one cannot see either* — noticed in a
+second on the couch. With it, both people see a perfectly correct room, because
+player two's events reached player one without a relay at all. Only the rest of
+the world sees one tank where there should be two, and nobody in the room has any
+way to find out.
+
+Two sockets also mean two per-connection budgets, which matters on a relay that
+allocates its token bucket per *connection* rather than per pubkey — newlay does,
+so on one socket the two players would share a throttle and one player's
+rejections would decay the other's rate.
+
+It costs a second subscription and double inbound. Worth it. The per-IP gate is
+unaffected either way; that one is shared across sockets by definition.
+
 ### One `Input` per player, not one per page
 
 Three things were correct for one human with a keyboard and a pad, and broke the
@@ -641,6 +676,7 @@ test/sound.mjs       taps the master bus and measures what each sound emits
 test/controls.mjs    hands the page a fake gamepad and checks WASD survives it
 test/relays.mjs      four fake relays that misbehave on cue, on localhost
 test/couch.mjs       two pads, two players, one tab
+test/relays.mjs      six fake relays misbehaving in six different ways
 test/shot.mjs        photographs a pinned block, because pixels are not the DOM
 ```
 
