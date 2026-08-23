@@ -1424,6 +1424,45 @@ after                                                            0.00 + probes
 Silence does not clear the alarm, only an acceptance or an ordinary refusal
 does: an unreachable relay is no evidence that the clock came right.
 
+### The read path has to survive a dropped socket
+
+nostr-tools defaults `enableReconnect` to false. A hard close then runs
+`closeAllSubscriptions(reason)` with nothing behind it, and nothing in this
+client resubscribes — `subscribe()` is called twice, from `Game.start()`, and
+never again.
+
+**Publishing recovers on its own and reading does not.** The next publish builds
+a fresh socket through `ensureRelay()`; the subscription that died with the old
+one stays dead. So one wifi change, one laptop sleep, one edge cycling the
+connection, and that relay is write-only for the rest of the session: ten
+publishes a second into a game that cannot be seen, with no error, no refusal,
+no streak and nothing on the screen.
+
+```
+                                    before   after
+peer tick before the socket drop        ok      ok
+peer tick after the socket drop     NOTHING      ok
+publishing after the socket drop        ok      ok
+```
+
+It is the same shape as the `since` blackout and it arrives by a completely
+different road, which is what makes the shape the finding rather than either
+bug: **every failure this file has caught is one where we stay visible and stop
+seeing.** The publish path has eight prefixes, a ledger, a quorum and an alarm.
+The read path had no instrument at all.
+
+With reconnect on, a drop schedules a backoff reconnect and every open
+subscription is re-fired — and nostr-tools rewrites each filter's `since` to
+`lastEmitted + 1` on the way, so the replay is bounded by what has already been
+seen rather than by the relay's retention.
+
+One consequence of the per-relay subscriptions below: nostr-tools allocates
+`_knownIds` per `subscribeMany` call, so three calls means three sets and every
+event arrives about three times. `Game.onEvent` keys on id and catches them, but
+its set rotates on a fixed *count*, so three times the traffic is a third of the
+dedupe window in time — harmless while nothing replays, and reconnection
+replays. One shared `alreadyHaveEvent` across the three puts the window back.
+
 ### A relay that hangs up is not a quiet relay
 
 `subscribe()` opens one subscription per relay rather than one across all of
@@ -1435,7 +1474,11 @@ That is not hypothetical and it does not need a broken clock: a relay can answer
 `CLOSED ... kinds not supported` for every kind this game uses while returning
 `OK true` to publishes of the same kinds. Discarding that frame makes the relay
 permanently silent and indistinguishable from a quiet one, while the publish
-path goes on counting it live. `net.deafRelays` reports them in their own words.
+path goes on counting it live. `net.deafRelays` reports them in their own words — and only their own words. A
+`CLOSED` frame is a verdict: the relay read the filter and declined it. A
+dropped socket is silence, and nostr-tools supplies the wording for those
+itself. This file's own rule is that silence is not a verdict, so the two are
+kept apart rather than both rendered as "the relay said".
 
 One subscription each costs nothing on the wire — the pool still dedupes
 connections by URL — and duplicate deliveries were already handled, because

@@ -537,7 +537,27 @@ export interface RelayLedger {
 }
 
 export class Net {
-  private pool = new SimplePool()
+  /**
+   * Reconnecting, which it was not, and that made the read path one-way.
+   *
+   * nostr-tools defaults `enableReconnect` to false. A hard close then runs
+   * `closeAllSubscriptions(reason)` with nothing behind it, and nothing in this
+   * file resubscribes — `subscribe()` is called twice, from `Game.start()`, and
+   * never again. Publishing recovers on its own, because `ensureRelay()` builds
+   * a fresh socket for the next publish. Reading does not.
+   *
+   * So one wifi change, one laptop sleep, one edge cycling the connection, and
+   * that relay is write-only for the rest of the session: publishing ten a
+   * second into a game we cannot see, with no error, no refusal, no streak and
+   * nothing on the screen. Take all three at once, which is what a sleep does,
+   * and the arena is empty forever.
+   *
+   * With it on, a drop schedules a backoff reconnect and every open
+   * subscription is re-fired — and nostr-tools rewrites each filter's `since`
+   * to `lastEmitted + 1` on the way, so the replay is bounded by what we have
+   * already seen rather than by the relay's retention.
+   */
+  private pool = new SimplePool({ enableReconnect: true })
   private closers: { close(): void }[] = []
   readonly relays: string[]
 
@@ -570,6 +590,28 @@ export class Net {
   private muteSpan = new Map<string, number>()
   /** Relays that closed our subscription rather than serving it. */
   private closedSubs = new Map<string, string>()
+  /**
+   * Ids already delivered by any relay, shared across all the subscriptions.
+   *
+   * Bounded the same way `Game.onEvent`'s is and for the same reason: a
+   * redelivered death event must not count twice. Rotated rather than cleared,
+   * so the older half survives one rotation.
+   */
+  private readonly seenIds = (() => {
+    let now = new Set<string>()
+    let prev = new Set<string>()
+    return {
+      have(id: string): boolean {
+        if (now.has(id) || prev.has(id)) return true
+        now.add(id)
+        if (now.size > 5000) {
+          prev = now
+          now = new Set()
+        }
+        return false
+      },
+    }
+  })()
   /** Relays that told us their number, and what we are doing about it. */
   private pace = new Map<string, RelayPace>()
   /** Consecutive publishes that every asked relay called malformed. */
@@ -712,8 +754,22 @@ export class Net {
       this.closers.push(
         this.pool.subscribeMany([url], filter, {
           onevent,
+          // One subscription per relay costs nostr-tools' cross-relay dedupe:
+          // its `_knownIds` is allocated per `subscribeMany` call, so three
+          // calls means three sets and every event arrives about three times.
+          // `Game.onEvent` already keys on id and catches them — but its set
+          // rotates on a fixed *count*, so three times the traffic is a third
+          // of the dedupe window in time. Harmless while nothing replays;
+          // reconnection replays. One shared set puts the window back.
+          alreadyHaveEvent: (id: string) => this.seenIds.have(id),
           onclose: (reasons: { url: string; reason: string }[]) => {
             const reason = reasons?.[0]?.reason ?? 'closed without a reason'
+            // A `CLOSED` frame is a verdict — the relay read the filter and
+            // declined it, in its own words. A dropped socket is silence, and
+            // nostr-tools supplies the wording for those itself. This thread's
+            // own rule is that silence is not a verdict, so they are kept
+            // apart rather than both rendered as "the relay said".
+            if (/^relay connection/i.test(reason)) return
             this.closedSubs.set(url, reason)
             this.entry(url).subscriptionClosed = reason
           },
@@ -809,6 +865,7 @@ export class Net {
     // Refusals split by which side of the created_at gate they came from. One
     // prefix out of eight means the opposite of the other seven.
     let belowClockGate = 0
+    const passedClockGate = new Set<string>()
     // Distinct relays naming the timestamp, by direction. A URL can only vote
     // once per publish, so a relay answering twice cannot form its own quorum.
     const saidBehind = new Map<string, string>()
@@ -854,7 +911,10 @@ export class Net {
             // the positive rule subsumed it: a rate limit is neither a clock
             // verdict nor an acquittal, which is the same behaviour reached by
             // better means. Removed rather than left for somebody to build on.
-            if (!reason.trim().toLowerCase().startsWith('rate-limited:')) belowClockGate++
+            if (!reason.trim().toLowerCase().startsWith('rate-limited:')) {
+              belowClockGate++
+              passedClockGate.add(url)
+            }
             outcome.reason = reason
           } else if (kind === 'malformed') {
             outcome.malformed++
@@ -964,6 +1024,16 @@ export class Net {
       // Only a witness can recant: an acceptance clears the alarm only if it
       // came from a relay that had named the fault itself.
       const recanted = [...acceptedBy].some((url) => this.clockWitnesses.has(url))
+      // The same rule for the other kind of acquittal. `belowClockGate` is any
+      // refusal that is not `rate-limited:` — `blocked:`, `restricted:`,
+      // `auth-required:`, `pow:` — and a relay answering one of those to every
+      // publish never reads the timestamp, so it never becomes a witness and
+      // would clear the alarm on every cycle forever. Inert against three stock
+      // strfry; not inert the moment a relay with a write allowlist is in the
+      // list, because a pubkey that is not on it gets exactly that, every time.
+      const witnessPassedTheClock = [...passedClockGate].some((url) =>
+        this.clockWitnesses.has(url),
+      )
       const winner: ClockDirection | null =
         behind >= 2 && behind >= ahead ? 'behind' : ahead >= 2 ? 'ahead' : null
       const enoughVisible = outcome.sent * 2 >= this.relays.length
@@ -986,7 +1056,7 @@ export class Net {
         behind + ahead === 0 &&
         (this.clockWitnesses.size === 0
           ? outcome.accepted > 0 || belowClockGate > 0
-          : recanted || belowClockGate > 0)
+          : recanted || witnessPassedTheClock)
       ) {
         // Cleared only when nobody named the timestamp on this publish *and*
         // somebody gave us evidence of any kind. A relay that told us to slow

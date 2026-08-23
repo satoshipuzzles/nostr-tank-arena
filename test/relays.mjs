@@ -22,6 +22,7 @@
 
 import { existsSync } from 'node:fs'
 import { WebSocketServer } from 'ws'
+import { finalizeEvent, generateSecretKey, getPublicKey } from 'nostr-tools/pure'
 import puppeteer from 'puppeteer-core'
 
 const URL = process.env.TANK_URL ?? 'http://localhost:4173/'
@@ -158,8 +159,28 @@ function startBucketRelay(perMin) {
 function startRelay(behaviour, opts = {}) {
   const wss = new WebSocketServer({ port: 0 })
   const state = { behaviour, received: 0, accepted: 0, connections: 0, closeSubs: !!opts.closeSubs }
+  // sockets -> the subscription ids each has open, so this fake can push an
+  // event the way a real relay does rather than only answering publishes.
+  const subs = new Map()
+  state.inject = (ev) => {
+    let sent = 0
+    for (const [ws, ids] of subs) {
+      if (ws.readyState !== 1) continue
+      for (const id of ids) { ws.send(JSON.stringify(['EVENT', id, ev])); sent++ }
+    }
+    return sent
+  }
+  /** Yank every socket out from under the client, the way a wifi change does. */
+  state.dropAll = () => {
+    let n = 0
+    for (const ws of subs.keys()) if (ws.readyState === 1) { ws.terminate(); n++ }
+    subs.clear()
+    return n
+  }
   wss.on('connection', (ws) => {
     state.connections++
+    subs.set(ws, new Set())
+    ws.on('close', () => subs.delete(ws))
     ws.on('message', (raw) => {
       let msg
       try {
@@ -167,7 +188,9 @@ function startRelay(behaviour, opts = {}) {
       } catch {
         return
       }
+      if (msg[0] === 'CLOSE') { subs.get(ws)?.delete(msg[1]); return }
       if (msg[0] === 'REQ') {
+        if (!state.closeSubs) subs.get(ws)?.add(msg[1])
         // A relay can refuse to read the kinds it happily accepts writes for.
         // relay.fountain.fm answers exactly this for 21000, 21001, 21003 and
         // 30078 while returning `OK true` when you publish them.
@@ -1122,6 +1145,71 @@ try {
       `worst relay ${worstPerRelay} of ${cycles} cycles — broadcast would be ${cycles}`,
     )
     await page2.close()
+  }
+
+  // ------------------------------------------------- the read path survives
+  //
+  // Publishing recovers from a dropped socket on its own, because the next
+  // publish builds a fresh one. Reading did not: nostr-tools defaults
+  // `enableReconnect` to false, a hard close runs `closeAllSubscriptions`, and
+  // nothing in this client resubscribes — `subscribe()` is called twice, from
+  // `Game.start()`, and never again. One wifi change and the relay is
+  // write-only for the rest of the session: ten publishes a second into a game
+  // that cannot be seen, with no error, no refusal and nothing on the screen.
+
+  const liveRelay = startRelay('good')
+  const readPage = await openAgainst([liveRelay.url], 'read')
+  check('a session against one delivering relay starts', readPage !== null)
+
+  if (readPage) {
+    await wait(4000)
+    const roomTag = await readPage.evaluate(() => `tankarena-${window.__game.room}`)
+    const peerSk = generateSecretKey()
+    const peerPk = getPublicKey(peerSk)
+    const tick = (t) =>
+      finalizeEvent(
+        {
+          kind: 21000,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [['t', roomTag]],
+          content: JSON.stringify({ t, x: 900, y: 700, h: 0, g: 0, hp: 3, d: false }),
+        },
+        peerSk,
+      )
+    const sees = () =>
+      readPage.evaluate((pk) => [...window.__game.peers.keys()].includes(pk), peerPk)
+
+    liveRelay.inject(tick(1))
+    await wait(2500)
+    check('a peer tick arrives before the drop', await sees(), `peer ${peerPk.slice(0, 8)}`)
+
+    // Forget the peer, or the check after the drop could pass on a stale entry
+    // — the same shape as a control the thing under test can overwrite.
+    await readPage.evaluate((pk) => window.__game.peers.delete(pk), peerPk)
+    const dropped = liveRelay.dropAll()
+    check('the socket was yanked out from under it', dropped > 0, `${dropped} closed`)
+
+    // Backoff plus a resubscribe. Generous, because the question is whether it
+    // comes back at all, not how quickly.
+    await wait(10_000)
+    liveRelay.inject(tick(2))
+    await wait(3500)
+    check(
+      'and the read path comes back after the socket is dropped',
+      await sees(),
+      'nothing inbound after the drop — that relay is write-only for the session',
+    )
+
+    // Publishing was never the broken half. Assert it anyway, so a fix that
+    // traded one direction for the other cannot pass.
+    const before = liveRelay.received
+    await wait(2500)
+    check(
+      'and publishing kept working across the drop',
+      liveRelay.received > before,
+      `${liveRelay.received - before} events in 2.5s`,
+    )
+    await readPage.close()
   }
 
 } catch (err) {
