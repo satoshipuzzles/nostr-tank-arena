@@ -68,6 +68,22 @@ const MAX_HULL = 3
  * like netcode.
  */
 const CLAIM_BACKFILL = 250
+/**
+ * How long a relay is asked to keep a claim, in seconds.
+ *
+ * Longer than it looks like it needs to be, and cowboy found why. NIP-40 is
+ * evaluated against the **relay's** clock, not the publisher's: newlay drops an
+ * event whose `expiration <= now` on arrival and answers
+ * `invalid: event expired`. So this number is really headroom against the gap
+ * between our clock and theirs, and a pad only lives 32 seconds.
+ *
+ * At 120s a client two minutes slow had every claim refused, forever, and one
+ * that was 100s slow was worse — its claims died before its pads did, which
+ * looks exactly like the ordering bug rather than a clock. Ten minutes is about
+ * one block, so it is still one round's worth of litter, and it costs nothing
+ * now that unknown claims buffer and ids carry the block hash.
+ */
+const CLAIM_TTL = 600
 /** Kills in a row that earn a full repair. */
 const STREAK_REPAIR = 3
 /** Kills in a row that earn rapid fire, and a glow so everyone can see it. */
@@ -970,13 +986,17 @@ export class Game {
    */
   private publishClaim(pickup: Pickup): void {
     const payload: ClaimPayload = { p: pickup.id, kind: pickup.kind }
+    // One reading of the clock for both numbers. Two calls to `Date.now()`
+    // straddling a signature is a bug waiting to be written, and the whole
+    // point of the expiration is that it is a fixed offset from `created_at`.
+    const now = Math.floor(Date.now() / 1000)
     const event = this.identity.signAsSession({
       kind: KIND_CLAIM,
-      created_at: Math.floor(Date.now() / 1000),
+      created_at: now,
       tags: [
         ['d', claimTag(pickup.id, this.identity.sessionPubkey)],
         ['t', roomTag(this.room)],
-        ['expiration', String(Math.floor(Date.now() / 1000) + 120)],
+        ['expiration', String(now + CLAIM_TTL)],
       ],
       content: JSON.stringify(payload),
     })

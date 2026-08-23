@@ -147,6 +147,49 @@ try {
   }))
   check('each is a peer of the other', sees.oneSeesTwo && sees.twoSeesOne, JSON.stringify(sees))
 
+  // ------------------------------------------------- one uplink each, not one
+  //
+  // They share the screen and the machine; they must not share a `Net`. Every
+  // failure counter in it is keyed by relay URL and written as though one
+  // publisher owned the socket — `strikes` resets on any success, so a relay
+  // refusing *player two's key* and accepting player one's never accumulates
+  // fifteen in a row and never mutes, and player two's rejection reason is
+  // wiped from `trouble` by player one's next success.
+  //
+  // The local mirror is what turns that from obvious into invisible: both
+  // people on the couch see a perfectly correct room, because player two's
+  // events reach player one without a relay at all. Only the rest of the world
+  // sees one tank where there should be two.
+  const uplinks = await page.evaluate(() => {
+    const [one, two] = window.__players
+    const realOne = one.game.net.publish.bind(one.game.net)
+    const realTwo = two.game.net.publish.bind(two.game.net)
+    const sent = { one: [], two: [] }
+    one.game.net.publish = (e) => { sent.one.push(e.pubkey); realOne(e) }
+    two.game.net.publish = (e) => { sent.two.push(e.pubkey); realTwo(e) }
+    return new Promise((r) =>
+      setTimeout(() => {
+        one.game.net.publish = realOne
+        two.game.net.publish = realTwo
+        const k1 = one.game.identity.sessionPubkey
+        const k2 = two.game.identity.sessionPubkey
+        r({
+          separate: one.game.net !== two.game.net,
+          oneOnlyOwnKey: sent.one.length > 0 && sent.one.every((k) => k === k1 || k === one.game.identity.pubkey),
+          twoOnlyOwnKey: sent.two.length > 0 && sent.two.every((k) => k === k2 || k === two.game.identity.pubkey),
+          counts: [sent.one.length, sent.two.length],
+        })
+      }, 2500),
+    )
+  })
+  check('the two players have an uplink each rather than sharing one',
+    uplinks.separate, JSON.stringify(uplinks))
+  // The property that makes the counters attributable at all: nothing player one
+  // publishes can clear a strike earned by player two, because it never travels
+  // on player two's socket.
+  check("and nothing of player one's goes out over player two's socket",
+    uplinks.oneOnlyOwnKey && uplinks.twoOnlyOwnKey, JSON.stringify(uplinks))
+
   // Both tanks in the clear edge lanes of Crossroads — all of its cover sits
   // between x=300 and x=1300 — already pointing up the lane, so nothing here
   // measures the time a hull takes to turn around.

@@ -210,7 +210,31 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
       // second person to produce a NIP-07 signer to play on a couch is how a
       // couch mode does not get used.
       const second = await Identity.guest()
-      const p2 = new Game(second, net, room, `${name}-2`, (color + 137) % 360)
+      // A second `Net`, not a shared one, and this is not a detail.
+      //
+      // Sharing was the obvious choice — one pool, one socket per relay, less
+      // of everything. cowboy found what it costs: every failure counter in
+      // `Net` is keyed by URL and written when one player is the only publisher
+      // on it. `strikes` resets on any success, so a relay refusing *player
+      // two's key* and accepting player one's never accumulates fifteen in a
+      // row and never mutes. Player two's `restricted:` reason lands in
+      // `trouble` and player one's next success wipes it. `rejected` climbs and
+      // cannot say whose.
+      //
+      // And the local mirror is what makes that invisible rather than obvious.
+      // Without it, a fully-rejected player two is a tank player one cannot see
+      // either — noticed in a second on the couch. With it, both people see a
+      // perfectly correct room while the rest of the world sees one tank where
+      // there should be two, and nobody in the room has any way to find out.
+      //
+      // Two sockets also mean two per-connection budgets, which is the other
+      // half of the same argument: newlay allocates its token bucket and its
+      // behaviour score per connection, so on one socket the two players share
+      // a throttle and one player's rejections decay the other's rate.
+      //
+      // It costs a second subscription and double inbound. Worth it.
+      const secondNet = new Net(relays)
+      const p2 = new Game(second, secondNet, room, `${name}-2`, (color + 137) % 360)
       p2.chainClock = () => ({ seconds: clock.chainSeconds(), pending: clock.chainPending })
       await p2.start()
       // Each is an ordinary peer of the other, through the same signed events —
@@ -369,7 +393,17 @@ function drawHud(game: Game): void {
   const clock = running?.clock
   // The relay line earns its place: a rate-limited publish used to be silent,
   // and silent dropped ticks look exactly like a peer with a bad connection.
-  const trouble = game.net.troubleSummary()
+  // Every local player's uplink, not just player one's. With a `Net` each, a
+  // relay that refuses only player two says so on player two's counters — and
+  // reading only the first would put the whole point of splitting them back in
+  // the dark.
+  const trouble = (running?.players ?? [])
+    .map((p, i) => {
+      const line = p.game.net.troubleSummary()
+      return line ? (i === 0 ? line : `P${i + 1}: ${line}`) : ''
+    })
+    .filter(Boolean)
+    .join(' · ')
   $('status').innerHTML = [
     clock?.tip
       ? `block <b>${clock.tip.height}</b> ${blockClock(clock)}`
@@ -384,7 +418,7 @@ function drawHud(game: Game): void {
     game.identity.isGuest ? 'guest key' : escapeHtml(game.identity.npub.slice(0, 16) + '…'),
     trouble
       ? `<span class="bad">${escapeHtml(trouble)}</span>`
-      : `${game.net.relays.length} relays`,
+      : `${game.net.relays.length} relays${(running?.players.length ?? 1) > 1 ? ' ×2' : ''}`,
   ]
     .filter(Boolean)
     .join('<br>')

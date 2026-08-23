@@ -548,6 +548,37 @@ try {
   const claimedByA = await a.evaluate((id) => !!window.__game.pickups.get(id)?.taken, lateTarget.id)
   check('alpha takes it and publishes the claim', claimedByA, lateTarget.id)
 
+  // NIP-40 is evaluated against the *relay's* clock, so the expiration is really
+  // headroom against the gap between our clock and theirs — and it has to be a
+  // fixed offset from `created_at` rather than a second reading of `Date.now()`
+  // straddling the signature. A pad lives 32 seconds; a client two minutes slow
+  // used to have every claim refused on arrival, forever.
+  const ttl = await a.evaluate(() => {
+    const g = window.__game
+    const real = g.net.publish.bind(g.net)
+    let seen = null
+    g.net.publish = (e) => {
+      if (e.kind === 30078 && e.tags.some((t) => t[0] === 'expiration')) seen = e
+      real(e)
+    }
+    // Take another pad so a fresh claim goes out under the wrapper.
+    const next = [...g.pickups.values()].find((p) => !p.taken)
+    if (next) {
+      g.tank.dead = false
+      g.tank.x = next.at.x
+      g.tank.y = next.at.y
+    }
+    return new Promise((r) =>
+      setTimeout(() => {
+        g.net.publish = real
+        const exp = seen && Number(seen.tags.find((t) => t[0] === 'expiration')[1])
+        r(seen ? { ttl: exp - seen.created_at } : null)
+      }, 1800),
+    )
+  })
+  check('the claim asks the relay to keep it far longer than the pad lives',
+    ttl !== null && ttl.ttl === 600, JSON.stringify(ttl))
+
   const c = await join(browsers[2], 'C', 'charlie')
   await c.evaluate(([h, t]) => {
     // Same block as the other two, so it derives the same pads.
