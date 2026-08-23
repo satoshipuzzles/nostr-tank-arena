@@ -1030,11 +1030,41 @@ climbs and the number in the string goes back up while you watch. The margin
 matters — spending a bucket exactly as fast as it refills sits on the boundary,
 where jitter alone produces the refusals you are pacing to avoid.
 
-Pacing is a pace, not a ratchet. A relay that has gone quiet for thirty seconds
-gets tried 1.5× faster, snapping back to whatever it reports next; obey the
-number and you stop being refused, so without probing you would never learn it
-had forgiven you. And there is a valve: forty refusals while paced means the
-number is not the problem, and the relay goes back on the strike-and-mute path.
+Pacing is a pace, not a ratchet: a relay that has gone quiet gets tried a little
+faster, because obeying the number means you stop being refused, so without
+probing you would never learn it had forgiven you. There is also a valve — forty
+refusals while paced means the number is not the problem, and the relay goes
+back on the strike-and-mute path.
+
+**How often to probe, and by how much, is the whole difficulty.** The first
+version tried 1.5× every thirty seconds and undid the thing pacing was for.
+Recovery is credited per *clean minute* — `advanceMinute` discards a minute
+containing any violation at all, not partially — and for an anonymous session
+key that is the only recovery channel there is. So a probe that overshoots even
+briefly spoils the entire minute, and one every thirty seconds means every
+minute is dirty: the score is pushed down −2 at a time and pinned at the floor,
+which is the spiral pacing exists to end, at lower amplitude and self-inflicted.
+It was also compounding rather than probing, because escalating reset the same
+timestamp the quiet test read.
+
+Five minutes and ×1.1 now, with separate clocks for "quiet since refused" and
+"quiet since escalated". The arithmetic has to come out positive: one cycle
+costs a handful of refusals and one dirty minute, and nine clean minutes at +2
+pays for that several times over. At ×1.1 the first step from 0.9× lands at
+0.99× — still under the cap, so it is free — and only the second overshoots.
+
+Measured, and the measurement needed care of its own. `TokenBucket(perMin,
+perMin)` gives a burst allowance of a whole minute, and pacing at 90% keeps it
+nearly full, so the *first* overshoot spends banked tokens rather than tripping
+policy and draws no refusal for about ninety seconds. A window that stops there
+reports a perfectly happy relay about a client that is on its way to the floor.
+So the check drains the bank first and asserts on the segment after it:
+
+```
+                    sent/s   refusals/min
+1.5x every 30s         1.1            3.0
+1.1x every 5min        0.9            0.0
+```
 
 **Only the position tick is paced.** It is ten a second and the next one is
 always 100ms away. The shell, the death, and the claim published exactly once go
@@ -1057,6 +1087,38 @@ strike counter, so the relay is never muted precisely *because* the client is
 hammering it. Not-muted is the same observation for a healthy pace and for an
 unchecked flood. Only the send rate and the accept ratio tell them apart, which
 is why all three are asserted together.
+
+### When it is not the relays
+
+`malformed` from one relay is that relay being odd. `malformed` from *every*
+relay is a fact about this machine, and the two want opposite responses. Muting
+is wrong — the relays are fine, and there would be none left — but so is
+carrying on, and carrying on is what the client did. The classifier is correctly
+not striking for it, so it hammered every relay for the whole session.
+
+The realistic cause is the clock, and newlay's window is asymmetric:
+`createdAtMsecsAgo` is 365 days, `createdAtMsecsAhead` is fifteen minutes. A
+clock *behind* is cheap — only the NIP-40 claim dies, and that rejection comes
+off the store rather than the policy engine, so it costs no behaviour score. A
+clock more than fifteen minutes *ahead* makes every event
+`invalid: created_at too far in the future`, and that path books a **−4**,
+twice a rate hit. At the measured 6.3 events/sec that is about −25 a second: the
+connection is floored inside three seconds, before the player has finished
+reading the lobby.
+
+So five consecutive publishes that every asked relay calls invalid raise
+`net.clockAlarm`, publishing holds, and the relay's own words go on the screen.
+One event is let through every twenty seconds so a corrected clock is noticed
+without a reload — it is the only failure in this game a player can go and fix.
+
+```
+                          events/s across two invalid-rejecting relays
+before                                                          15.17
+after                                                            0.00 + probes
+```
+
+Silence does not clear the alarm, only an acceptance or an ordinary refusal
+does: an unreachable relay is no evidence that the clock came right.
 
 ## Tuning
 

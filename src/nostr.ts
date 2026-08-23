@@ -164,6 +164,33 @@ export type FailureKind = 'refused' | 'no-verdict' | 'malformed' | 'unknown'
  * relay we could not classify — is not grounds for acting, because the event may
  * well have landed.
  */
+/**
+ * Set when every relay we asked called the event itself invalid.
+ *
+ * `malformed` from one relay is that relay being odd. `malformed` from all of
+ * them is a fact about this machine, and the two need opposite responses.
+ * Muting is wrong — the relays are fine and there would be none left — but so
+ * is carrying on, and carrying on is what the client did: the classifier is
+ * correctly not striking, so it hammers every relay for the whole session.
+ *
+ * The realistic cause is the clock. newlay's window is asymmetric —
+ * `createdAtMsecsAgo` is 365 days, `createdAtMsecsAhead` is fifteen minutes —
+ * so a clock *behind* costs only the NIP-40 claim, while a clock more than
+ * fifteen minutes *ahead* makes every event `invalid: created_at too far in the
+ * future`, and that path books a -4 rather than a rate hit's -2. At the
+ * measured 6.3 events/sec that is roughly -25 a second: floored inside three
+ * seconds, before the player has finished reading the lobby.
+ *
+ * It is also the only failure in this game a player can go and fix, which is
+ * the argument for stopping and saying so rather than retrying into a wall.
+ */
+export interface ClockAlarm {
+  /** The relay's own words, so the screen can quote rather than paraphrase. */
+  reason: string
+  /** Consecutive publishes that every relay called invalid. */
+  streak: number
+}
+
 export interface PublishOutcome {
   /** Relays the event was actually sent to. Zero when everything is muted. */
   sent: number
@@ -231,6 +258,10 @@ const OK_PREFIX: Record<string, FailureKind | 'accepted'> = {
   // set, miss every heuristic, and land on `unknown`, which never strikes:
   // the exact shape of the bug this table was rewritten to fix.
   'mute:': 'refused',
+  // Worth knowing about the two connection-flavoured `rate-limited:` messages:
+  // newlay writes them as HTTP 429 bodies before the websocket upgrade, so they
+  // never arrive as an OK frame and never reach this function. Classifying them
+  // correctly costs nothing and their absence from a ledger proves nothing.
   'invalid:': 'malformed',
   // NIP-01 defines `error:` as "any other reason" — the catch-all. That is the
   // weakest possible basis for writing a relay off, so it does not mute.
@@ -356,6 +387,8 @@ interface RelayPace {
   nextAt: number
   /** Last time this relay refused us, for deciding when to probe faster. */
   lastRefusalAt: number
+  /** Last time we escalated. Separate from the above, and that separation is the fix. */
+  lastProbeAt: number
   /** Refusals since pacing began. The valve for when pacing is not working. */
   refusalsWhilePaced: number
 }
@@ -445,6 +478,27 @@ export class Net {
   private muteSpan = new Map<string, number>()
   /** Relays that told us their number, and what we are doing about it. */
   private pace = new Map<string, RelayPace>()
+  /** Consecutive publishes that every asked relay called malformed. */
+  private allMalformedStreak = 0
+  private lastMalformedReason = ''
+  private lastMalformedProbeAt = 0
+  /**
+   * How many all-relay rejections before we stop and blame the machine.
+   *
+   * Low, because the signal is unambiguous — every relay independently refusing
+   * to store the same event is not a coincidence — and because each one costs
+   * -4 on newlay rather than a rate hit's -2.
+   */
+  private static readonly MALFORMED_STREAK = 5
+  /**
+   * While the alarm is up, let one event through this often to notice a fix.
+   *
+   * An instance field rather than a static so a test can compress it. That is
+   * not a convenience: a check whose window is shorter than this interval
+   * cannot observe a probe at all, and would report "publishing has stopped"
+   * about a mechanism it never gave a chance to run.
+   */
+  private malformedProbeMs = 20_000
   /**
    * How long a paced relay must go without refusing before we try it faster.
    *
@@ -452,7 +506,35 @@ export class Net {
    * gets refused, so it never sees a new number, so it never learns the relay
    * has forgiven it — which is the whole point of pacing rather than muting.
    */
-  private static readonly PACE_PROBE_MS = 30_000
+  /**
+   * How long a paced relay must be quiet before we try it faster.
+   *
+   * This was thirty seconds and a x1.5 step, and it undid the thing pacing was
+   * for. newlay credits recovery per *clean minute* — `advanceMinute` decrements
+   * the clean count if the minute contained any violation at all, not partially
+   * — and for an anonymous session key that is the only recovery channel there
+   * is. So a probe that overshoots the cap even briefly spoils the entire
+   * minute. Escalating every thirty seconds meant every minute was dirty, the
+   * score was pushed down -2 at a time and pinned at the floor, and the
+   * reported `limit N` could never grow: the spiral pacing was written to end,
+   * at lower amplitude and self-inflicted.
+   *
+   * It was also compounding rather than probing, because escalating reset
+   * `lastRefusalAt` — so the quiet test kept passing against a clock the probe
+   * itself had just moved. `lastProbeAt` is separate now.
+   *
+   * Five minutes and x1.1. The arithmetic has to come out positive: one probe
+   * cycle costs a handful of refusals and one dirty minute, and nine clean
+   * minutes at +2 pays for it several times over. At x1.1 the first step from
+   * 0.9x lands at 0.99x — still under the cap, so it is free — and only the
+   * second overshoots, by nine percent.
+   */
+  private paceProbeMs = 5 * 60_000
+  /**
+   * Multiplicative step. Small on purpose: an overshoot is paid for in refusals
+   * against a score that only heals in whole clean minutes.
+   */
+  private static readonly PACE_STEP = 1.1
   /** Ceiling past which pacing is pointless; we tick well below this. */
   private static readonly PACE_UNCAP = 1_500
   /**
@@ -528,6 +610,16 @@ export class Net {
     // published exactly once — goes regardless of the pace, because skipping it
     // to save a rate limit would trade a throttle for a divergence.
     const disposable = event.kind === KIND_STATE
+    // Every relay calling our events invalid is not something more publishing
+    // fixes, and on newlay each attempt books a -4. Hold, and let one through
+    // now and then so a corrected clock is noticed without a reload.
+    if (this.clockAlarm && now - this.lastMalformedProbeAt < this.malformedProbeMs) {
+      return Promise.resolve({
+        sent: 0, accepted: 0, refused: 0, malformed: 0, unclear: 0,
+        unanimouslyRefused: false, definitelyNowhere: true, reason: this.lastMalformedReason,
+      })
+    }
+    if (this.clockAlarm) this.lastMalformedProbeAt = now
     const targets = this.relays.filter(
       (url) => !this.muted.has(url) && (!disposable || this.paceAllows(url, now)),
     )
@@ -591,7 +683,10 @@ export class Net {
           led.lastAt = Date.now()
           if (kind === 'refused') led.refused++
           else if (kind === 'no-verdict') led.noVerdict++
-          else if (kind === 'malformed') led.malformed++
+          else if (kind === 'malformed') {
+            led.malformed++
+            this.lastMalformedReason = reason
+          }
           else led.unknown++
 
           // Only an actual refusal counts toward giving up on a relay. Silence
@@ -618,6 +713,15 @@ export class Net {
       outcome.unanimouslyRefused = outcome.refused === outcome.sent && outcome.sent > 0
       outcome.definitelyNowhere =
         outcome.sent === 0 || outcome.refused + outcome.malformed === outcome.sent
+      // Every relay we asked said the event itself was bad. One relay doing
+      // that is the relay; all of them is this machine.
+      if (outcome.sent > 0 && outcome.malformed === outcome.sent) {
+        this.allMalformedStreak++
+      } else if (outcome.accepted > 0 || outcome.refused > 0) {
+        // Anything the relays engaged with normally clears it. Silence does
+        // not: an unreachable relay is no evidence the clock came right.
+        this.allMalformedStreak = 0
+      }
       return outcome
     })
   }
@@ -631,9 +735,11 @@ export class Net {
     if (now < p.nextAt) return false
     // Quiet for a while: try a little faster, so a relay that has forgiven us
     // can be noticed. Multiplicative up, snap back down on the next refusal.
-    if (now - p.lastRefusalAt > Net.PACE_PROBE_MS) {
-      p.allowance = Math.min(p.allowance * 1.5, Net.PACE_UNCAP)
-      p.lastRefusalAt = now
+    // Both clocks have to be old: quiet since the last refusal *and* since the
+    // last escalation. Reusing one for both is what made this compound.
+    if (now - p.lastRefusalAt > this.paceProbeMs && now - p.lastProbeAt > this.paceProbeMs) {
+      p.allowance = Math.min(p.allowance * Net.PACE_STEP, Net.PACE_UNCAP)
+      p.lastProbeAt = now
       if (p.allowance >= Net.PACE_UNCAP) {
         this.pace.delete(url)
         this.entry(url).pacedTo = 0
@@ -665,6 +771,7 @@ export class Net {
         lowest: limit,
         nextAt: now,
         lastRefusalAt: now,
+        lastProbeAt: now,
         refusalsWhilePaced: 0,
       }
       this.pace.set(url, p)
@@ -711,6 +818,19 @@ export class Net {
     this.muted.set(url, { until: Date.now() + span, span })
     this.strikes.set(url, 0)
     this.entry(url).mutes++
+  }
+
+  /**
+   * Raised when every relay has called our events invalid, several in a row.
+   *
+   * Read by the HUD. While it is set, publishing stops except for an occasional
+   * probe, because at that point the relay list is not the problem and no
+   * amount of retrying will fix a wrong clock.
+   */
+  get clockAlarm(): ClockAlarm | null {
+    return this.allMalformedStreak >= Net.MALFORMED_STREAK
+      ? { reason: this.lastMalformedReason, streak: this.allMalformedStreak }
+      : null
   }
 
   /** Relays we are not publishing to right now. */

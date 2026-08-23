@@ -74,6 +74,7 @@ const BEHAVIOURS = {
   pow: () => ({ ok: false, msg: 'pow: 28 bits needed' }),
   blocked: () => ({ ok: false, msg: 'blocked: spam not permitted' }),
   expired: () => ({ ok: false, msg: 'invalid: event expired' }),
+  future: () => ({ ok: false, msg: 'invalid: created_at too far in the future' }),
   // newlay's per-event moderation gate. The reason contains the words "timed
   // out", which an earlier substring-first classifier read as silence — so the
   // single most explicit per-pubkey refusal there is could never mute.
@@ -106,6 +107,13 @@ function startBucketRelay(perMin) {
   const state = { behaviour: 'bucket', received: 0, accepted: 0, connections: 0, perMin }
   let tokens = perMin
   let last = Date.now()
+  // Lets a test raise the cap mid-run, which is the only way to check that the
+  // probe still discovers a relay that has forgiven us — a "fix" that simply
+  // stopped probing would pass every other check in this file.
+  state.setCap = (n) => {
+    state.perMin = n
+    tokens = n
+  }
   wss.on('connection', (ws) => {
     state.connections++
     ws.on('message', (raw) => {
@@ -115,7 +123,7 @@ function startBucketRelay(perMin) {
       if (msg[0] !== 'EVENT') return
       state.received++
       const now = Date.now()
-      tokens = Math.min(perMin, tokens + ((now - last) / 60_000) * perMin)
+      tokens = Math.min(state.perMin, tokens + ((now - last) / 60_000) * state.perMin)
       last = now
       if (tokens >= 1) {
         tokens -= 1
@@ -124,7 +132,7 @@ function startBucketRelay(perMin) {
       }
       ws.send(JSON.stringify([
         'OK', msg[1].id, false,
-        `rate-limited: publishing too fast (limit ${perMin} events/min); slow down or AUTH for higher limits`,
+        `rate-limited: publishing too fast (limit ${state.perMin} events/min); slow down or AUTH for higher limits`,
       ]))
     })
   })
@@ -280,6 +288,10 @@ try {
       cls.moderated === 'refused',
       `${cls.moderated} — the reason contains "timed out"`,
     )
+    // These two are HTTP 429 bodies, written before the websocket upgrade, so
+    // they never reach a publish promise and never reach classifyFailure. The
+    // rows are right and worth keeping — but their absence from a ledger is
+    // evidence of nothing, so nobody should read it as a clean bill of health.
     check(
       'too many connections is a refusal, not silence',
       cls.ipconns === 'refused',
@@ -334,6 +346,21 @@ try {
   })
   const hasLedger = state.ledger !== null
   if (!hasLedger) console.log('  (no ledger on this build — running the mute checks only)')
+  const baseSpan = (await page.evaluate(
+    (u) => {
+      const m = window.__game.net.muted
+      if (!(m instanceof Map)) return null
+      const e = m.get(u)
+      return e ? e.span : null
+    },
+    limited.url,
+  )) ?? 0
+  check(
+    'the first mute is the base wait',
+    Math.abs(baseSpan - 60_000) < 1000,
+    `${(baseSpan / 1000).toFixed(0)}s`,
+  )
+
   const led = (url) =>
     (hasLedger && state.ledger.find((l) => l.url === url)) ?? {
       accepted: 0, refused: 0, noVerdict: 0, malformed: 0, mutes: 0,
@@ -499,14 +526,96 @@ try {
     )
   }
 
+  // ------------------------------------------------- what the probe costs
+  //
+  // Pacing without probing is a ratchet, so there has to be a probe. But newlay
+  // credits recovery per *clean minute* — one violation anywhere in a minute
+  // and the minute is worth nothing, not a reduced amount — and for an
+  // anonymous key that is the only recovery channel. So a probe that overshoots
+  // often enough to dirty every minute pins the score at the floor and undoes
+  // the thing pacing was for.
+  //
+  // The measurable form of that: refusals per minute against a relay whose cap
+  // is not moving. A well-behaved pace produces almost none.
+
+  // Measured in two segments, and only the second one is asserted on.
+  //
+  // `TokenBucket(perMin, perMin)` means the burst allowance is a whole minute's
+  // worth, and pacing at 90% keeps it nearly full — so the first overshoot
+  // spends banked tokens rather than tripping policy, and draws no refusal for
+  // a minute and a half. A window that stops there reports a relay that is
+  // perfectly happy about a client that is about to be throttled into the
+  // floor. The bank is gone by the second segment, which is where the steady
+  // state actually shows.
+  const readLedger = () =>
+    page.evaluate(
+      (u) => {
+        const n = window.__game.net
+        return n.ledger ? (n.ledger.get ? n.ledger.get(u) : null) : null
+      },
+      bucket.url,
+    )
+  const BANK_DRAIN = 90_000
+  const HARM_WINDOW = 60_000
+  await wait(BANK_DRAIN)
+  const harmStart = { received: bucket.received, refused: (await readLedger())?.refused ?? 0 }
+  await wait(HARM_WINDOW)
+  const harmLedger = await readLedger()
+  const refusedInWindow = (harmLedger?.refused ?? 0) - harmStart.refused
+  const perMinute = refusedInWindow / (HARM_WINDOW / 60_000)
+  const rateInWindow = (bucket.received - harmStart.received) / (HARM_WINDOW / 1000)
+  console.log(
+    `\n  steady state (after ${BANK_DRAIN / 1000}s of bank drain, measured over ` +
+      `${HARM_WINDOW / 1000}s): ${rateInWindow.toFixed(1)} sent/s, ` +
+      `${refusedInWindow} refusals (${perMinute.toFixed(1)}/min)\n`,
+  )
+  check(
+    'the probe does not dirty every minute',
+    perMinute < 3,
+    `${perMinute.toFixed(1)} refusals/min — anything regular pins the score at the floor`,
+  )
+  check(
+    'and the send rate stays near the cap rather than climbing',
+    rateInWindow < 2.0,
+    `${rateInWindow.toFixed(1)}/s against a 1.0/s cap`,
+  )
+
+  // ------------------------------------------- but the probe still has to work
+  //
+  // Shorten the interval and raise the relay's cap. If the client never notices,
+  // pacing is a one-way ratchet and "quiet" is indistinguishable from "fixed by
+  // deleting the probe".
+
+  await page.evaluate(() => {
+    window.__game.net.paceProbeMs = 3000
+  })
+  bucket.setCap(1200)
+  // Let it climb, then measure the last stretch. Averaging across the ramp
+  // reports something between the old rate and the new one and understates
+  // both — the question is where it ended up, not what the mean of the
+  // journey was.
+  // Long enough for the x1.1 steps to be unambiguously past the old cap rather
+  // than a hair over it — a knife-edge threshold is its own kind of flake.
+  await wait(40_000)
+  const probeStart = bucket.received
+  await wait(10_000)
+  const probedRate = (bucket.received - probeStart) / 10
+  console.log(`  after the cap rose to 1200/min: ${probedRate.toFixed(1)} sent/s\n`)
+  check(
+    'the probe finds a relay that has forgiven us',
+    probedRate > rateInWindow * 2,
+    `${probedRate.toFixed(1)}/s, up from ${rateInWindow.toFixed(1)}/s`,
+  )
+
   // ------------------------------------------------------------- recovery
   //
   // A mute is a wait, not a life sentence. Rather than idle for a real minute,
   // expire it directly and confirm the relay is published to again — the point
   // under test is that the mute is time-bounded and reversible at all.
 
-  // Read the first mute's wait before expiring it, so the second can be
-  // compared against a real number rather than an assumed 60s.
+  // `baseSpan` was sampled long before this point, because by now the first
+  // mute has expired and re-fired at twice the wait — reading it here and
+  // calling it "the first" would be measuring the third.
   const firstSpan = (await page.evaluate(
     (u) => {
       const m = window.__game.net.muted
@@ -516,11 +625,6 @@ try {
     },
     limited.url,
   )) ?? { span: 0 }
-  check(
-    'the first mute is the base wait',
-    Math.abs(firstSpan.span - 60_000) < 1000,
-    `${(firstSpan.span / 1000).toFixed(0)}s`,
-  )
 
   const before = limited.received
   await page.evaluate(() => {
@@ -528,7 +632,9 @@ try {
     // Old builds used a Set of urls with no expiry at all; nothing to expire.
     if (muted instanceof Map) for (const m of muted.values()) m.until = Date.now() - 1
   })
-  await wait(2500)
+  // Fifteen refusals at the tick rate is about 2.3s, so a 2.5s window sat on
+  // the boundary and flaked. Give the re-mute room to actually happen.
+  await wait(6000)
   check(
     'a muted relay is retried once its wait is up',
     limited.received > before,
@@ -602,6 +708,73 @@ try {
     !rolled.skipped && rolled.back && rolled.refusedClaims >= 1,
     JSON.stringify(rolled),
   )
+  // ------------------------------------------------- when it is not the relays
+  //
+  // `malformed` from one relay is that relay being odd. `malformed` from every
+  // relay is a fact about this machine — realistically the clock, since newlay's
+  // window is 365 days behind and only fifteen minutes ahead, so a fast clock
+  // makes every event `invalid: created_at too far in the future`. Muting is
+  // wrong (there would be no relays left) and so is carrying on, which is what
+  // the client did: correctly not striking, and therefore hammering all session
+  // at -4 a go.
+  //
+  // Needs its own session, because the alarm is about *every* relay agreeing.
+
+  const alarmExpired = startRelay('expired')
+  const alarmFuture = startRelay('future')
+  const page2 = await browser.newPage()
+  await page2.goto(URL, { waitUntil: 'domcontentloaded', timeout: 30_000 })
+  await page2.$eval('#relays', (el, v) => { el.value = v }, `${alarmExpired.url}\n${alarmFuture.url}`)
+  await page2.type('#name', 'clocktest')
+  await page2.type('#room', 'clk' + Math.floor(Math.random() * 1e6))
+  await page2.click('#play-guest')
+  const started2 = await page2
+    .waitForFunction(() => !!window.__game, { timeout: 25_000 })
+    .then(() => true)
+    .catch(() => false)
+  check('a session against only invalid-rejecting relays starts', started2)
+
+  if (started2) {
+    await wait(6000)
+    const alarm = await page2.evaluate(() => window.__game.net.clockAlarm ?? null)
+    check(
+      'every relay calling the event invalid raises the alarm',
+      alarm !== null && alarm.streak >= 5,
+      alarm ? `streak ${alarm.streak}, reason ${JSON.stringify(alarm.reason)}` : 'no alarm',
+    )
+    check(
+      'and the alarm quotes the relay rather than paraphrasing',
+      !!alarm && /invalid:/.test(alarm.reason),
+      alarm ? alarm.reason : '',
+    )
+
+    // Pin the shipped interval before compressing it, so this cannot pass
+    // against a default that was quietly changed to something useless.
+    const defaultProbe = await page2.evaluate(() => window.__game.net.malformedProbeMs)
+    check('the shipped probe interval is 20s', defaultProbe === 20_000, `${defaultProbe}ms`)
+    await page2.evaluate(() => {
+      window.__game.net.malformedProbeMs = 2500
+    })
+
+    // Publishing has to actually stop. A flag nobody acts on is the same
+    // hammering with a nicer HUD.
+    const heldStart = alarmExpired.received + alarmFuture.received
+    await wait(12_000)
+    const during = alarmExpired.received + alarmFuture.received - heldStart
+    const perSec = during / 12
+    console.log(`\n  while the alarm is up: ${perSec.toFixed(2)} events/s across both relays\n`)
+    check(
+      'publishing holds while the alarm is up',
+      perSec < 1.5,
+      `${perSec.toFixed(2)}/s — was ~13/s across two relays before`,
+    )
+    check(
+      'but it does not go completely silent, so a fixed clock is noticed',
+      during > 0,
+      `${during} probe events in 12s at a 2.5s probe interval`,
+    )
+  }
+
 } catch (err) {
   check('the run completed', false, err.message)
 } finally {
