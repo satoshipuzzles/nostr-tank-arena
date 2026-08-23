@@ -58,6 +58,18 @@ import { type PlayOpts, type Sound, type SoundSink, silence } from './audio'
 const TICK_MS = 100 // 10Hz state broadcast
 /** Half-angle of a Scattershot fan, radians. Wide enough to matter up close. */
 const SCATTER_SPREAD = 0.16
+/**
+ * Claims in a row that two relays must call expired before the screen says so.
+ *
+ * Two, not five. A claim is published at most a few times a minute rather than
+ * ten times a second, so a long streak would take a whole session to reach —
+ * and the confidence here comes from the quorum inside each verdict, not from
+ * repetition. There is also no benign cause: the claim is signed and published
+ * in the same turn, so outliving a ten-minute expiration means a clock, not a
+ * slow network.
+ */
+const EXPIRED_CLAIM_STREAK = 2
+
 /** The most damage one shell may claim, however the event was written. */
 const MAX_HULL = 3
 /**
@@ -216,6 +228,7 @@ export class Game {
    * and a rollback must not undo a grab that this player genuinely made.
    */
   private minePads = new Set<string>()
+  private lastExpiredReason = ''
   /**
    * Diagnostics for the claim path. Both numbers, because either alone lies.
    *
@@ -230,6 +243,26 @@ export class Game {
   claimsReceived = 0
   /** Claims every relay refused, so the pad was put back. Non-zero is worth reading. */
   refusedClaims = 0
+  /**
+   * Consecutive claims two or more relays rejected as already expired.
+   *
+   * This is the slow half of the clock diagnosis, and it needs its own signal
+   * because `Net`'s all-malformed streak can never see it. cowboy traced why:
+   * `invalid: event expired` is the NIP-40 gate, which only fires for an event
+   * that actually carries an `expiration` tag — and in this whole game exactly
+   * one does. Every state tick, shell and death goes out with a `t` tag and
+   * nothing else, and a slow clock puts their `created_at` in the *past*, where
+   * the tolerance is 365 days rather than fifteen minutes. So the ticks land,
+   * ten a second, and each acceptance resets a streak that needs five in a row.
+   *
+   * What that costs a player is the worst failure in the system precisely
+   * because it is free: no rate limit, no behaviour penalty, no rejected
+   * ticks — the game looks perfectly normal, and every single pickup they grab
+   * comes straight back, all session, with nothing on screen to explain it.
+   */
+  private expiredClaimStreak = 0
+  /** Total accepted publishes when the last claim settled, as a liveness control. */
+  private acceptedAtLastClaim = 0
   /** Pickups currently on the board, by id. Derived, never received. */
   readonly pickups = new Map<string, Pickup>()
   /** Timed effects on our own tank. */
@@ -584,6 +617,36 @@ export class Game {
 
   /** Set when a repair lands, so the renderer can show it. */
   repairedAt = 0
+
+  /**
+   * "Our clock is behind", when the only events carrying a deadline die of it.
+   *
+   * The evidence is a fingerprint rather than a tally, and the shape of it is
+   * what makes it trustworthy: two or more relays rejected the last claims as
+   * already expired **while state ticks from this same session are being
+   * accepted**. The ticks landing are not noise to filter out, they are the
+   * control — they prove the relays are reachable, that they are reading our
+   * events, and that nothing else about this client is wrong. A relay that
+   * takes a tick and refuses a claim carrying `created_at + CLAIM_TTL` has told
+   * us one thing and only one thing.
+   *
+   * Two relays, not one, for the same reason the fast alarm needs two: one
+   * relay disagreeing about the time is the relay.
+   *
+   * The threshold is ours rather than theirs, which is why the reason carries no
+   * `window` for the fast path's regex to find. `CLAIM_TTL` is the number that
+   * had to be outlived, so it is also the number to put on the screen.
+   *
+   * Honest limit: this is a *relative* verdict. It says our clock and theirs
+   * disagree by more than `CLAIM_TTL` in that direction, which is what a player
+   * needs, but it cannot rule out two relays that are both fast. The quorum is
+   * what makes that unlikely.
+   */
+  get slowClockAlarm(): { behindBySeconds: number; reason: string } | null {
+    return this.expiredClaimStreak >= EXPIRED_CLAIM_STREAK
+      ? { behindBySeconds: CLAIM_TTL, reason: this.lastExpiredReason }
+      : null
+  }
 
   /** Hull points this round. Glass Cannon makes it 1. */
   get maxHp(): number {
@@ -1049,7 +1112,46 @@ export class Game {
    * alternative does not. What is restored is the pad — which makes this client
    * agree with the room again, and lets the grab be retried by driving over it.
    */
+  /**
+   * Total events any relay has accepted from this client, from `Net`'s ledger.
+   *
+   * The liveness control for the slow-clock signal. Read rather than counted
+   * here because the tick stream deliberately does not wait on its own
+   * publishes — a tick that lands nowhere is replaced by the next one a tenth
+   * of a second later, and awaiting ten promises a second to learn that would
+   * be bookkeeping for its own sake.
+   */
+  private get acceptedSoFar(): number {
+    let n = 0
+    for (const led of this.net.ledger.values()) n += led.accepted
+    return n
+  }
+
+  /**
+   * Update the slow-clock evidence from one claim's verdict.
+   *
+   * `outcome.malformed` is a count of relays, one verdict per target per
+   * publish, so `>= 2` is two distinct relays without needing their URLs.
+   */
+  private noteClaimVerdict(outcome: PublishOutcome): void {
+    const accepted = this.acceptedSoFar
+    const ticksLanding = accepted > this.acceptedAtLastClaim
+    this.acceptedAtLastClaim = accepted
+
+    const expired =
+      outcome.malformed >= 2 && /expired/i.test(outcome.reason ?? '') && ticksLanding
+    if (expired) {
+      this.expiredClaimStreak++
+      this.lastExpiredReason = outcome.reason ?? ''
+      return
+    }
+    // Anything else about this claim — accepted anywhere, refused on policy,
+    // or malformed for some other reason — is not evidence of a slow clock.
+    if (outcome.accepted > 0 || outcome.malformed === 0) this.expiredClaimStreak = 0
+  }
+
   private settleClaim(pickup: Pickup, outcome: PublishOutcome): void {
+    this.noteClaimVerdict(outcome)
     // `definitelyNowhere`, not `unanimouslyRefused`. The two questions came
     // apart: whether to give up on a relay is answered by policy refusals
     // alone, but whether the event exists anywhere has to count `invalid:` as

@@ -473,18 +473,36 @@ function blockClock(clock: BlockClock): string {
  */
 function drawClockAlarm(): void {
   const node = $('alarm')
-  const alarm = (running?.players ?? [])
-    .map((p) => p.game.net.clockAlarm)
-    .find((a) => a !== null)
-  if (!alarm) {
+  const players = running?.players ?? []
+  // The fast alarm first: nothing is landing at all, which is the louder of the
+  // two problems and the one that stops the match.
+  const fast = players.map((p) => p.game.net.clockAlarm).find((a) => a !== null)
+  // The slow one is the quieter failure and the more insidious. It has to be
+  // raised separately because `Net` cannot see it — a slow clock only kills the
+  // one event kind that carries a deadline, while the tick stream lands
+  // normally and resets any all-malformed streak ten times a second.
+  const slow = fast ? null : players.map((p) => p.game.slowClockAlarm).find((a) => a != null)
+
+  if (!fast && !slow) {
     node.hidden = true
     return
   }
   node.hidden = false
+  if (fast) {
+    node.innerHTML =
+      `<b>THIS MACHINE'S CLOCK IS WRONG</b>` +
+      `<span>${clockAdvice(fast.reason)}</span>` +
+      `<code>${escapeHtml(fast.reason)}</code>`
+    return
+  }
+  const minutes = Math.round(slow!.behindBySeconds / 60)
   node.innerHTML =
-    `<b>THIS MACHINE'S CLOCK IS WRONG</b>` +
-    `<span>${clockAdvice(alarm.reason)}</span>` +
-    `<code>${escapeHtml(alarm.reason)}</code>`
+    `<b>THIS MACHINE'S CLOCK IS BEHIND</b>` +
+    `<span>By more than ${minutes} minutes, going by the relays. The game plays fine, ` +
+    `but <b>every pickup you take comes straight back</b> — the relays drop the claim as ` +
+    `already expired before anyone else hears it. Set the clock, or turn on automatic ` +
+    `time, and this will clear itself.</span>` +
+    `<code>${escapeHtml(slow!.reason)}</code>`
 }
 
 /**

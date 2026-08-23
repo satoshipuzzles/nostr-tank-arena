@@ -687,6 +687,48 @@ too far in the future (window 900000 ms)` is a sentence somebody can act on;
 "network error" is not, and inventing a friendlier version would throw away the
 only part with a number in it.
 
+### The clock that is merely behind
+
+There are two clock failures and only one of them is loud.
+
+A **fast** clock is rejected by `created_at_msecs_ahead`, fifteen minutes, and
+nothing lands at all — the all-malformed streak above sees it immediately.
+
+A **slow** clock is nearly invisible, and it is invisible *because it is free*.
+The past tolerance is `created_at_msecs_ago`, **365 days**, so every tick, shell
+and death is accepted normally. `invalid: event expired` is the NIP-40 gate, and
+it only fires for an event that carries an `expiration` tag — in this whole game
+exactly one does. So the ticks land ten a second, each acceptance resets a streak
+that needs five in a row, and the all-malformed alarm can never reach it.
+
+What the player gets is a game that looks perfectly normal in which **every
+pickup they take comes straight back**, all session. Not once — every single one,
+because the claim dies at the relay and the rollback correctly restores the pad.
+No rate limit, no behaviour penalty, no symptom anywhere on screen.
+
+So it has its own signal, and the shape of the evidence is what makes it
+trustworthy:
+
+> two or more relays rejected the last claims as already expired, **while state
+> ticks from this same session are being accepted**
+
+The ticks landing are not noise to filter out, they are the *control*. They prove
+the relays are reachable, that they are reading our events, and that nothing else
+about this client is wrong. A relay that takes a tick and refuses a claim
+carrying `created_at + CLAIM_TTL` has told us one thing and only one thing.
+
+Two relays, never one — a relay disagreeing about the time is the relay, and the
+filter bias that let a single relay accuse the clock applies here too, since a
+relay that only ever answers `invalid:` is exactly the one muting can never
+remove. And the number on the screen is **ours**: `event expired` carries no
+`window` because the deadline was ours to choose, so `CLAIM_TTL` is both what had
+to be outlived and what to put in front of the player.
+
+It is an honest *relative* verdict. It says our clock and theirs disagree by more
+than ten minutes in that direction, which is what somebody needs in order to go
+and fix it, but it cannot rule out two relays that are both fast. The quorum is
+what makes that unlikely.
+
 Above the quote, the screen says which *way* the clock is wrong, because that is
 the first thing somebody needs and the relay always says it: `too far in the
 future` is a fast clock, `event expired` is a slow one — a NIP-40 expiration

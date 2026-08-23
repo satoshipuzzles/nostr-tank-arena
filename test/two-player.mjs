@@ -669,9 +669,129 @@ try {
     !!noneSent && noneSent.back && noneSent.refusedClaims > beforeMuted,
     `${JSON.stringify(noneSent)} was ${beforeMuted}`)
 
+  // ------------------------------------------- the clock that is merely behind
+  //
+  // The quietest failure in the whole system, and it is quiet *because* it is
+  // free. `invalid: event expired` is the NIP-40 gate, so it only fires for an
+  // event carrying an `expiration` tag — and exactly one kind here does. A slow
+  // clock puts every tick's `created_at` in the past, where the tolerance is 365
+  // days rather than fifteen minutes, so the ticks land, ten a second, and each
+  // acceptance resets a streak that needs five in a row. `Net`'s alarm can never
+  // reach it.
+  //
+  // What the player gets is a game that looks perfectly normal in which every
+  // pickup they take comes straight back, all session, with nothing on screen.
+  const expiredOutcome = {
+    sent: 4, accepted: 0, refused: 0, malformed: 4, unclear: 0,
+    unanimouslyRefused: false, definitelyNowhere: true,
+    reason: 'invalid: event expired',
+  }
+  await forceOutcome(expiredOutcome)
+  await grabAnother()
+  await wait(1600)
+  const afterOne = await a.evaluate(() => window.__game.slowClockAlarm)
+  // One is not a pattern. A single expired claim has too many benign readings.
+  check('one expired claim is not enough to accuse the clock', afterOne === null,
+    JSON.stringify(afterOne))
+
+  await grabAnother()
+  await wait(1600)
+  const afterTwo = await a.evaluate(() => window.__game.slowClockAlarm)
+  check('two relays calling two claims expired, while ticks land, does it',
+    afterTwo !== null && afterTwo.behindBySeconds === 600, JSON.stringify(afterTwo))
+
+  const behind = await a.evaluate(() => {
+    const n = document.getElementById('alarm')
+    return { display: getComputedStyle(n).display, text: n.textContent.replace(/\s+/g, ' ').trim() }
+  })
+  check('the screen says behind, by our own number, and what it costs',
+    behind.display !== 'none' &&
+      /BEHIND/.test(behind.text) &&
+      /10 minutes/.test(behind.text) &&
+      /pickup you take comes straight back/.test(behind.text),
+    behind.text.slice(0, 170))
+
+  // The control, and the reason this signal is trustworthy at all: the ticks
+  // landing prove the relays are reachable and reading our events. Take that
+  // away and the same claim verdicts mean "something is broken", which is a
+  // different diagnosis and not one to put on a player's screen.
+  //
+  // Driven through `noteClaimVerdict` with the accepted-count pinned, because
+  // the real tick stream is landing throughout this suite — setting the
+  // watermark once only suppresses the next claim, and the one after it sees
+  // the counter moving again.
+  const noControl = await a.evaluate(() => {
+    const g = window.__game
+    const proto = Object.getPrototypeOf(g)
+    const real = Object.getOwnPropertyDescriptor(proto, 'acceptedSoFar')
+    Object.defineProperty(proto, 'acceptedSoFar', { configurable: true, get: () => 0 })
+    g.expiredClaimStreak = 0
+    g.acceptedAtLastClaim = 0
+    const expired = {
+      sent: 4, accepted: 0, refused: 0, malformed: 4, unclear: 0,
+      unanimouslyRefused: false, definitelyNowhere: true,
+      reason: 'invalid: event expired',
+    }
+    for (let i = 0; i < 5; i++) g.noteClaimVerdict(expired)
+    const after = g.slowClockAlarm
+    if (real) Object.defineProperty(proto, 'acceptedSoFar', real)
+    g.expiredClaimStreak = 0
+    return after
+  })
+  check('expired claims with nothing else landing do NOT accuse the clock',
+    noControl === null, JSON.stringify(noControl))
+  await wait(400)
+  const cleared2 = await a.evaluate(() => window.__game.slowClockAlarm)
+  check('and it clears once the streak is broken', cleared2 === null, JSON.stringify(cleared2))
+
+  // And an accepted claim ends it, because the evidence is consecutive.
+  await a.evaluate(() => {
+    window.__game.acceptedAtLastClaim = 0
+  })
+  await forceOutcome(expiredOutcome)
+  await grabAnother()
+  await wait(1600)
+  await grabAnother()
+  await wait(1600)
+  const raised = await a.evaluate(() => window.__game.slowClockAlarm !== null)
+  await forceOutcome({
+    sent: 4, accepted: 4, refused: 0, malformed: 0, unclear: 0,
+    unanimouslyRefused: false, definitelyNowhere: false, reason: null,
+  })
+  await grabAnother()
+  await wait(1600)
+  const afterGood = await a.evaluate(() => window.__game.slowClockAlarm)
+  check('and one accepted claim ends it', raised && afterGood === null,
+    `raised ${raised}, then ${JSON.stringify(afterGood)}`)
+
+
+  // One relay saying it must never be enough, and this goes last because it
+  // rewrites the streak state the checks above depend on. A relay disagreeing
+  // about the time is the relay — and the same filter bias that let one relay
+  // accuse the clock on the fast path applies here, since a relay that only ever
+  // answers `invalid:` is exactly the one muting can never remove.
+  const single = await a.evaluate(() => {
+    const g = window.__game
+    g.expiredClaimStreak = 0
+    g.acceptedAtLastClaim = 0
+    const solo = {
+      sent: 1, accepted: 0, refused: 0, malformed: 1, unclear: 0,
+      unanimouslyRefused: false, definitelyNowhere: true,
+      reason: 'invalid: event expired',
+    }
+    for (let i = 0; i < 4; i++) g.noteClaimVerdict(solo)
+    const after = g.slowClockAlarm
+    g.expiredClaimStreak = 0
+    return after
+  })
+  check('one relay calling four claims expired never accuses the clock',
+    single === null, JSON.stringify(single))
+
   await a.evaluate(() => {
     window.__game.net.publish = window.__realPublish
+    window.__game.expiredClaimStreak = 0
   })
+  await wait(400)
 
   // ------------------------------------------------------- backfill, for real
   //
