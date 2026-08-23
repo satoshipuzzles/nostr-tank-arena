@@ -1223,6 +1223,30 @@ So five consecutive publishes that every asked relay calls invalid raise
 `net.clockAlarm`, publishing holds, and the relay's own words go on the screen.
 It is the only failure in this game a player can go and fix.
 
+### The fourth relay was not a relay
+
+`wss://relay.fountain.fm` shipped in `DEFAULT_RELAYS` and has been removed.
+Measured with two sockets — one subscribed to the room *before* anything was
+published, one publishing — because an `OK` is only worth what a separate
+subscriber can see:
+
+```
+relay.primal.net    kind 21000   OK true    delivered true
+purplerelay.com     kind 21000   OK true    delivered true
+relay.mostr.pub     kind 21000   OK true    delivered true
+relay.fountain.fm   kind 21000   OK true    delivered FALSE
+```
+
+Asked to read rather than write, it answers
+`["CLOSED", id, "kinds not supported"]` for 21000, 21001, 21003 and 30078 —
+every kind this game uses — while serving 0, 3, 30023 and 30311. It is a podcast
+relay. It took a quarter of the traffic and printed a receipt.
+
+That cost more than bandwidth. **An `OK true` from a relay that never parsed the
+event is not weak evidence of a healthy clock, it is no evidence at all** — and
+it was enough to acquit three relays that had read the timestamp and named the
+same fault.
+
 ### What the shipped relays actually do, measured
 
 Three of the four run **strfry**, not newlay, and one runs something that
@@ -1277,6 +1301,23 @@ says nothing for the entire session.
 So the denominator is relays that voted on the clock — acceptances, malformed
 verdicts, and refusals from below the gate — and an acquittal needs one of the
 same. A relay that told us to slow down has not vouched for us.
+
+**Only a witness can recant.** An acquittal has to come from a relay that could
+have convicted, and that rule was enforced on the raising side and not the
+clearing one. It mattered because of the probe: while the alarm is up exactly
+one relay is asked per cycle, and a relay that never refuses never mutes, so it
+never leaves the rotation. Its turn came round, its acceptance zeroed the
+streak, publishing resumed at ten a second into relays refusing every event, and
+the quorum raised the alarm again half a second later.
+
+```
+alarm sampled 86x over 22s with a 1.2s probe cycle:  9 blinks   before
+alarm sampled 88x over 22s with a 1.2s probe cycle:  0 blinks   after
+```
+
+An acceptance now clears the alarm only if it came from a relay that named the
+fault itself. Refusals from below the timestamp gate still clear it, because
+those are relays that read the clock and passed it.
 
 **Quorum, not unanimity, and the difference is the whole production case.** Two
 relays independently naming the same direction raise the alarm even if another
@@ -1340,6 +1381,23 @@ after                                                            0.00 + probes
 
 Silence does not clear the alarm, only an acceptance or an ordinary refusal
 does: an unreachable relay is no evidence that the clock came right.
+
+### A relay that hangs up is not a quiet relay
+
+`subscribe()` opens one subscription per relay rather than one across all of
+them. `subscribeMany` takes a single `onclose` and only fires it once *every*
+relay has closed, which is the case that needs no reporting; the case that does
+is one relay dropping out of a set that is otherwise fine.
+
+That is not hypothetical and it does not need a broken clock: a relay can answer
+`CLOSED ... kinds not supported` for every kind this game uses while returning
+`OK true` to publishes of the same kinds. Discarding that frame makes the relay
+permanently silent and indistinguishable from a quiet one, while the publish
+path goes on counting it live. `net.deafRelays` reports them in their own words.
+
+One subscription each costs nothing on the wire — the pool still dedupes
+connections by URL — and duplicate deliveries were already handled, because
+relays echo and `Game.onEvent` keys on event id.
 
 ## Tuning
 

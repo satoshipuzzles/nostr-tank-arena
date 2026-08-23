@@ -51,10 +51,32 @@ import {
  * relay.nostr.net's limit works out to exactly one per second. A relay you run
  * yourself has no cap you did not set, which is why the README recommends one.
  */
+/**
+ * Three relays, and it used to be four.
+ *
+ * `wss://relay.fountain.fm` was in this list and is not a relay for this game.
+ * Measured with two sockets — one subscribed to the room before anything was
+ * published, one publishing — because an `OK` is only worth what a separate
+ * subscriber can see:
+ *
+ *   relay.primal.net    kind 21000   OK true    delivered true
+ *   purplerelay.com     kind 21000   OK true    delivered true
+ *   relay.mostr.pub     kind 21000   OK true    delivered true
+ *   relay.fountain.fm   kind 21000   OK true    delivered FALSE
+ *
+ * And asked to read rather than write, it answers
+ * `["CLOSED", id, "kinds not supported"]` for 21000, 21001, 21003 and 30078 —
+ * every kind this game uses — while serving 0, 3, 30023 and 30311 happily. It
+ * is a podcast relay. It took a quarter of the traffic and printed a receipt.
+ *
+ * Worth stating what that receipt cost beyond bandwidth: an `OK true` from a
+ * relay that never parsed the event is not weak evidence of a healthy clock,
+ * it is no evidence at all, and it was enough to acquit three relays that had
+ * read the timestamp and named the same fault.
+ */
 export const DEFAULT_RELAYS = [
   'wss://relay.primal.net',
   'wss://purplerelay.com',
-  'wss://relay.fountain.fm',
   'wss://relay.mostr.pub',
 ]
 
@@ -504,6 +526,8 @@ export interface RelayLedger {
   unknown: number
   /** Lowest events/min this relay has reported, or 0 if it never gave a number. */
   lowestLimit: number
+  /** Set when the relay closed our subscription, in its own words. */
+  subscriptionClosed: string | null
   /** Events/min we are pacing ourselves to right now, or 0 when unpaced. */
   pacedTo: number
   /** Times this relay has been muted, so a flapping relay is distinguishable. */
@@ -544,6 +568,8 @@ export class Net {
   private muted = new Map<string, { until: number; span: number }>()
   /** How long the next mute lasts, per relay. Outlives the prune in `publish`. */
   private muteSpan = new Map<string, number>()
+  /** Relays that closed our subscription rather than serving it. */
+  private closedSubs = new Map<string, string>()
   /** Relays that told us their number, and what we are doing about it. */
   private pace = new Map<string, RelayPace>()
   /** Consecutive publishes that every asked relay called malformed. */
@@ -552,6 +578,22 @@ export class Net {
   /** The direction a quorum last agreed on, and a reason two of them gave. */
   private clockDirection: ClockDirection | null = null
   private clockAgreed = 0
+  /**
+   * The relays that formed the accusation, and the only ones allowed to undo it.
+   *
+   * An acquittal has to come from a relay that could have convicted. That is
+   * the general form of why a relay with no timestamp gate cannot outvote three
+   * that have one — and it was still unenforced on the clearing side, where any
+   * acceptance from any relay zeroed the streak.
+   *
+   * It mattered because of the round-robin probe: while the alarm is up exactly
+   * one relay is asked per cycle, and a relay that never refuses never mutes, so
+   * it never leaves the rotation. Every Nth cycle its acceptance cleared the
+   * alarm, publishing resumed at ten a second into relays refusing every event,
+   * and the quorum raised it again half a second later. The probe answered "has
+   * the clock been fixed?" with "yes" one time in N regardless of the clock.
+   */
+  private clockWitnesses = new Set<string>()
   private lastMalformedProbeAt = 0
   /**
    * How many all-relay rejections before we stop and blame the machine.
@@ -648,8 +690,41 @@ export class Net {
     this.relays = relays
   }
 
+  /**
+   * Subscribe, one subscription per relay, so a relay that hangs up is visible.
+   *
+   * `subscribeMany` takes a single `onclose` and only calls it once *every*
+   * relay has closed, which is exactly the case that does not need reporting.
+   * The case that does is one relay quietly dropping out of a set that is
+   * otherwise fine — and it happens on a correct clock, today: a relay can
+   * answer `["CLOSED", id, "kinds not supported"]` for every kind this game
+   * uses while still returning `OK true` to publishes of those same kinds.
+   * Read refused, write accepted, nothing stored.
+   *
+   * Discarding that frame makes such a relay permanently silent and
+   * indistinguishable from a quiet one, while the publish path goes on counting
+   * it as live. One subscription each costs nothing extra on the wire — the
+   * pool still dedupes connections by URL — and duplicate deliveries were
+   * already handled, because relays echo and `Game.onEvent` keys on event id.
+   */
   subscribe(filter: Filter, onevent: (e: Event) => void): void {
-    this.closers.push(this.pool.subscribeMany(this.relays, filter, { onevent }))
+    for (const url of this.relays) {
+      this.closers.push(
+        this.pool.subscribeMany([url], filter, {
+          onevent,
+          onclose: (reasons: { url: string; reason: string }[]) => {
+            const reason = reasons?.[0]?.reason ?? 'closed without a reason'
+            this.closedSubs.set(url, reason)
+            this.entry(url).subscriptionClosed = reason
+          },
+        }),
+      )
+    }
+  }
+
+  /** Relays that hung up on our subscription, in their own words. */
+  get deafRelays(): { url: string; reason: string }[] {
+    return [...this.closedSubs].map(([url, reason]) => ({ url, reason }))
   }
 
   /** One-shot query across all relays. Used for the leaderboard, never in the loop. */
@@ -733,12 +808,12 @@ export class Net {
     this.published += results.length
     // Refusals split by which side of the created_at gate they came from. One
     // prefix out of eight means the opposite of the other seven.
-    let aboveClockGate = 0
     let belowClockGate = 0
     // Distinct relays naming the timestamp, by direction. A URL can only vote
     // once per publish, so a relay answering twice cannot form its own quorum.
     const saidBehind = new Map<string, string>()
     const saidAhead = new Map<string, string>()
+    const acceptedBy = new Set<string>()
     const settled = results.map((p, i) => {
       const url = targets[i]
       return p.then(
@@ -746,6 +821,7 @@ export class Net {
           this.strikes.set(url, 0)
           this.entry(url).accepted++
           outcome.accepted++
+          acceptedBy.add(url)
           const known = this.trouble.get(url)
           // One clean publish is not proof the relay is happy, but a run of
           // them is: let an old complaint age out rather than sticking forever.
@@ -760,6 +836,7 @@ export class Net {
             this.strikes.set(url, 0)
             this.entry(url).accepted++
             outcome.accepted++
+            acceptedBy.add(url)
             return
           }
           if (kind === 'refused') {
@@ -771,8 +848,13 @@ export class Net {
             // below that line: `blocked:`, `restricted:`, `auth-required:` and
             // `pow:` all mean created_at was examined and passed, which makes
             // them *stronger* evidence the clock is fine than an acceptance is.
-            if (reason.trim().toLowerCase().startsWith('rate-limited:')) aboveClockGate++
-            else belowClockGate++
+            // Only refusals from below the created_at gate count as evidence
+            // the timestamp was read. `rate-limited:` is the one prefix emitted
+            // above it — and the count of those used to be kept alongside, but
+            // the positive rule subsumed it: a rate limit is neither a clock
+            // verdict nor an acquittal, which is the same behaviour reached by
+            // better means. Removed rather than left for somebody to build on.
+            if (!reason.trim().toLowerCase().startsWith('rate-limited:')) belowClockGate++
             outcome.reason = reason
           } else if (kind === 'malformed') {
             outcome.malformed++
@@ -879,6 +961,9 @@ export class Net {
       // same direction is strong. So the quorum wins.
       const behind = saidBehind.size
       const ahead = saidAhead.size
+      // Only a witness can recant: an acceptance clears the alarm only if it
+      // came from a relay that had named the fault itself.
+      const recanted = [...acceptedBy].some((url) => this.clockWitnesses.has(url))
       const winner: ClockDirection | null =
         behind >= 2 && behind >= ahead ? 'behind' : ahead >= 2 ? 'ahead' : null
       const enoughVisible = outcome.sent * 2 >= this.relays.length
@@ -896,7 +981,13 @@ export class Net {
         for (const r of votes.values()) tally.set(r, (tally.get(r) ?? 0) + 1)
         const shared = [...tally.entries()].sort((a, b) => b[1] - a[1])[0]
         this.lastMalformedReason = shared[0]
-      } else if (behind + ahead === 0 && (outcome.accepted > 0 || belowClockGate > 0)) {
+        for (const url of votes.keys()) this.clockWitnesses.add(url)
+      } else if (
+        behind + ahead === 0 &&
+        (this.clockWitnesses.size === 0
+          ? outcome.accepted > 0 || belowClockGate > 0
+          : recanted || belowClockGate > 0)
+      ) {
         // Cleared only when nobody named the timestamp on this publish *and*
         // somebody gave us evidence of any kind. A relay that told us to slow
         // down has not vouched for us, and silence never did.
@@ -905,6 +996,7 @@ export class Net {
         this.allMalformedStreak = 0
         this.clockDirection = null
         this.clockAgreed = 0
+        this.clockWitnesses.clear()
       }
       return outcome
     })
@@ -985,7 +1077,8 @@ export class Net {
     if (!led) {
       led = {
         url, accepted: 0, refused: 0, noVerdict: 0, malformed: 0, unknown: 0,
-        lowestLimit: 0, pacedTo: 0, mutes: 0, lastReason: '', lastAt: 0,
+        lowestLimit: 0, pacedTo: 0, subscriptionClosed: null,
+        mutes: 0, lastReason: '', lastAt: 0,
       }
       this.ledger.set(url, led)
     }

@@ -155,9 +155,9 @@ function startBucketRelay(perMin) {
   return state
 }
 
-function startRelay(behaviour) {
+function startRelay(behaviour, opts = {}) {
   const wss = new WebSocketServer({ port: 0 })
-  const state = { behaviour, received: 0, accepted: 0, connections: 0 }
+  const state = { behaviour, received: 0, accepted: 0, connections: 0, closeSubs: !!opts.closeSubs }
   wss.on('connection', (ws) => {
     state.connections++
     ws.on('message', (raw) => {
@@ -168,7 +168,11 @@ function startRelay(behaviour) {
         return
       }
       if (msg[0] === 'REQ') {
-        ws.send(JSON.stringify(['EOSE', msg[1]]))
+        // A relay can refuse to read the kinds it happily accepts writes for.
+        // relay.fountain.fm answers exactly this for 21000, 21001, 21003 and
+        // 30078 while returning `OK true` when you publish them.
+        if (state.closeSubs) ws.send(JSON.stringify(['CLOSED', msg[1], 'kinds not supported']))
+        else ws.send(JSON.stringify(['EOSE', msg[1]]))
         return
       }
       if (msg[0] === 'EVENT') {
@@ -988,6 +992,72 @@ try {
       `${st?.agreed ?? 0} agreed of 3 rejecting`,
     )
     await mixedPage.close()
+  }
+
+  // --- only a witness can recant ---------------------------------------------
+  //
+  // While the alarm is up exactly one relay is probed per cycle, and a relay
+  // that never refuses never mutes, so it never leaves the rotation. Under a
+  // rule where any acceptance clears the streak, its turn came round and the
+  // alarm blinked off — publishing resumed at ten a second into relays refusing
+  // every event, and the quorum raised it again half a second later.
+  const witBad = [startRelay('strfryBehind'), startRelay('strfryBehind'), startRelay('strfryBehind')]
+  const witYes = startRelay('good', { closeSubs: true })
+  const witPage = await openAgainst([...witBad.map((r) => r.url), witYes.url], 'witness')
+  check('a session with three accusers and one blind acceptor starts', witPage !== null)
+
+  if (witPage) {
+    await wait(7000)
+    const up = await witPage.evaluate(() => window.__game.net.clockAlarm ?? null)
+    check('the alarm raises against three accusers', up !== null, up ? up.direction : 'no alarm')
+
+    // Compress the cycle so the acceptor's turn comes round several times
+    // inside the window — a twenty-second window cannot contain a sixty-second
+    // rotation, and would report a steady alarm about a blink it never reached.
+    await witPage.evaluate(() => {
+      window.__game.net.malformedProbeMs = 1200
+    })
+    let blinks = 0
+    let samples = 0
+    const until = Date.now() + 22_000
+    while (Date.now() < until) {
+      const a = await witPage.evaluate(() => window.__game.net.clockAlarm ?? null)
+      samples++
+      if (a === null) blinks++
+      await wait(250)
+    }
+    console.log(`\n  alarm sampled ${samples}x over 22s with a 1.2s probe cycle: ${blinks} blinks\n`)
+    check(
+      'a relay that never accused cannot clear the alarm',
+      blinks === 0,
+      `${blinks} of ${samples} samples had no alarm — each one resumes publishing into relays refusing everything`,
+    )
+
+    // But a witness recanting must still work, or the alarm could never clear.
+    for (const r of witBad) r.behaviour = 'good'
+    await wait(9000)
+    const cleared = await witPage.evaluate(() => window.__game.net.clockAlarm ?? null)
+    check(
+      'and a relay that did accuse can still clear it',
+      cleared === null,
+      cleared ? `still up: ${cleared.reason}` : 'cleared',
+    )
+
+    // The blind acceptor closed every subscription it was given. That has to be
+    // visible: a relay that hung up is permanently silent and looks identical
+    // to a quiet one, while the publish path goes on counting it live.
+    const deaf = await witPage.evaluate(() => window.__game.net.deafRelays ?? [])
+    check(
+      'a relay that closed our subscription is reported',
+      deaf.some((d) => d.url === witYes.url && /kinds not supported/.test(d.reason)),
+      JSON.stringify(deaf),
+    )
+    check(
+      'and the relays that served it are not',
+      !deaf.some((d) => witBad.some((r) => r.url === d.url)),
+      `${deaf.length} deaf of 4`,
+    )
+    await witPage.close()
   }
 
   // --- the genuine case ------------------------------------------------------
