@@ -217,6 +217,35 @@ $('play-guest').addEventListener('click', () => {
   void begin(async () => Identity.guest())
 })
 
+
+/**
+ * Kills and deaths, as two facts rather than as a fraction.
+ *
+ * `3 / 1` is a ratio, and it is read as one — which is wrong, because a round
+ * where you killed three and died once is not "three over one", it is two
+ * separate numbers that happen to sit next to each other. A crosshair and a
+ * skull say which is which at a glance and stop the slash doing work it was
+ * never doing.
+ *
+ * The icons are inline SVG in `currentColor` on purpose: no request, no font,
+ * and they inherit the colour of the row they sit in, so the winner's line and
+ * a dimmed line do not need two copies.
+ */
+const ICONS = {
+  // Drawn for twelve pixels, not for a style guide. The first version was a
+  // fine crosshair — a thin ring with four ticks — and at the size it is
+  // actually rendered it read as a smudge. Fewer, fatter, filled shapes.
+  kills:
+    '<svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.6" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="8" cy="8" r="1.9" fill="currentColor"/></svg>',
+  deaths:
+    '<svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.2c-3.2 0-5.6 2.3-5.6 5.3 0 1.8.9 3.1 1.9 3.9v1.6c0 1 .8 1.8 1.8 1.8h3.8c1 0 1.8-.8 1.8-1.8v-1.6c1-.8 1.9-2.1 1.9-3.9 0-3-2.4-5.3-5.6-5.3z" fill="currentColor"/><circle cx="5.8" cy="6.6" r="1.6" fill="#0b0f18"/><circle cx="10.2" cy="6.6" r="1.6" fill="#0b0f18"/><path d="M7.2 10.4h1.6v3h-1.6z" fill="#0b0f18"/></svg>',
+}
+
+/** One row's kills and deaths, iconised. `extra` is appended verbatim. */
+const kd = (kills: number, deaths: number, extra = ''): string =>
+  `<span class="kd"><span class="stat kills" title="kills">${ICONS.kills}${kills}</span>` +
+  `<span class="stat deaths" title="deaths">${ICONS.deaths}${deaths}</span>${extra}</span>`
+
 /** One human. Two of these is the whole of local two-player. */
 interface Player {
   game: Game
@@ -520,7 +549,7 @@ function drawHud(game: Game): void {
            <span class="who">${avatar(profile, r.name, r.color)}
            <span class="ident"><span class="name" style="color:hsl(${r.color} 70% 70%)">${escapeHtml(r.name)}</span>
            ${badge || (real ? `<span class="nip05">${escapeHtml(real)}</span>` : '')}</span></span>
-           <span class="kd">${r.kills} / ${r.deaths}</span>
+           ${kd(r.kills, r.deaths)}
          </div>`
     })
     .join('')
@@ -790,7 +819,7 @@ function drawSecondPlayer(p2: Player | null, now: number): void {
   node.innerHTML =
     `<div class="p2-row"><b style="color:hsl(${hue} 75% 68%)">P2</b>` +
     `<span class="pips">${hull}</span>` +
-    `<span class="kd">${g.kills} / ${g.deaths}</span></div>` +
+    `${kd(g.kills, g.deaths)}</div>` +
     (timers ? `<div class="p2-row">${timers}</div>` : '')
 }
 
@@ -847,7 +876,7 @@ function showPodium(result: import('./game').RoundResult): void {
                ${avatar(r.pubkey ? (running?.profiles.get(r.pubkey) ?? null) : null, r.name, r.color, 26)}
                <span class="ident"><span class="name">${escapeHtml(r.name)}</span>
                ${nip05Badge(r.pubkey ? (running?.profiles.get(r.pubkey) ?? null) : null)}</span></span>
-               <span class="kd">${r.kills} / ${r.deaths}</span>
+               ${kd(r.kills, r.deaths)}
              </div>`,
         )
         .join('')
@@ -1014,7 +1043,7 @@ function renderWall({ blocks, truncated }: BlockWall): string {
       `<div class="blocktile"><div class="bt-height">#${b.height}</div>` +
         `<div class="bt-face">${avatar(profile, profile?.name ?? b.winner.npub.slice(4), hue, 40)}</div>` +
         `<div class="bt-name">${escapeHtml(profile?.name ?? shortNpub(b.winner.pubkey))}</div>` +
-        `<div class="bt-kd">${b.winner.kills} kills</div>` +
+        `<div class="bt-kd">${ICONS.kills}${b.winner.kills}</div>` +
         `<div class="bt-fine">${b.players} player${b.players === 1 ? '' : 's'}</div></div>`,
     )
   }
@@ -1059,9 +1088,11 @@ function paintBoard(): void {
               ${avatar(profile, profile?.name ?? s.npub.slice(4), hue, 26)}
               <span class="ident"><span class="name">${escapeHtml(profile?.name ?? shortNpub(s.pubkey))}</span>
               ${badge}</span></span>
-              <span class="kd">${s.kills} / ${s.deaths}${
-                scope === 'all' && s.block ? ` <span class="npub">#${s.block}</span>` : ''
-              }</span></div>`
+              ${kd(
+                s.kills,
+                s.deaths,
+                scope === 'all' && s.block ? `<span class="npub">#${s.block}</span>` : '',
+              )}</div>`
         })
         .join('')
     : scope === 'block'

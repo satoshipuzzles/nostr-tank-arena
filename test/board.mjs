@@ -252,7 +252,10 @@ try {
       kind: n.className,
       height: n.querySelector('.bt-height')?.textContent ?? null,
       name: n.querySelector('.bt-name')?.textContent ?? null,
-      kd: n.querySelector('.bt-kd')?.textContent ?? null,
+      // The kill count is an icon plus a number now, so the SVG's empty text
+      // node comes along with it. Trimmed and compared whole rather than by
+      // substring: `'3'` must not match a tile showing 13.
+      kd: n.querySelector('.bt-kd')?.textContent?.trim() ?? null,
       players: n.querySelector('.bt-fine')?.textContent ?? null,
       season: n.querySelector('.season-name')?.textContent ?? null,
     })))
@@ -271,18 +274,18 @@ try {
   const one = tileFor(BLOCKS.first)
   check(
     'the block goes to the most kills, not to whoever published first',
-    one?.kd === '5 kills' && one?.name === short(brick.pk),
+    one?.kd === '5' && one?.name === short(brick.pk),
     `${JSON.stringify(one)} — expected brick ${short(brick.pk)}`,
   )
   check('and it counts everybody who published for it', one?.players === '3 players', String(one?.players))
 
   const two = tileFor(BLOCKS.second)
   // The kill count cannot carry this one: both candidates claimed three, so
-  // `kd === '3 kills'` is true whichever of them the tile picked. Only the name
+  // the number on the tile is the same whichever the tile picked. Only the name
   // distinguishes the tiebreak from a coin flip.
   check(
     'a tie on kills goes to whoever died less',
-    two?.kd === '3 kills' && two?.name === short(ace.pk),
+    two?.kd === '3' && two?.name === short(ace.pk),
     `${JSON.stringify(two)} — ace 3/1 (${short(ace.pk)}) vs cinder 3/5 (${short(cinder.pk)})`,
   )
   // Brick signed that height twice. An addressable event coming back in two

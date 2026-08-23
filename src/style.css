@@ -751,3 +751,31 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
   .blocktile { width: 104px; padding: 10px 6px 8px; }
   .tabs button { padding: 8px 10px; font-size: 12px; }
 }
+
+/* ------------------------------------------------------------- stat icons */
+
+/*
+ * A crosshair and a skull instead of `3 / 1`.
+ *
+ * The slash was being read as a ratio, which it never was: two kills and one
+ * death is two facts, not a fraction. `currentColor` and `1em` mean the icons
+ * inherit whatever the row they sit in is doing — the winner's amber, a dimmed
+ * line's grey — so there is one copy of each rather than one per state.
+ */
+.ico {
+  /* Slightly larger than the text it sits beside: a glyph-sized icon reads as
+     smaller than the digits next to it, because digits fill their box and a
+     round icon does not. */
+  width: 1.2em;
+  height: 1.2em;
+  vertical-align: -0.22em;
+  margin-right: 3px;
+  opacity: 0.8;
+}
+.kd { display: inline-flex; gap: 10px; align-items: center; }
+.stat { display: inline-flex; align-items: center; font-variant-numeric: tabular-nums; }
+/* Deaths are the number nobody is trying to raise. Say so quietly. */
+.stat.deaths { color: var(--dim); }
+.score-row.win .stat.deaths, .score-row.you .stat.deaths { color: inherit; opacity: 0.7; }
+.bt-kd { display: flex; align-items: center; }
+.bt-kd .ico { opacity: 0.9; }
