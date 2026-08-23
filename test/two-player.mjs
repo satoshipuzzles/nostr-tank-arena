@@ -1110,6 +1110,9 @@ try {
   // a relay's behaviour scaling never touches — rate limits move underneath you
   // as your standing changes and the tolerance does not, so the one number this
   // screen is built on is the one number that cannot be stale.
+  // Polled for the expected direction rather than sampled once. The HUD repaints
+  // on a throttle, and the read-path warning outranks the clock one — so a
+  // single read 400ms later is a guess about two timers at once.
   const alarmText = async (direction, reason, agreed = 3) =>
     a.evaluate(async ([d, r, n]) => {
       const net = window.__game.net
@@ -1117,12 +1120,24 @@ try {
         configurable: true,
         get: () => ({ reason: r, streak: 5, direction: d, agreed: n }),
       })
-      await new Promise((res) => setTimeout(res, 400))
       const el = document.getElementById('alarm')
-      return {
-        display: getComputedStyle(el).display,
-        text: el.textContent.replace(/\s+/g, ' ').trim(),
+      let seen = null
+      for (let i = 0; i < 12; i++) {
+        // Keep the ear alive: the read-path warning is deliberately louder than
+        // this one, and it would otherwise win whenever inbound went quiet.
+        window.__game.lastInboundAt = performance.now()
+        await new Promise((res) => setTimeout(res, 250))
+        seen = {
+          display: getComputedStyle(el).display,
+          text: el.textContent.replace(/\s+/g, ' ').trim(),
+        }
+        // Match on the *reason*, not the direction: the panel quotes it verbatim,
+        // and two consecutive cases can share a direction — so breaking on the
+        // direction alone can return the previous case's text, complete with the
+        // number that case had and this one does not.
+        if (seen.text.includes(r)) break
       }
+      return seen
     }, [direction, reason, agreed])
 
   const fast = await alarmText('ahead', 'invalid: created_at too far in the future (window 900000 ms)')
