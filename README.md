@@ -217,12 +217,21 @@ tick stream — and counts the `OK` frames:
 
 ```
 relay.primal.net          400/400 accepted
-nostr.mom                 400/400
 purplerelay.com           400/400
 relay.fountain.fm         400/400
+relay.mostr.pub           250/250
 relay.nostr.net            60/400   rate-limited: too many events from this key (60/60s)
 nostr-pub.wellorder.net    13/400   blocked: spam not permitted
+nostr21.com                 0/250
+relay.nostrplebs.com        0/250   blocked: you do not have a Nostr Plebs NIP-05
+nostr.land                  0/250   restricted: pay for access
+relay.nostr.wirednet.jp       —     blocked: ephemeral kind range 21000
 ```
+
+One of these is a lesson on its own. `nostr.mom` took 400/400 from Node and
+then demanded 28-bit proof of work from a browser, twice — so the probe was
+re-run *from a page*, which is the only environment this game has. Measure
+where the thing actually runs.
 
 The first four are the defaults now, and the same game measures **0% rejected**.
 

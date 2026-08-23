@@ -18,12 +18,20 @@ import {
  * (`.scratch/relay-probe.mjs`, 2026-08-23):
  *
  *   relay.primal.net          400/400 accepted
- *   nostr.mom                 400/400
  *   purplerelay.com           400/400
  *   relay.fountain.fm         400/400
+ *   relay.mostr.pub           250/250
  *   relay.nostr.net            60/400  "rate-limited: too many events from
  *                                       this key (60/60s)"
  *   nostr-pub.wellorder.net    13/400  "blocked: spam not permitted"
+ *   nostr21.com                  0/250
+ *   relay.nostrplebs.com         0/250  needs their NIP-05
+ *   nostr.land                   0/250  paid
+ *   nostr.einundzwanzig.space    0/250  needs NIP-05
+ *   relay.nostr.wirednet.jp      —      "blocked: ... ephemeral kind range"
+ *
+ * `nostr.mom` took 400/400 from Node and then demanded 28-bit proof of work
+ * from a browser, twice. Measure in the environment the thing actually runs in.
  *
  * Three of the four relays this game shipped with were failing outright:
  *
@@ -44,9 +52,9 @@ import {
  */
 export const DEFAULT_RELAYS = [
   'wss://relay.primal.net',
-  'wss://nostr.mom',
   'wss://purplerelay.com',
   'wss://relay.fountain.fm',
+  'wss://relay.mostr.pub',
 ]
 
 declare global {
