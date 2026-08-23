@@ -367,6 +367,45 @@ const OK_PREFIX: Record<string, FailureKind | 'accepted'> = {
  *     reported in the relay's own words and never mutes, because muting is the
  *     destructive direction and an unparsed string is no evidence for it.
  */
+/**
+ * True when a relay actually said this, rather than the library inventing it.
+ *
+ * NIP-01's machine-readable prefix set is closed and a relay's `CLOSED` reason
+ * carries one. Everything nostr-tools writes itself carries none — which makes
+ * the prefix, not the wording, the honest way to tell a verdict from silence.
+ */
+export function isRelayVerdict(reason: string): boolean {
+  const r = reason.trim().toLowerCase()
+  return Object.keys(OK_PREFIX).some((prefix) => r.startsWith(prefix))
+}
+
+/**
+ * True when nostr-tools wrote this string rather than a relay.
+ *
+ * Routing on the NIP-01 prefix alone is the obvious answer and it is wrong in
+ * the live direction: NIP-01 says a `CLOSED` reason *should* carry a
+ * machine-readable prefix and relays do not have to. `relay.fountain.fm`
+ * answers `CLOSED ... "kinds not supported"` — a real verdict, no prefix — and
+ * a prefix-only rule retries that forever. Measured at five REQs a second.
+ *
+ * So the transport wordings are matched explicitly, without the `relay `
+ * anchor, because the same library uses both forms depending on whether the
+ * socket ever opened:
+ *
+ *   nothing listening / DNS failure   "connection failed"
+ *   black hole                        "connection timed out"
+ *   died after connecting             "relay connection closed"
+ *
+ * Everything else is taken to be a relay speaking. That is the safer default of
+ * the two — an unrecognised string is far more likely to be an unprefixed
+ * verdict than a wording nostr-tools invented — and the cost of being wrong is
+ * capped rather than permanent, because a verdict is retried once in a long
+ * while rather than never. See `VERDICT_RETRY_MS`.
+ */
+export function isTransportSilence(reason: string): boolean {
+  return /^(relay )?connection (closed|failed|timed out)$/i.test(reason.trim())
+}
+
 export function classifyFailure(reason: string): FailureKind | 'accepted' {
   const r = reason.trim().toLowerCase()
   for (const prefix of Object.keys(OK_PREFIX)) {
@@ -615,6 +654,14 @@ export class Net {
   private resubTimers = new Set<ReturnType<typeof setTimeout>>()
   private resubAttempts = new Map<string, number>()
   private subGroups = 0
+  /**
+   * How long to leave a relay that declined our filter before asking again.
+   *
+   * A verdict is a verdict and resubscribing at socket speed is a loop. But
+   * "never again for the whole session" is the wrong end of the trade for
+   * something decided by string matching, so it is slow rather than permanent.
+   */
+  private static readonly VERDICT_RETRY_MS = 5 * 60_000
   private disposed = false
   readonly relays: string[]
 
@@ -647,6 +694,14 @@ export class Net {
   private muteSpan = new Map<string, number>()
   /** Relays that closed our subscription rather than serving it. */
   private closedSubs = new Map<string, string>()
+  /**
+   * Relays we cannot reach, and are still trying.
+   *
+   * Kept apart from `closedSubs` deliberately. That one holds a verdict and is
+   * safe to quote; this one holds nostr-tools' description of a silence, and
+   * putting it on a screen as "the relay said" would be inventing a speaker.
+   */
+  private unreachable = new Map<string, string>()
   /** Relays that told us their number, and what we are doing about it. */
   private pace = new Map<string, RelayPace>()
   /** Consecutive publishes that every asked relay called malformed. */
@@ -835,6 +890,7 @@ export class Net {
           live = true
           // The relay took the filter. Whatever went wrong before is over.
           this.resubAttempts.set(key, 0)
+          this.unreachable.delete(url)
         },
           // One subscription per relay costs nostr-tools' cross-relay dedupe:
           // its `_knownIds` is allocated per `subscribeMany` call, so three
@@ -848,11 +904,30 @@ export class Net {
           const reason = reasons?.[0]?.reason ?? 'closed without a reason'
           if (this.disposed || /closed by (us|caller)/i.test(reason)) return
 
-          // Two things arrive on this one callback with nothing but wording to
-          // tell them apart, which is worth stating because the wording is
-          // nostr-tools' and can change underneath this.
-          if (/^relay connection/i.test(reason)) {
-            // The socket died. Silence, not a verdict — ours to restore.
+          // Route on whether a relay spoke, not on how the library phrased it.
+          //
+          // This matched `/^relay connection/i` and that only covers a socket
+          // that died *after* connecting. A relay that was never there fails a
+          // different way and the string has no `relay ` on it at all —
+          // measured against nostr-tools 2.24.3:
+          //
+          //   nothing listening        "connection failed"
+          //   DNS does not resolve     "connection failed"
+          //   black hole, times out    "connection timed out"
+          //   died after connecting    "relay connection closed"
+          //
+          // So the ordinary case — a tab opened before the wifi associated, a
+          // relay in maintenance, a captive portal — fell through to the
+          // verdict branch: never retried for the whole session, and quoted on
+          // screen as the relay's own words when no relay had spoken.
+          //
+          // The prefix inverts the default to the safe side. A wording nobody
+          // anticipated becomes a retry instead of a permanent execution, and
+          // NIP-01's set cannot be changed by a library bump.
+          if (isTransportSilence(reason)) {
+            // Nobody said anything: the socket died, or was never there.
+            // Silence, not a verdict, and ours to keep trying.
+            this.unreachable.set(url, reason)
             const attempt = (this.resubAttempts.get(key) ?? 0) + 1
             this.resubAttempts.set(key, attempt)
             this.entry(url).reconnects++
@@ -871,16 +946,36 @@ export class Net {
           // declined it, in its own words. Resubscribing to that loops forever
           // — which is exactly what the relay removed two PRs ago would have
           // made this client do, on every kind it uses.
+          this.unreachable.delete(url)
           this.closedSubs.set(url, reason)
           this.entry(url).subscriptionClosed = reason
+          // Not never. A relay reconfigured, or a wording this file guessed
+          // wrong about, should not cost the whole session — but retrying a
+          // real verdict at socket speed is the hammering this branch exists to
+          // avoid, so it is one attempt every few minutes and no faster.
+          const slow = setTimeout(() => {
+            this.resubTimers.delete(slow)
+            this.openSub(group, url, filter, onevent, seen)
+          }, Net.VERDICT_RETRY_MS)
+          this.resubTimers.add(slow)
         },
       }),
     )
   }
 
-  /** Relays that hung up on our subscription, in their own words. */
+  /** Relays that declined our filter, in their own words. Safe to quote. */
   get deafRelays(): { url: string; reason: string }[] {
     return [...this.closedSubs].map(([url, reason]) => ({ url, reason }))
+  }
+
+  /**
+   * Relays we have not managed to reach, and are still retrying.
+   *
+   * Not the same thing as a relay that declined us, and not quotable: the
+   * wording is the library's account of a silence, not anything a relay said.
+   */
+  get unreachableRelays(): { url: string; reason: string }[] {
+    return [...this.unreachable].map(([url, reason]) => ({ url, reason }))
   }
 
   /** One-shot query across all relays. Used for the leaderboard, never in the loop. */

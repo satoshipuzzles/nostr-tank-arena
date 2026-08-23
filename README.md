@@ -1532,17 +1532,46 @@ Backoff starts at 400ms rather than the library's ten seconds, and resets when
 the relay accepts the REQ.
 
 Routing matters, because two different things arrive on one `onclose` with
-nothing but wording to tell them apart:
+nothing but wording to tell them apart. The first version matched
+`/^relay connection/i`, and that covers a socket which died *after* connecting
+and nothing else — a relay that was never there fails a different way and the
+string has no `relay ` on it at all:
 
 ```
-/^relay connection .../   the socket died      reconnect, with backoff
-"closed by us|caller"     we closed it         neither
-anything else             a CLOSED verdict     report it, never retry
+nothing listening         "connection failed"
+DNS does not resolve      "connection failed"
+black hole, times out     "connection timed out"
+died after connecting     "relay connection closed"
 ```
 
-That last line is not hypothetical: resubscribing to a relay that declined your
-filter loops for the whole session, and the relay removed two commits ago would
-have done exactly that on every kind this game uses.
+So the ordinary case — a tab opened before the wifi associated, a relay in
+maintenance, a captive portal — was filed as a verdict: never retried for the
+whole session, and quoted on screen as the relay's own words when no relay had
+spoken. Measured against the shipped build, a relay that came up thirty seconds
+after the join got **zero** further requests.
+
+```
+matches a transport wording   the socket died or was never there   reconnect
+"closed by us|caller"         we closed it                         neither
+anything else                 a relay declined our filter          report, retry slowly
+```
+
+**Routing on NIP-01's prefix instead is the obvious fix and it is wrong in the
+live direction.** The spec says a `CLOSED` reason *should* carry a
+machine-readable prefix; relays do not have to. `relay.fountain.fm` answers
+`CLOSED ... "kinds not supported"` — a real verdict with no prefix — and a
+prefix-only rule retries it at five requests a second, forever.
+
+So the transport wordings are matched explicitly and everything else is taken to
+be a relay speaking, which is the safer default of the two. And the cost of
+being wrong is capped rather than permanent: a verdict is retried once every
+five minutes rather than never, so a reconfigured relay or a wording this file
+guessed wrong about does not cost the session. Resubscribing at socket speed is
+the loop that branch exists to avoid; once in five minutes is not.
+
+`deafRelays` holds verdicts and is safe to quote. `unreachableRelays` holds the
+library's account of a silence and is not — putting it on a screen as "the relay
+said" would be inventing a speaker.
 
 **A subscription is identified by which `subscribe()` call it belongs to and
 which relay — not by the relay alone.** Keying on the URL made the second call

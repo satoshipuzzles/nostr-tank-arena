@@ -157,7 +157,7 @@ function startBucketRelay(perMin) {
 }
 
 function startRelay(behaviour, opts = {}) {
-  const wss = new WebSocketServer({ port: 0 })
+  const wss = new WebSocketServer(opts.port ? { port: opts.port } : { port: 0 })
   const state = {
     behaviour, received: 0, accepted: 0, connections: 0,
     closeSubs: !!opts.closeSubs,
@@ -1301,6 +1301,83 @@ try {
       'not in deafRelays',
     )
     await refusePage.close()
+  }
+
+  // ----------------------------- a relay that was never there is not a verdict
+  //
+  // The router matched `/^relay connection/i`, which only covers a socket that
+  // died *after* connecting. A relay that was never there fails a different way
+  // and the string carries no `relay ` at all — measured against nostr-tools:
+  //
+  //   nothing listening      "connection failed"
+  //   DNS does not resolve   "connection failed"
+  //   black hole, times out  "connection timed out"
+  //
+  // So the ordinary case — a tab opened before the wifi associated, a relay in
+  // maintenance, a captive portal — was filed as a `CLOSED` verdict: never
+  // retried for the session, and quoted on screen as the relay's own words when
+  // no relay had spoken.
+
+  // Reserve a port by taking one and giving it straight back, so the game joins
+  // against an address with nothing behind it.
+  const placeholder = new WebSocketServer({ port: 0 })
+  const deadPort = placeholder.address().port
+  await new Promise((r) => placeholder.close(r))
+  const deadUrl = `ws://localhost:${deadPort}`
+
+  const gonePage = await openAgainst([deadUrl], 'gone')
+  check('a session starts against a relay that is not there', gonePage !== null)
+
+  if (gonePage) {
+    await wait(6000)
+    const st = await gonePage.evaluate(() => ({
+      deaf: window.__game.net.deafRelays ?? [],
+      unreachable: window.__game.net.unreachableRelays ?? [],
+    }))
+    check(
+      'an unreachable relay is not quoted as having said anything',
+      st.deaf.length === 0,
+      JSON.stringify(st.deaf),
+    )
+    check(
+      'it is reported as unreachable instead',
+      st.unreachable.some((u) => u.url === deadUrl),
+      JSON.stringify(st.unreachable),
+    )
+
+    // Now bring it up on the same address. A relay that was down when we joined
+    // has to be picked up without a reload — this is the whole point of not
+    // treating silence as a verdict.
+    const late = startRelay('good', { port: deadPort })
+    await wait(12_000)
+    const tag3 = await gonePage.evaluate(() => `tankarena-${window.__game.room}`)
+    const sk3 = generateSecretKey()
+    const pk3 = getPublicKey(sk3)
+    late.inject(
+      finalizeEvent(
+        {
+          kind: 21000,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [['t', tag3]],
+          content: JSON.stringify({ t: 1, x: 700, y: 500, h: 0, g: 0, hp: 3, d: false }),
+        },
+        sk3,
+      ),
+    )
+    await wait(3000)
+    check(
+      'and it is picked up once it comes up, with no reload',
+      await gonePage.evaluate((pk) => [...window.__game.peers.keys()].includes(pk), pk3),
+      `${late.connections} connections, ${late.reqFilters.length} REQs`,
+    )
+    check(
+      'and it stops being reported as unreachable',
+      !(await gonePage.evaluate(() => window.__game.net.unreachableRelays ?? [])).some(
+        (u) => u.url === deadUrl,
+      ),
+      'still listed after it came up',
+    )
+    await gonePage.close()
   }
 
 } catch (err) {
