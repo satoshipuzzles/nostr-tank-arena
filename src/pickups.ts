@@ -38,19 +38,37 @@
 import { PADS } from './arena'
 import type { Pt } from './arena'
 
-export type PickupKind = 'repair' | 'rapid' | 'shield' | 'speed'
+export type PickupKind = 'repair' | 'rapid' | 'shield' | 'speed' | 'scatter' | 'siege'
 
-export const PICKUPS: Record<PickupKind, { label: string; hue: number; seconds: number }> = {
-  repair: { label: 'Repair', hue: 130, seconds: 0 },
-  rapid: { label: 'Rapid fire', hue: 20, seconds: 12 },
-  shield: { label: 'Shield', hue: 200, seconds: 14 },
-  speed: { label: 'Overdrive', hue: 285, seconds: 10 },
+/**
+ * `shape` is the renderer's cue. Six pickups that were all the same octahedron
+ * in six colours meant reading the pad from across the board was a colour-match
+ * puzzle; six silhouettes are legible at arena zoom and stay legible to anyone
+ * who cannot tell orange from red.
+ */
+export const PICKUPS: Record<
+  PickupKind,
+  { label: string; blurb: string; hue: number; seconds: number; shape: string }
+> = {
+  repair: { label: 'Repair', blurb: 'full hull', hue: 130, seconds: 0, shape: 'cross' },
+  rapid: { label: 'Rapid fire', blurb: 'reload in a blink', hue: 20, seconds: 12, shape: 'bolt' },
+  shield: { label: 'Shield', blurb: 'one shot bounces off', hue: 200, seconds: 14, shape: 'dome' },
+  speed: { label: 'Overdrive', blurb: 'move like you stole it', hue: 285, seconds: 10, shape: 'ring' },
+  scatter: { label: 'Scattershot', blurb: 'three shells a shot', hue: 55, seconds: 14, shape: 'star' },
+  siege: { label: 'Siege shells', blurb: 'double damage', hue: 350, seconds: 10, shape: 'spike' },
 }
 
-const KINDS: PickupKind[] = ['repair', 'rapid', 'shield', 'speed']
+const KINDS: PickupKind[] = ['repair', 'rapid', 'shield', 'speed', 'scatter', 'siege']
 
-/** Seconds between spawn waves. Long enough that an item is worth crossing for. */
-export const WAVE_SECONDS = 22
+/**
+ * Seconds between spawn waves.
+ *
+ * Raised from 22 because an item you can count on is not worth crossing the map
+ * for. At half a minute the good pads are a decision — go for it and be exposed
+ * on open ground, or hold the lane you already own — and that decision is the
+ * whole reason pickups are in the game.
+ */
+export const WAVE_SECONDS = 34
 /** How the round's modifier bends the schedule. Both come from the block hash. */
 export interface WaveRules {
   /** Seconds between waves. */
@@ -59,6 +77,9 @@ export interface WaveRules {
   emptyPads: number
 }
 export const DEFAULT_WAVES: WaveRules = { waveSeconds: WAVE_SECONDS, emptyPads: 1 }
+
+/** How long a pickup sits unclaimed before the board clears for the next wave. */
+export const PICKUP_LINGER = 20
 
 export interface Pickup {
   /** `<height>:<wave>:<padIndex>`. Unique for the whole round, and derivable. */
@@ -105,9 +126,11 @@ export function scheduleFor(
   const period = Math.max(2, rules.waveSeconds)
   const wave = Math.floor(elapsed / period)
   const born = wave * period
-  // An untouched pickup clears shortly before the next wave, so there is always
-  // a beat of empty board rather than one item silently becoming another.
-  if (elapsed - born > period - 2) return []
+  // An untouched pickup clears well before the next wave, so there is always a
+  // stretch of empty board rather than one item silently becoming another. With
+  // a 34-second period that is 20 seconds of contest and 14 of nothing, which
+  // is what makes the spawn an event instead of scenery.
+  if (elapsed - born > Math.min(PICKUP_LINGER, period - 2)) return []
 
   // Normally one pad per wave stays empty, so the board is never fully stocked
   // and there is a reason to contest the ones that are. Supply Run stocks the
@@ -145,18 +168,39 @@ export interface Buffs {
   rapidUntil: number
   shieldUntil: number
   speedUntil: number
+  scatterUntil: number
+  siegeUntil: number
 }
 
-export const noBuffs = (): Buffs => ({ rapidUntil: 0, shieldUntil: 0, speedUntil: 0 })
+export const noBuffs = (): Buffs => ({
+  rapidUntil: 0,
+  shieldUntil: 0,
+  speedUntil: 0,
+  scatterUntil: 0,
+  siegeUntil: 0,
+})
+
+/** Which timer each pickup runs. `repair` has none — it is instant. */
+const BUFF_KEY: Partial<Record<PickupKind, keyof Buffs>> = {
+  rapid: 'rapidUntil',
+  shield: 'shieldUntil',
+  speed: 'speedUntil',
+  scatter: 'scatterUntil',
+  siege: 'siegeUntil',
+}
 
 export function applyPickup(buffs: Buffs, kind: PickupKind, now: number): void {
-  const seconds = PICKUPS[kind].seconds * 1000
-  if (kind === 'rapid') buffs.rapidUntil = Math.max(buffs.rapidUntil, now) + seconds
-  if (kind === 'shield') buffs.shieldUntil = Math.max(buffs.shieldUntil, now) + seconds
-  if (kind === 'speed') buffs.speedUntil = Math.max(buffs.speedUntil, now) + seconds
+  const key = BUFF_KEY[kind]
+  if (!key) return
+  buffs[key] = Math.max(buffs[key], now) + PICKUPS[kind].seconds * 1000
 }
 
 export const hasBuff = (buffs: Buffs, key: keyof Buffs, now: number): boolean => buffs[key] > now
+
+/** Everything off. Death and a new block both end every timer you were running. */
+export function clearBuffs(buffs: Buffs): void {
+  for (const key of Object.keys(buffs) as (keyof Buffs)[]) buffs[key] = 0
+}
 
 /** How close you have to be to sweep one up. Generous: this is a party game. */
 export const PICKUP_RADIUS = 42

@@ -34,6 +34,14 @@ export interface Shell {
    * including on a client that has already seen the next block.
    */
   maxBounces: number
+  /**
+   * Hull points this shell takes off. Siege shells do two.
+   *
+   * Like the bounce budget, it belongs to the shell rather than to whoever is
+   * looking at it — the *victim* applies the damage, and the victim has no way
+   * to know what buffs the shooter had ten seconds ago.
+   */
+  damage: number
   age: number
   dead: boolean
 }
@@ -57,6 +65,7 @@ export function spawnShell(
   y: number,
   angle: number,
   maxBounces = SHELL_BOUNCES,
+  damage = 1,
 ): Shell {
   return {
     id,
@@ -67,6 +76,7 @@ export function spawnShell(
     vy: Math.sin(angle) * SHELL_SPEED,
     bounces: 0,
     maxBounces,
+    damage,
     age: 0,
     dead: false,
   }

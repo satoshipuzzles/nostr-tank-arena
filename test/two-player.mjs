@@ -14,6 +14,8 @@ import { existsSync } from 'node:fs'
 import puppeteer from 'puppeteer-core'
 
 const URL = process.env.TANK_URL ?? 'http://localhost:4173/'
+/** The top of the board's felt, from `render.ts`. Anything flat must be above it. */
+const FELT_Y = 2.5
 const ROOM = 'smoke' + Math.floor(Math.random() * 1e6)
 
 const CHROME_CANDIDATES = [
@@ -127,6 +129,26 @@ try {
   check('sessions verified', seenA.peers.every((p) => p.verified) && seenB.peers.every((p) => p.verified))
   check('no ghost peers', seenA.peers.length === 1 && seenB.peers.length === 1)
 
+  // Pin the round before anything is measured.
+  //
+  // The first tip comes from a real explorer, and the real hash picks the real
+  // rules — so without this the duel below runs under Glass Cannon or Ricochet
+  // roughly two runs in five, and "bravo died" starts failing for reasons that
+  // have nothing to do with the kill path. `0500` is Crossroads and Straight
+  // Deathmatch. The point of block-derived rules is that they are a pure
+  // function of the hash, which is exactly what makes them pinnable here.
+  await Promise.all([a, b].map((p) => p.evaluate(() => {
+    window.__clock.accept({ height: 999000, hash: 'ef'.repeat(30) + '0500' })
+    document.getElementById('podium').hidden = true
+  })))
+  await wait(600)
+  const pinned = await Promise.all([a, b].map((p) => p.evaluate(() => ({
+    rules: window.__game.modifier.id,
+    maxHp: window.__game.maxHp,
+  }))))
+  check('the round is pinned to standard rules before anything is measured',
+    pinned.every((r) => r.rules === 'standard' && r.maxHp === 3), JSON.stringify(pinned))
+
   // Movement propagates.
   const beforeMove = (await snap(b)).peers[0]
   // Long enough to clear the threshold even when the renderer is in software
@@ -140,7 +162,12 @@ try {
   check('B sees A move', moved > 60, `${Math.round(moved)}px`)
 
   // Duel: park them in a clear lane and put three shells into bravo.
-  for (let i = 0; i < 5; i++) {
+  //
+  // Attempts rather than a fixed budget, and generous: under software
+  // rasterisation the whole simulation runs in slow motion, so a shell that
+  // crosses 220px in a quarter of a second on a GPU can take most of a second
+  // here. This is the check most likely to fail for a reason that is not a bug.
+  for (let i = 0; i < 14; i++) {
     await a.evaluate(() => {
       const g = window.__game
       g.tank.x = 300
@@ -157,7 +184,7 @@ try {
       }
     })
     await a.keyboard.down('Space')
-    await wait(240)
+    await wait(300)
     await a.keyboard.up('Space')
     await wait(2600)
     if ((await snap(b)).deaths > 0) break
@@ -196,19 +223,28 @@ try {
       real(sound, opts)
     }
   })))
-  await a.evaluate(() => {
-    const g = window.__game
-    g.tank.x = 300
-    g.tank.y = 600
-    g.tank.hull = 0
-    g.tank.gun = 0
-    g.tank.reloadAt = 0
-  })
-  await a.keyboard.down('Space')
-  await wait(200)
-  await a.keyboard.up('Space')
-  await wait(2500)
-  const heard = await Promise.all([a, b].map((p) => p.evaluate(() => window.__heard)))
+  // Retried, because a tank that is mid-respawn cannot pull a trigger and the
+  // duel above may have just got itself killed. What is being tested is that
+  // firing emits, not that a keypress lands on the first attempt.
+  let heard = [[], []]
+  for (let i = 0; i < 8; i++) {
+    await a.evaluate(() => {
+      const g = window.__game
+      g.tank.dead = false
+      g.tank.hp = g.maxHp
+      g.tank.x = 300
+      g.tank.y = 600
+      g.tank.hull = 0
+      g.tank.gun = 0
+      g.tank.reloadAt = 0
+    })
+    await a.keyboard.down('Space')
+    await wait(400)
+    await a.keyboard.up('Space')
+    await wait(1800)
+    heard = await Promise.all([a, b].map((p) => p.evaluate(() => window.__heard)))
+    if (heard[0].includes('fire') && heard[1].includes('fire')) break
+  }
   check('firing makes a noise', heard[0].includes('fire'), JSON.stringify(heard[0]))
   // The interesting half: a shell fired on the other machine has to arrive as a
   // sound here, positioned, or the room is silent except for your own gun.
@@ -239,8 +275,24 @@ try {
     const rig = window.__renderer?.rigs?.get(peer?.session)
     return { streak: peer?.streak ?? 0, ring: rig ? rig.ring.visible : null }
   })
-  check("a rival's streak reaches the other client", glow.streak === 4, JSON.stringify(glow))
+  // Compared against alpha's own number rather than the literal 4: alpha can
+  // land another kill in the 1.6 seconds this waits, and a check that breaks
+  // when the game works is worse than no check.
+  const alphaStreak = await a.evaluate(() => window.__game.streak)
+  check("a rival's streak reaches the other client",
+    glow.streak === alphaStreak && alphaStreak >= 4,
+    `${JSON.stringify(glow)} vs alpha ${alphaStreak}`)
   check('and lights their ring up on this screen', glow.ring === true, JSON.stringify(glow))
+
+  // `visible === true` is not the same as "reaches a pixel", and this exact
+  // pair of meshes proved it: the ring under your tank sat at y=1.2 and every
+  // pickup pad at y=1.5, while the board's felt is at y=2.5. Both were drawn
+  // every frame, inside the board, for weeks. A screenshot found it; nothing
+  // structural could have. So the invariant is asserted directly, against the
+  // live mesh positions rather than against the constant they are set from.
+  const ringY = await a.evaluate(() => window.__renderer.you.ring.position.y)
+  check('the ring under your tank is drawn on the board, not inside it',
+    ringY > FELT_Y, `ring y=${ringY}, felt y=${FELT_Y}`)
   await a.evaluate(() => { window.__game.streak = 0 })
   // A round is one Bitcoin block. Nobody announces the change and nobody is the
   // host: both clients watch the same chain tip and both act on it. Driven here
@@ -273,6 +325,7 @@ try {
     rules: window.__game.modifier.id,
     maxHp: window.__game.maxHp,
     hp: window.__game.tank.hp,
+    dead: window.__game.tank.dead,
     chip: document.getElementById('rules').hidden
       ? ''
       : document.getElementById('rules').textContent.replace(/\s+/g, ' ').trim(),
@@ -291,8 +344,10 @@ try {
   check('the block picked the round rules too, and both clients picked the same ones',
     afterBlock[0].rules === afterBlock[1].rules && afterBlock[0].rules === 'glass',
     afterBlock.map((r) => r.rules).join(' vs '))
+  // A tank caught mid-respawn sits at 0, which is not a failure of the rule.
   check('and Glass Cannon actually narrowed the hull to one hit',
-    afterBlock.every((r) => r.maxHp === 1 && r.hp === 1), JSON.stringify(afterBlock.map((r) => [r.maxHp, r.hp])))
+    afterBlock.every((r) => r.maxHp === 1 && (r.dead || r.hp === 1)),
+    JSON.stringify(afterBlock.map((r) => [r.maxHp, r.hp, r.dead])))
   check('and the HUD says which rules are running', /Glass Cannon/.test(afterBlock[0].chip),
     afterBlock[0].chip)
   check('the podium shows the round that just ended',
@@ -346,6 +401,13 @@ try {
     [...window.__game.pickups.values()].map((x) => ({ id: x.id, kind: x.kind, x: Math.round(x.at.x), y: Math.round(x.at.y) })),
   )))
   check('pickups appear on the board', spawned[0].length > 0, JSON.stringify(spawned[0]))
+  // Same invariant as the tank ring, on the other mesh that had the same bug.
+  const padY = await a.evaluate(() => {
+    const pad = [...window.__renderer.pickupMeshes.values()][0]?.getObjectByName('pad')
+    return pad ? pad.position.y : null
+  })
+  check('and their pads sit on the board rather than inside it',
+    padY !== null && padY > FELT_Y, `pad y=${padY}, felt y=${FELT_Y}`)
   check('and both clients derived the identical set, having sent nothing',
     JSON.stringify(spawned[0]) === JSON.stringify(spawned[1]),
     `${JSON.stringify(spawned[0])} vs ${JSON.stringify(spawned[1])}`)
@@ -388,6 +450,178 @@ try {
   }, target.id)
   check('and the other client sees that pad go empty', seen.taken,
     JSON.stringify(seen.feed.slice(-3)))
+
+  // ------------------------------------------------------- siege and scatter
+  //
+  // Damage is the one number a shooter sends that the *victim* then applies to
+  // its own hull, because the victim is authoritative over its HP and cannot
+  // see what the shooter picked up ten seconds ago. Two separate claims, so two
+  // separate checks: it has to cross the wire, and it has to be applied and
+  // capped on arrival.
+  await a.evaluate(() => {
+    const g = window.__game
+    for (const k of Object.keys(g.buffs)) g.buffs[k] = 0
+    g.tank.dead = false
+    g.tank.hp = 3
+    g.tank.reloadAt = 0
+    g.buffs.siegeUntil = performance.now() + 20000
+  })
+  await b.evaluate(() => { window.__game.shells.clear() })
+  await a.keyboard.down('Space')
+  await wait(600)
+  await a.keyboard.up('Space')
+  await wait(2200)
+  const wire = await b.evaluate(() => {
+    const g = window.__game
+    const theirs = [...g.shells.values()].filter((s) => s.owner !== g.identity.sessionPubkey)
+    return { count: theirs.length, damage: theirs.map((s) => s.damage) }
+  })
+  check('a siege shell arrives at the other client carrying its damage',
+    wire.count > 0 && wire.damage.every((d) => d === 2), JSON.stringify(wire))
+
+  // Applying it, without depending on two tanks having line of sight on a board
+  // the block hash picked. The shell is injected through the same inbound path
+  // a relay would deliver it on, sitting on bravo's hull.
+  const applied = await b.evaluate(() => {
+    const g = window.__game
+    for (const k of Object.keys(g.buffs)) g.buffs[k] = 0
+    g.tank.dead = false
+    g.tank.hp = 3
+    const send = (id, d) => g.onEvent({
+      id: id + Math.random(),
+      kind: 21001,
+      pubkey: 'ff'.repeat(32),
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [],
+      content: JSON.stringify({ id, t0: performance.now(), x: g.tank.x, y: g.tank.y, a: 0, d }),
+    })
+    send('siegeshell', 2)
+    return { before: 3 }
+  })
+  await wait(700)
+  const hurt = await b.evaluate(() => ({ hp: window.__game.tank.hp, dead: window.__game.tank.dead }))
+  check('and takes two hull points off the tank it hits, not one',
+    hurt.hp === 1 && !hurt.dead, `${JSON.stringify(applied)} -> ${JSON.stringify(hurt)}`)
+
+  // A malformed or hostile fire event must not be able to claim more than a
+  // full hull. The cap is applied where the shell is rebuilt from the wire.
+  const capped = await b.evaluate(() => {
+    const g = window.__game
+    g.tank.dead = false
+    g.tank.hp = 3
+    const before = g.shells.size
+    g.onEvent({
+      id: 'cap' + Math.random(),
+      kind: 21001,
+      pubkey: 'ff'.repeat(32),
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [],
+      content: JSON.stringify({ id: 'capshell', t0: performance.now(), x: 900, y: 900, a: 0, d: 99 }),
+    })
+    const shell = [...g.shells.values()].find((s) => s.id === 'capshell')
+    return { grew: g.shells.size > before, damage: shell?.damage ?? null }
+  })
+  check('and a shell claiming 99 damage is capped at a full hull',
+    capped.grew && capped.damage === 3, JSON.stringify(capped))
+
+  // Scattershot is three fire events instead of one, which is why it is a
+  // 14-second pickup rather than a weapon: a shot is about one event a second
+  // and a position tick is ten, so tripling the rarer one briefly is a rounding
+  // error against the tick stream.
+  await a.evaluate(() => {
+    const g = window.__game
+    for (const k of Object.keys(g.buffs)) g.buffs[k] = 0
+    g.tank.dead = false
+    g.tank.hp = 3
+    g.shells.clear()
+    g.buffs.scatterUntil = performance.now() + 20000
+    g.tank.reloadAt = 0
+  })
+  await a.keyboard.down('Space')
+  await wait(700)
+  await a.keyboard.up('Space')
+  await wait(300)
+  const fanned = await a.evaluate(() => {
+    const g = window.__game
+    const mine = [...g.shells.values()].filter((s) => s.owner === g.identity.sessionPubkey)
+    return { count: mine.length, angles: [...new Set(mine.map((s) => Math.round(Math.atan2(s.vy, s.vx) * 100) / 100))] }
+  })
+  check('Scattershot puts three shells in the air, not one',
+    fanned.count >= 3 && fanned.angles.length >= 3, JSON.stringify(fanned))
+  await a.evaluate(() => { window.__game.buffs.scatterUntil = 0 })
+
+  // ------------------------------------------------------------- block clock
+  //
+  // There is nothing honest to count down to — the next block is a coin flip
+  // every second, not a timer running out — so it counts up. When the explorer
+  // would not give a timestamp it counts from when this client first saw the
+  // block and marks that with a `~`, which is a lower bound rather than a guess
+  // dressed up as a fact.
+  const clock1 = await a.evaluate(() => ({
+    seconds: window.__clock.secondsSinceTip(),
+    text: document.querySelector('#status .clock')?.textContent ?? '',
+  }))
+  await wait(2500)
+  const clock2 = await a.evaluate(() => ({
+    seconds: window.__clock.secondsSinceTip(),
+    text: document.querySelector('#status .clock')?.textContent ?? '',
+  }))
+  check('the HUD shows time since the block, counting up',
+    /^~?\d+:\d\d$/.test(clock2.text) && clock2.seconds > clock1.seconds,
+    `${clock1.text} -> ${clock2.text}`)
+
+  // ---------------------------------------------------------------- profiles
+  //
+  // A hex pubkey is not a person. Kind 0 turns a signed score into a face and a
+  // name — but the `nip05` field inside it is a claim the account made about
+  // itself, and it does not earn its tick until the domain says the same thing.
+  const cards = await a.evaluate(() => {
+    const rows = [...document.querySelectorAll('#scoreboard .score-row')]
+    return {
+      rows: rows.length,
+      avatars: rows.filter((r) => r.querySelector('.avatar')).length,
+      fallbacks: rows.filter((r) => r.querySelector('.avatar.fallback')).length,
+    }
+  })
+  check('every scoreboard row is a card with a face on it',
+    cards.rows >= 2 && cards.avatars === cards.rows, JSON.stringify(cards))
+  // Both players signed in with throwaway keys, which have no kind 0 anywhere,
+  // so both must fall back rather than showing a broken image.
+  check('and a guest key falls back to an initial instead of a dead image',
+    cards.fallbacks === cards.rows, JSON.stringify(cards))
+
+  // The verification itself, driven against a stubbed well-known file so the
+  // answer does not depend on a stranger's web server being up. Both directions
+  // are checked: a domain that agrees, and one that names a different key.
+  const nip05 = await a.evaluate(async () => {
+    const profiles = window.__profiles
+    const real = window.fetch
+    const key = 'aa'.repeat(32)
+    const other = 'bb'.repeat(32)
+    const answer = (mapped) => async () => ({
+      ok: true,
+      json: async () => ({ names: { alice: mapped } }),
+    })
+    const offline = async () => { throw new Error('offline') }
+    const run = async (stub) => {
+      window.fetch = stub
+      const profile = { pubkey: key, name: 'alice', picture: null, nip05: 'alice@example.com', nip05Verified: null }
+      await profiles.verify(profile)
+      return profile.nip05Verified
+    }
+    const good = await run(answer(key))
+    const bad = await run(answer(other))
+    const unreachable = await run(offline)
+    window.fetch = real
+    return { good, bad, unreachable }
+  })
+  check('a NIP-05 the domain confirms is verified', nip05.good === true, JSON.stringify(nip05))
+  check('one the domain maps elsewhere is marked wrong', nip05.bad === false, JSON.stringify(nip05))
+  // The important one. Most failures here are a missing CORS header on somebody
+  // else's static host, which is indistinguishable from the domain being down
+  // and is emphatically not proof of a fake.
+  check('and an unreachable domain stays unverified rather than false',
+    nip05.unreachable === null, JSON.stringify(nip05))
 
   // Regen is gone: Puzz asked for it out, and a tank sitting still must not heal.
   await b.evaluate(() => {
@@ -469,12 +703,19 @@ try {
   for (const [px, py, where] of [[900, 250, 'up and right'], [300, 620, 'down and left']]) {
     await park(400, 300)
     await a.mouse.move(px, py)
-    await wait(2600)
-    const r = await a.evaluate(([x, y]) => {
-      const g = window.__game
-      const w = window.__renderer.toWorld(x, y)
-      return { gun: g.tank.gun, want: Math.atan2(w.y - g.tank.y, w.x - g.tank.x) }
-    }, [px, py])
+    // Polled rather than waited out. The turret turns at a fixed rate in
+    // simulation time, and simulation time crawls under software rasterisation,
+    // so any single fixed wait is a guess that eventually loses.
+    let r
+    for (let i = 0; i < 12; i++) {
+      await wait(700)
+      r = await a.evaluate(([x, y]) => {
+        const g = window.__game
+        const w = window.__renderer.toWorld(x, y)
+        return { gun: g.tank.gun, want: Math.atan2(w.y - g.tank.y, w.x - g.tank.x) }
+      }, [px, py])
+      if (angleGap(r.gun, r.want) < 0.25) break
+    }
     check(`the gun swings to the cursor ${where}`, angleGap(r.gun, r.want) < 0.25,
       `gun ${r.gun.toFixed(2)} want ${r.want.toFixed(2)}`)
   }

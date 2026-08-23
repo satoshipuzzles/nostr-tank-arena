@@ -125,7 +125,7 @@ subscribes you to an entire match.
 |------|------|---------|-----------|---------|
 | `21003` | session attestation | ephemeral | **real npub** | `{ s, name, color, exp }` |
 | `21000` | tank state tick | ephemeral | session key | `{ t, x, y, h, g, hp, d, k? }` |
-| `21001` | shell fired | ephemeral | session key | `{ id, t0, x, y, a, b? }` |
+| `21001` | shell fired | ephemeral | session key | `{ id, t0, x, y, a, b?, d? }` |
 | `21002` | death report | ephemeral | session key | `{ t, k, x, y }` |
 | `30078` | score record | addressable (NIP-78) | **real npub** | `{ kills, deaths, room, at }` |
 | `30078` | pickup claim | addressable (NIP-78) + NIP-40 | session key | `{ id, kind, at }` |
@@ -153,6 +153,12 @@ rather than being read from the current round's rules when the event arrives.
 Otherwise a shell fired seconds before a block landed would bounce once on the
 shooter's screen and three times on everybody else's for as long as the boundary
 took to settle.
+
+`d` is the shell's damage, and it *has* to be on the wire. The victim is
+authoritative over its own HP and has no way to know what the shooter picked up
+ten seconds ago, so a Siege shell announces that it takes two hull points rather
+than one. It is capped at a full hull where the shell is rebuilt from the event:
+a malformed or hostile fire event can kill you outright and no more than that.
 
 ### Pickups, and why the claim is stored rather than ephemeral
 
@@ -354,6 +360,36 @@ yours first in the Relays box and leave the public ones in as genuine peers, not
 cold standby — one relay is one point of failure, and you want events landing on
 more than one box the first time yours reboots.
 
+## Pickups
+
+Six of them, on a 34-second wave, and one pad each wave stays empty.
+
+| Pickup | What it does |
+|--------|--------------|
+| Repair | Full hull, instantly. |
+| Rapid fire | Reload in a blink, 12s. |
+| Shield | The next shot bounces off, 14s. |
+| Overdrive | Move like you stole it, 10s. |
+| Scattershot | Three shells a shot, 14s. |
+| Siege shells | Double damage, 10s. |
+
+The wave used to be 22 seconds and that was too generous: an item you can count
+on is not worth crossing the map for. At 34 seconds a stocked pad is a decision
+— go for it and be exposed on open ground, or hold the lane you already own —
+and that decision is the entire reason pickups are in the game. Supply Run turns
+it back down to 10 and stocks every pad, deliberately.
+
+Each type has its own silhouette as well as its own colour. Six items that were
+all the same octahedron in six colours made reading a pad from across the board a
+colour-match puzzle, and an impossible one for anyone who cannot separate the
+orange from the red.
+
+Scattershot is the only one that multiplies traffic — three fire events instead
+of one — which is why it lasts fourteen seconds rather than being a weapon. A
+shot is roughly one event a second per player against a tick stream of ten, so
+tripling the rarer of the two briefly is a rounding error. Worth checking before
+adding anything else that fans out.
+
 ## One rule change per block
 
 The block hash already picks the map. It is a 256-bit number that every client
@@ -377,6 +413,45 @@ authoritative over them — and the pickup schedule is derived from the same has
 on every client. So a modifier adds no trust and cannot desync anybody. Shell
 bounces are the one exception, which is why the budget rides on the fire event
 rather than being looked up on arrival.
+
+## Who is that? Kind 0, and NIP-05
+
+A signed score is only worth reading if you can tell whose it is, and a hex
+pubkey is not a person. Kind 0 metadata for every real npub in the room becomes a
+face and a name on the scoreboard, the podium and the leaderboard.
+
+Three things it is careful about:
+
+- **It never blocks the game.** A profile that has not arrived renders as the
+  short npub and upgrades itself when the event lands. Nothing waits on a relay
+  to draw a frame, and a guest key — which has no profile anywhere — falls back
+  to a coloured initial rather than a broken image.
+- **It asks once.** Requests are batched into one `REQ` and every pubkey is
+  remembered for the session, including the ones that came back empty.
+- **A NIP-05 is not believed until it is checked.** The `nip05` field in a kind 0
+  event is a claim the account made about itself; anyone can put `jack@cash.app`
+  in theirs. The name only earns its green tick once
+  `https://<domain>/.well-known/nostr.json?name=<local>` has been fetched and
+  found to map that name back to *this* pubkey.
+
+That last check is a cross-origin request to somebody else's server, and plenty
+of them send no CORS headers — which is indistinguishable from the domain being
+down and is emphatically not proof of a fake. Those stay grey and unverified
+rather than being marked wrong. Only a domain that actively names a *different*
+key gets the strike-through.
+
+## The block clock
+
+The HUD counts *up* from when the tip was mined, because there is nothing honest
+to count down to: the next block is a coin flip every second, not a timer running
+out. Past ten minutes — the average, not a deadline — it turns amber, which is
+the game saying "any tick now" rather than "something is wrong".
+
+The mined-at time is a third request to the explorer and is deliberately not
+awaited with the tip: height and hash are what a player needs to start, and
+failing here costs the clock and nothing else. When it does fail the count runs
+from when this client first saw the block and says so with a `~`, which is a
+lower bound rather than a guess dressed up as a fact.
 
 ## Sound
 
@@ -405,6 +480,7 @@ ran.
 src/arena.ts     the boards, collision, spawn points, block-hash selection
 src/pickups.ts   block-hash-derived spawn schedule and the claim record
 src/modifiers.ts the round's rule change, also out of the block hash
+src/profiles.ts  kind 0 metadata, avatars, and NIP-05 verification
 src/audio.ts     synthesised sound; no assets, positioned for peer events
 src/sim.ts       tank and shell physics, all the feel constants
 src/game.ts      netcode: subscribe, interpolate, hit detection, authority
@@ -415,6 +491,7 @@ src/render.ts    three.js: the board, the tanks, the confetti, the camera
 src/scores.ts    signed score records and the leaderboard query
 src/main.ts      lobby, HUD, game loop
 test/two-player.mjs  headless two-browser smoke test against live relays
+test/shot.mjs        photographs a pinned block, because pixels are not the DOM
 ```
 
 ## Testing
@@ -428,7 +505,21 @@ Two real browsers, two guest npubs, one room, live public relays. It waits for
 the clients to find each other, drives one tank into the other, and asserts the
 kill came back as a signed death event.
 
-Three of its checks exist because 3D fails quietly:
+### Look at it, too
+
+`npm run shot -- .scratch/board.png 0300` joins a room, pins a pretend block —
+the first two hex digits pick the rules, the last two pick the map — and takes a
+picture.
+
+That exists because a structural test is not a picture, and this repo has the
+scar. The ring under your tank sat at `y = 1.2` and every pickup pad at `y = 1.5`
+while the board's felt is at `y = 2.5`. Both were drawn every frame, *inside* the
+board, and never once reached a pixel. `visible` was `true` the whole time, so no
+DOM assertion could have caught it. A screenshot did, immediately. There is now
+one `GROUND_Y` constant that both the felt and every flat decal are placed
+against, and the suite asserts the decals are above it.
+
+Three of its other checks exist because 3D fails quietly:
 
 - a pixel out at the edge of the window and one in the middle, at the same
   height. The sky is a vertical gradient, so an empty scene makes them identical

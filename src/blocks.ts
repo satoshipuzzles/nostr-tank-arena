@@ -29,12 +29,42 @@
 export interface Tip {
   height: number
   hash: string
+  /**
+   * When the block was mined, unix seconds. Optional because the tip is useful
+   * without it: the height picks the round and the hash picks the map and the
+   * rules, and none of that waits on a third request. It arrives a beat later
+   * and turns the HUD's block line into a clock.
+   */
+  time?: number
 }
 
 const SOURCES = ['https://mempool.space/api', 'https://blockstream.info/api']
 
 /** Blocks are ten minutes apart on average; this is responsive without being rude. */
 const POLL_MS = 20_000
+
+/**
+ * When a block was mined.
+ *
+ * A separate request, and deliberately not awaited alongside the tip: a player
+ * needs the height and the hash to start playing, and does not need the clock
+ * for another second. Failing here costs the count-up display and nothing else.
+ */
+async function readTime(base: string, hash: string, signal: AbortSignal): Promise<number | null> {
+  try {
+    const block = (await fetch(`${base}/block/${hash}`, { signal }).then((r) =>
+      r.ok ? r.json() : Promise.reject(new Error(String(r.status))),
+    )) as { timestamp?: number }
+    const t = Number(block?.timestamp)
+    // Sanity bound: a wrong timestamp would render as a clock counting from
+    // 1970 or from the future, which reads as a broken game rather than a
+    // broken explorer.
+    if (!Number.isFinite(t) || t < 1_200_000_000 || t > Date.now() / 1000 + 7200) return null
+    return t
+  } catch {
+    return null
+  }
+}
 
 async function readTip(base: string, signal: AbortSignal): Promise<Tip | null> {
   try {
@@ -60,6 +90,10 @@ export class BlockClock {
   private timer: ReturnType<typeof setInterval> | null = null
   private controller = new AbortController()
   private listeners: ((tip: Tip, previous: Tip | null) => void)[] = []
+  /** Mined-at times we have already resolved, by hash. `null` while in flight. */
+  private timeFor = new Map<string, number | null>()
+  /** Local clock when this client first saw the current tip, as a fallback. */
+  private sawTipAt = Date.now()
   private readonly sources: string[]
 
   constructor(override?: string | null) {
@@ -83,7 +117,52 @@ export class BlockClock {
     // A tip only ever goes up, so the highest answer is the freshest one.
     const best = results.filter((t): t is Tip => t !== null).sort((a, b) => b.height - a.height)[0]
     this.reachable = !!best
-    if (best) this.accept(best)
+    if (best) {
+      this.accept(best)
+      void this.fillTime(best.hash)
+    }
+  }
+
+  /**
+   * Fetch the mined-at time for a hash, once, in the background.
+   *
+   * Attached to the tip rather than passed around, and only if the tip has not
+   * moved on in the meantime — a late answer for a block that is no longer the
+   * tip would set the clock backwards.
+   */
+  private async fillTime(hash: string): Promise<void> {
+    if (this.timeFor.has(hash)) {
+      const known = this.timeFor.get(hash)
+      if (this.tip?.hash === hash && known) this.tip.time = known
+      return
+    }
+    this.timeFor.set(hash, null)
+    for (const base of this.sources) {
+      const t = await readTime(base, hash, this.controller.signal)
+      if (t === null) continue
+      this.timeFor.set(hash, t)
+      if (this.tip?.hash === hash) this.tip.time = t
+      return
+    }
+  }
+
+  /**
+   * Seconds since the tip was mined.
+   *
+   * Falls back to when this client first saw the block, which is the honest
+   * answer when the explorer would not give a timestamp: it is a lower bound,
+   * and it still counts up at one second per second, which is the part that
+   * makes the round feel like it has a clock.
+   */
+  secondsSinceTip(nowMs = Date.now()): number | null {
+    if (!this.tip) return null
+    const from = this.tip.time ? this.tip.time * 1000 : this.sawTipAt
+    return Math.max(0, (nowMs - from) / 1000)
+  }
+
+  /** True when the count is measured rather than assumed. */
+  get tipTimeKnown(): boolean {
+    return typeof this.tip?.time === 'number'
   }
 
   /**
@@ -97,8 +176,9 @@ export class BlockClock {
   accept(tip: Tip): void {
     if (this.tip && tip.height <= this.tip.height) return
     const previous = this.tip
-    this.tip = tip
-    for (const fn of this.listeners) fn(tip, previous)
+    this.tip = { ...tip, time: tip.time ?? this.timeFor.get(tip.hash) ?? undefined }
+    this.sawTipAt = Date.now()
+    for (const fn of this.listeners) fn(this.tip, previous)
   }
 
   stop(): void {

@@ -7,6 +7,8 @@ import { Input, type Scheme } from './input'
 import { DEFAULT_RELAYS, Identity, Net } from './nostr'
 import { Renderer } from './render'
 import { modifierForBlock } from './modifiers'
+import { type Buffs, PICKUPS, type PickupKind } from './pickups'
+import { type Profile, Profiles, shortNpub } from './profiles'
 import { fetchBlockScores, fetchScores, publishScore } from './scores'
 
 const $ = <T extends HTMLElement>(id: string): T => {
@@ -106,7 +108,46 @@ $('play-guest').addEventListener('click', () => {
   void begin(async () => Identity.guest())
 })
 
-let running: { game: Game; renderer: Renderer; input: Input; clock: BlockClock } | null = null
+let running: {
+  game: Game
+  renderer: Renderer
+  input: Input
+  clock: BlockClock
+  profiles: Profiles
+} | null = null
+
+/**
+ * An avatar, or the coloured initial that stands in for one.
+ *
+ * `onerror` matters more than it looks: profile pictures are arbitrary URLs on
+ * arbitrary hosts and a good share of them are dead. A broken image icon in
+ * four scoreboard rows looks like the game is broken, so a failed load falls
+ * back to the same initial that was there before it tried.
+ */
+function avatar(profile: Profile | null, name: string, hue: number, size = 22): string {
+  const initial = escapeHtml((name.trim()[0] ?? '?').toUpperCase())
+  const fallback = `<span class="avatar fallback" style="--av:${size}px;background:hsl(${hue} 45% 32%)">${initial}</span>`
+  if (!profile?.picture) return fallback
+  return (
+    `<img class="avatar" style="--av:${size}px" src="${escapeHtml(profile.picture)}" alt="" ` +
+    `loading="lazy" onerror="this.outerHTML=${escapeHtml(JSON.stringify(fallback))}" />`
+  )
+}
+
+/** The NIP-05, with its tick only if the domain actually vouched for the key. */
+function nip05Badge(profile: Profile | null): string {
+  if (!profile?.nip05) return ''
+  const cls = profile.nip05Verified === true ? 'nip05 ok' : 'nip05'
+  const mark = profile.nip05Verified === true ? ' ✓' : ''
+  const title =
+    profile.nip05Verified === true
+      ? 'NIP-05 checked against the domain'
+      : profile.nip05Verified === false
+        ? 'The domain does not map this name to this key'
+        : 'Not checked — the domain did not answer'
+  const bad = profile.nip05Verified === false ? ' bad' : ''
+  return `<span class="${cls}${bad}" title="${escapeHtml(title)}">${escapeHtml(profile.nip05)}${mark}</span>`
+}
 
 async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
   lobbyError.hidden = true
@@ -134,6 +175,7 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     paintSoundButton()
 
     const net = new Net(relays)
+    const profiles = new Profiles(net)
     const game = new Game(identity, net, room, name, color)
     game.sfx = (sound, opts) => sfx.play(sound, opts)
     await game.start()
@@ -171,13 +213,20 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     const input = new Input(canvas)
     input.scheme = schemeInput.value as Scheme
     store('tank.scheme', input.scheme)
-    running = { game, renderer, input, clock }
+    running = { game, renderer, input, clock, profiles }
+    // A profile landing has to repaint immediately: the HUD throttles itself to
+    // eight frames a second and would otherwise show the npub for another beat
+    // after the picture was already in hand.
+    profiles.onChange(() => {
+      hudAt = 0
+    })
     // Exposed on purpose: the two-player smoke test in test/ drives the match
     // through this handle, and it is genuinely useful in the console.
     ;(window as unknown as { __game: Game; __renderer: Renderer }).__game = game
     ;(window as unknown as { __renderer: Renderer }).__renderer = renderer
     ;(window as unknown as { __clock: BlockClock }).__clock = clock
     ;(window as unknown as { __sfx: Sfx }).__sfx = sfx
+    ;(window as unknown as { __profiles: Profiles }).__profiles = profiles
 
     canvas.addEventListener('mousemove', (e) => {
       input.mouseWorld = renderer.toWorld(e.clientX, e.clientY)
@@ -217,21 +266,38 @@ function loop(now = performance.now()): void {
 
 let hudAt = 0
 
+/** Which buff timer each pickup runs. `repair` is instant and has none. */
+const BUFF_TIMERS: Partial<Record<PickupKind, keyof Buffs>> = {
+  rapid: 'rapidUntil',
+  shield: 'shieldUntil',
+  speed: 'speedUntil',
+  scatter: 'scatterUntil',
+  siege: 'siegeUntil',
+}
+
 function drawHud(game: Game): void {
   const now = performance.now()
   if (now - hudAt < 120) return
   hudAt = now
 
+  // The scoreboard is a card per player now: their kind 0 picture, the callsign
+  // they chose for the match, and their verified NIP-05 underneath it. A guest
+  // key has no profile to fetch and falls back to a coloured initial, which is
+  // the point — playing without an identity stays a first-class option.
+  const profiles = running?.profiles
   $('scoreboard').innerHTML = game
     .scoreboard()
-    .map(
-      (r) =>
-        `<div class="score-row${r.you ? ' you' : ''}">
-           <span class="who"><span class="swatch" style="background:hsl(${r.color} 62% 52%)"></span>
-           <span class="name">${escapeHtml(r.name)}</span></span>
+    .map((r) => {
+      const profile = r.pubkey ? (profiles?.get(r.pubkey) ?? null) : null
+      const badge = nip05Badge(profile)
+      const real = profile && r.pubkey && profile.name !== shortNpub(r.pubkey) ? profile.name : ''
+      return `<div class="score-row card${r.you ? ' you' : ''}">
+           <span class="who">${avatar(profile, r.name, r.color)}
+           <span class="ident"><span class="name" style="color:hsl(${r.color} 70% 70%)">${escapeHtml(r.name)}</span>
+           ${badge || (real ? `<span class="nip05">${escapeHtml(real)}</span>` : '')}</span></span>
            <span class="kd">${r.kills} / ${r.deaths}</span>
-         </div>`,
-    )
+         </div>`
+    })
     .join('')
 
   drawRules(game)
@@ -243,7 +309,7 @@ function drawHud(game: Game): void {
   const trouble = game.net.troubleSummary()
   $('status').innerHTML = [
     clock?.tip
-      ? `block <b>${clock.tip.height}</b>`
+      ? `block <b>${clock.tip.height}</b> ${blockClock(clock)}`
       : clock?.reachable === false
         ? 'block <b>?</b>'
         : 'block <b>…</b>',
@@ -266,6 +332,28 @@ function drawHud(game: Game): void {
 
   drawNotice(game, now)
   drawBuffs(game, now)
+}
+
+/**
+ * Time since the tip was mined, counting up.
+ *
+ * There is no countdown to show, and that is the honest thing about mining:
+ * the next block is a coin flip every second, not a timer running out. So this
+ * counts up. Past ten minutes — the average, not a deadline — it goes amber,
+ * which is the game saying "this could end on any tick" rather than "something
+ * is wrong".
+ *
+ * When the explorer would not give a timestamp it counts from when this client
+ * first saw the block instead, and says so with a `~`. That is a lower bound
+ * rather than a guess dressed up as a fact.
+ */
+function blockClock(clock: BlockClock): string {
+  const seconds = clock.secondsSinceTip()
+  if (seconds === null) return ''
+  const mm = Math.floor(seconds / 60)
+  const ss = Math.floor(seconds % 60)
+  const text = `${clock.tipTimeKnown ? '' : '~'}${mm}:${String(ss).padStart(2, '0')}`
+  return `<span class="clock${seconds >= 600 ? ' due' : ''}">${text}</span>`
 }
 
 /**
@@ -309,20 +397,25 @@ function drawNotice(game: Game, now: number): void {
   node.innerHTML = `<b>${escapeHtml(notice.text)}</b><span>${escapeHtml(notice.sub)}</span>`
 }
 
-/** Little timers for whatever is currently running on your tank. */
+/**
+ * Little timers for whatever is currently running on your tank.
+ *
+ * Driven off the pickup table rather than a hand-written list, so adding a
+ * seventh pickup is one entry in `PICKUPS` and not an edit here that somebody
+ * forgets — which is exactly how a buff ends up running invisibly.
+ */
 function drawBuffs(game: Game, now: number): void {
   const node = $('buffs')
   const live: string[] = []
-  const bar = (label: string, until: number, hue: number) => {
-    const left = (until - now) / 1000
-    if (left <= 0) return
+  for (const [kind, spec] of Object.entries(PICKUPS) as [PickupKind, (typeof PICKUPS)[PickupKind]][]) {
+    const key = BUFF_TIMERS[kind]
+    if (!key) continue
+    const left = (game.buffs[key] - now) / 1000
+    if (left <= 0) continue
     live.push(
-      `<span class="buff" style="--buff-hue:${hue}">${escapeHtml(label)} <b>${left.toFixed(1)}s</b></span>`,
+      `<span class="buff" style="--buff-hue:${spec.hue}">${escapeHtml(spec.label)} <b>${left.toFixed(1)}s</b></span>`,
     )
   }
-  bar('Rapid', game.buffs.rapidUntil, 20)
-  bar('Shield', game.buffs.shieldUntil, 200)
-  bar('Overdrive', game.buffs.speedUntil, 285)
   node.hidden = live.length === 0
   node.innerHTML = live.join('')
 }
@@ -354,8 +447,9 @@ function showPodium(result: import('./game').RoundResult): void {
           (r, i) =>
             `<div class="score-row${i === 0 && r.kills > 0 ? ' win' : ''}${r.you ? ' you' : ''}">
                <span class="who"><span class="rank">${i + 1}</span>
-               <span class="swatch" style="background:hsl(${r.color} 62% 52%)"></span>
-               <span class="name">${escapeHtml(r.name)}</span></span>
+               ${avatar(r.pubkey ? (running?.profiles.get(r.pubkey) ?? null) : null, r.name, r.color, 26)}
+               <span class="ident"><span class="name">${escapeHtml(r.name)}</span>
+               ${nip05Badge(r.pubkey ? (running?.profiles.get(r.pubkey) ?? null) : null)}</span></span>
                <span class="kd">${r.kills} / ${r.deaths}</span>
              </div>`,
         )
@@ -493,16 +587,24 @@ async function loadBoard(scope: 'block' | 'all'): Promise<void> {
       scope === 'block'
         ? await fetchBlockScores(running.game.net, height!)
         : await fetchScores(running.game.net)
+    // A signed score is only worth reading if you can tell whose it is. The
+    // profile fetch is fire-and-forget: rows render with the npub immediately
+    // and upgrade themselves to a face and a NIP-05 when the events land.
+    for (const s of scores) running?.profiles.want(s.pubkey)
     rows.innerHTML = scores.length
       ? scores
-          .map(
-            (s, i) =>
-              `<div class="score-row"><span class="who"><span class="rank">${i + 1}</span>
-                <span class="npub">${escapeHtml(s.npub.slice(0, 18))}…</span></span>
+          .map((s, i) => {
+            const profile = running?.profiles.get(s.pubkey) ?? null
+            const hue = parseInt(s.pubkey.slice(0, 4), 16) % 360
+            const badge = nip05Badge(profile)
+            return `<div class="score-row"><span class="who"><span class="rank">${i + 1}</span>
+                ${avatar(profile, profile?.name ?? s.npub.slice(4), hue, 26)}
+                <span class="ident"><span class="name">${escapeHtml(profile?.name ?? shortNpub(s.pubkey))}</span>
+                ${badge}</span></span>
                 <span class="kd">${s.kills} / ${s.deaths}${
                   scope === 'all' && s.block ? ` <span class="npub">#${s.block}</span>` : ''
-                }</span></div>`,
-          )
+                }</span></div>`
+          })
           .join('')
       : scope === 'block'
         ? `Nothing published for block ${height} yet. Be the first.`

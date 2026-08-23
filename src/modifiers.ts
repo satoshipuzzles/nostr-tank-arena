@@ -50,7 +50,7 @@ const BASE = {
   speed: 1,
   reload: 1,
   respawn: 1,
-  waveSeconds: 22,
+  waveSeconds: 34,
   emptyPads: 1,
   bounces: 1,
 }
@@ -85,9 +85,9 @@ export const MODIFIERS: Modifier[] = [
     ...BASE,
     id: 'supply',
     name: 'Supply Run',
-    blurb: 'Pickups every 9 seconds, and every pad is stocked.',
+    blurb: 'Pickups every 10 seconds, and every pad is stocked.',
     hue: 130,
-    waveSeconds: 9,
+    waveSeconds: 10,
     emptyPads: 0,
   },
   {

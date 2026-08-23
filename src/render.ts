@@ -22,6 +22,7 @@
 
 import * as THREE from 'three'
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js'
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { ARENA_H, ARENA_W, WALLS, onLayoutChange } from './arena'
 import type { Game, Peer } from './game'
 import { MAX_HP, RELOAD, TANK_RADIUS } from './sim'
@@ -66,6 +67,20 @@ function skyTexture(): THREE.Texture {
   texture.colorSpace = THREE.SRGBColorSpace
   return texture
 }
+
+/**
+ * The top of the board, in world units.
+ *
+ * One constant because two different meshes learned this the hard way. The
+ * felt used to be at 2.5 while the ring under your tank was at 1.2 and every
+ * pickup pad at 1.5 — both *inside* the board, drawn every frame, never
+ * reaching a pixel. Nothing in a scene graph complains about a mesh hidden in
+ * the floor, and no structural test catches it either: `visible` was `true` the
+ * whole time. Anything that lies flat on the board is `GROUND_Y + DECAL_LIFT`.
+ */
+export const GROUND_Y = 2.5
+/** How far a flat decal floats above the felt to avoid z-fighting with it. */
+export const DECAL_LIFT = 0.9
 
 /** The board's checker, drawn once and tiled. */
 function checkerTexture(): THREE.Texture {
@@ -221,11 +236,17 @@ function makeTank(): TankRig {
   // Sits on the ground under whoever you are, so you can find yourself in a
   // four-way scramble without reading name plates.
   const ring = new THREE.Mesh(
-    new THREE.RingGeometry(TANK_RADIUS + 6, TANK_RADIUS + 11, 28),
-    new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55, side: THREE.DoubleSide }),
+    new THREE.RingGeometry(TANK_RADIUS + 8, TANK_RADIUS + 16, 32),
+    new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.55,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    }),
   )
   ring.rotation.x = -Math.PI / 2
-  ring.position.y = 1.2
+  ring.position.y = GROUND_Y + DECAL_LIFT
   ring.visible = false
   root.add(ring)
 
@@ -243,6 +264,37 @@ function makeTank(): TankRig {
   }
 
   return { root, bob, hull, turret, label, pips, ring, body, trim, labelKey: '', recoil: 0, flash, sink: 0 }
+}
+
+/**
+ * A silhouette per pickup type.
+ *
+ * Six pickups that were all the same octahedron in six colours made reading a
+ * pad from across the board a colour-match puzzle — and an impossible one for
+ * anyone who cannot separate the orange from the red. Six shapes are legible at
+ * arena zoom, and legible in a screenshot.
+ */
+function pickupGeometry(shape: string): THREE.BufferGeometry {
+  switch (shape) {
+    case 'cross': {
+      // The repair cross, built from two boxes so it reads at any angle.
+      const bar = new RoundedBoxGeometry(54, 18, 18, 1, 4)
+      const post = new RoundedBoxGeometry(18, 54, 18, 1, 4)
+      return mergeGeometries([bar, post]) ?? bar
+    }
+    case 'bolt':
+      return new THREE.ConeGeometry(21, 54, 4)
+    case 'dome':
+      return new THREE.SphereGeometry(28, 18, 12, 0, Math.PI * 2, 0, Math.PI / 2)
+    case 'ring':
+      return new THREE.TorusGeometry(23, 8, 12, 22)
+    case 'star':
+      return new THREE.IcosahedronGeometry(29, 0)
+    case 'spike':
+      return new THREE.ConeGeometry(24, 56, 6)
+    default:
+      return new THREE.OctahedronGeometry(27, 0)
+  }
 }
 
 // --------------------------------------------------------------- particles
@@ -378,8 +430,17 @@ export class Renderer {
   private you = makeTank()
   private shells = new Map<string, THREE.Mesh>()
   private shellGeo = new THREE.SphereGeometry(7, 12, 10)
+  private siegeGeo = new THREE.SphereGeometry(11, 12, 10)
   private shellMine = new THREE.MeshBasicMaterial({ color: 0xffe8a3 })
   private shellTheirs = new THREE.MeshBasicMaterial({ color: 0xff9a6b })
+  /**
+   * A siege shell is bigger and angry-red on every screen, not just the
+   * shooter's — the damage rides on the fire event, so everybody can see that
+   * the thing coming at them takes two hull points instead of one. An
+   * unreadable one-shot kill is a bad death; a visible one is a mistake you
+   * made.
+   */
+  private shellSiege = new THREE.MeshBasicMaterial({ color: 0xff5470 })
 
   private reloadBar: THREE.Mesh
   private lastShellSeen = new Map<string, { x: number; y: number }>()
@@ -486,7 +547,7 @@ export class Renderer {
       new THREE.MeshStandardMaterial({ map: checkerTexture(), roughness: 0.95 }),
     )
     felt.rotation.x = -Math.PI / 2
-    felt.position.set(ARENA_W / 2, 2.5, ARENA_H / 2)
+    felt.position.set(ARENA_W / 2, GROUND_Y, ARENA_H / 2)
     felt.receiveShadow = true
     this.board.add(felt)
 
@@ -870,9 +931,14 @@ export class Renderer {
     for (const shell of game.shells.values()) {
       let mesh = this.shells.get(shell.id)
       if (!mesh) {
+        const heavy = shell.damage > 1
         mesh = new THREE.Mesh(
-          this.shellGeo,
-          shell.owner === game.identity.sessionPubkey ? this.shellMine : this.shellTheirs,
+          heavy ? this.siegeGeo : this.shellGeo,
+          heavy
+            ? this.shellSiege
+            : shell.owner === game.identity.sessionPubkey
+              ? this.shellMine
+              : this.shellTheirs,
         )
         this.scene.add(mesh)
         this.shells.set(shell.id, mesh)
@@ -927,28 +993,47 @@ export class Renderer {
         const hue = PICKUPS[pickup.kind].hue / 360
         group = new THREE.Group()
         const gem = new THREE.Mesh(
-          new THREE.OctahedronGeometry(17, 0),
+          pickupGeometry(PICKUPS[pickup.kind].shape),
           new THREE.MeshStandardMaterial({
-            color: new THREE.Color().setHSL(hue, 0.85, 0.6),
-            emissive: new THREE.Color().setHSL(hue, 0.9, 0.22),
-            roughness: 0.35,
+            color: new THREE.Color().setHSL(hue, 0.9, 0.62),
+            // Lit hard on purpose. The camera sits a long way back and an item
+            // that reads as a speck is an item nobody crosses the map for.
+            emissive: new THREE.Color().setHSL(hue, 0.95, 0.4),
+            roughness: 0.3,
+            metalness: 0.1,
           }),
         )
         gem.castShadow = true
         gem.name = 'gem'
         const pad = new THREE.Mesh(
-          new THREE.RingGeometry(24, 34, 26),
+          new THREE.RingGeometry(36, 54, 30),
           new THREE.MeshBasicMaterial({
             color: new THREE.Color().setHSL(hue, 0.8, 0.6),
             transparent: true,
-            opacity: 0.5,
+            opacity: 0.65,
             side: THREE.DoubleSide,
+            depthWrite: false,
           }),
         )
         pad.rotation.x = -Math.PI / 2
-        pad.position.y = 1.5
+        pad.position.y = GROUND_Y + DECAL_LIFT
         pad.name = 'pad'
-        group.add(gem, pad)
+        // A column of light standing over the pad. Cheap, and it is what makes
+        // a pickup visible over cover from the far end of a board rather than
+        // something you find by driving into it.
+        const beam = new THREE.Mesh(
+          new THREE.CylinderGeometry(24, 44, 190, 16, 1, true),
+          new THREE.MeshBasicMaterial({
+            color: new THREE.Color().setHSL(hue, 0.9, 0.62),
+            transparent: true,
+            opacity: 0.2,
+            side: THREE.DoubleSide,
+            depthWrite: false,
+          }),
+        )
+        beam.position.y = 95
+        beam.name = 'beam'
+        group.add(gem, pad, beam)
         group.position.set(pickup.at.x, 0, pickup.at.y)
         this.scene.add(group)
         this.pickupMeshes.set(pickup.id, group)
@@ -956,12 +1041,15 @@ export class Renderer {
 
       const gem = group.getObjectByName('gem') as THREE.Mesh
       const pad = group.getObjectByName('pad') as THREE.Mesh
+      const beam = group.getObjectByName('beam') as THREE.Mesh
       gem.visible = !pickup.taken
       gem.rotation.y = now / 620
       gem.rotation.x = 0.42
-      gem.position.y = 34 + Math.sin(now / 320) * 6
-      ;(pad.material as THREE.MeshBasicMaterial).opacity = pickup.taken ? 0.14 : 0.5
-      pad.scale.setScalar(pickup.taken ? 1 : 1 + Math.sin(now / 260) * 0.06)
+      gem.position.y = 52 + Math.sin(now / 320) * 9
+      ;(pad.material as THREE.MeshBasicMaterial).opacity = pickup.taken ? 0.14 : 0.65
+      pad.scale.setScalar(pickup.taken ? 1 : 1 + Math.sin(now / 260) * 0.07)
+      beam.visible = !pickup.taken
+      ;(beam.material as THREE.MeshBasicMaterial).opacity = 0.16 + Math.sin(now / 400) * 0.07
     }
   }
 

@@ -15,6 +15,7 @@ import {
   PICKUP_RADIUS,
   applyPickup,
   claimTag,
+  clearBuffs,
   hasBuff,
   noBuffs,
   scheduleFor,
@@ -53,6 +54,10 @@ import { DEFAULT_MODIFIER, type Modifier, modifierForBlock } from './modifiers'
 import { type PlayOpts, type Sound, type SoundSink, silence } from './audio'
 
 const TICK_MS = 100 // 10Hz state broadcast
+/** Half-angle of a Scattershot fan, radians. Wide enough to matter up close. */
+const SCATTER_SPREAD = 0.16
+/** The most damage one shell may claim, however the event was written. */
+const MAX_HULL = 3
 /** Kills in a row that earn a full repair. */
 const STREAK_REPAIR = 3
 /** Kills in a row that earn rapid fire, and a glow so everyone can see it. */
@@ -100,12 +105,22 @@ export interface FeedEntry {
 }
 
 /** A finished round, kept so the podium has something to show. */
+export interface Standing {
+  name: string
+  kills: number
+  deaths: number
+  color: number
+  you: boolean
+  /** Real npub, so the scoreboard can put a face to it. Null until attested. */
+  pubkey: string | null
+}
+
 export interface RoundResult {
   height: number
   layout: string
   /** The rules that round played under, banked before the next block changes them. */
   modifier: string
-  standings: { name: string; kills: number; deaths: number; color: number; you: boolean }[]
+  standings: Standing[]
   endedAt: number
 }
 
@@ -348,7 +363,12 @@ export class Game {
     this.updateOffset(peer, p.t0)
 
     const bounces = typeof p.b === 'number' && p.b >= 0 ? Math.min(8, Math.floor(p.b)) : 1
-    const shell = spawnShell(p.id, e.pubkey, p.x, p.y, p.a, bounces)
+    // Capped rather than trusted. Damage is the one number a shooter sends that
+    // the victim then applies to itself, so it gets a ceiling: a malformed or
+    // hostile event can take a full hull off, and no more than that.
+    const damage =
+      typeof p.d === 'number' && p.d >= 1 ? Math.min(MAX_HULL, Math.floor(p.d)) : 1
+    const shell = spawnShell(p.id, e.pubkey, p.x, p.y, p.a, bounces, damage)
     this.sound('fire', { at: { x: p.x, y: p.y } })
     // Fast-forward by however long the event spent in flight, so the shell
     // appears where the shooter already sees it rather than at the muzzle.
@@ -501,7 +521,7 @@ export class Game {
         this.announce('SHIELD BROKE', 'that one was free', 200)
         return
       }
-      this.tank.hp--
+      this.tank.hp -= shell.damage
       if (this.tank.hp > 0) this.sound('hit')
       if (this.tank.hp <= 0) this.die(shell.owner)
       return
@@ -516,19 +536,35 @@ export class Game {
     }
   }
 
+  /**
+   * Pull the trigger.
+   *
+   * Scattershot makes this three shells rather than one, which means three fire
+   * events instead of one — and that is the reason it is a 14-second pickup and
+   * not a permanent weapon. A shot is roughly one event a second per player; a
+   * position tick is ten. Tripling the rarer of the two for a quarter of a
+   * minute is a rounding error against the tick stream, and worth checking
+   * before adding anything that multiplies events.
+   */
   private fire(now: number): void {
     const rapid = hasBuff(this.buffs, 'rapidUntil', now) ? 0.42 : 1
     this.tank.reloadAt = now + RELOAD * 1000 * rapid * this.modifier.reload
-    const x = this.tank.x + Math.cos(this.tank.gun) * MUZZLE_OFFSET
-    const y = this.tank.y + Math.sin(this.tank.gun) * MUZZLE_OFFSET
     const bounces = this.modifier.bounces
-    const shell = spawnShell(randomId(), this.identity.sessionPubkey, x, y, this.tank.gun, bounces)
-    this.shells.set(shell.id, shell)
-    // The bounce budget goes out with the shell rather than being looked up on
-    // arrival, so a shell outlives a block boundary with the rules it was fired
-    // under.
-    const payload: ShellPayload = { id: shell.id, t0: now, x, y, a: this.tank.gun, b: bounces }
-    this.publishAsSession(KIND_SHELL, payload)
+    const damage = hasBuff(this.buffs, 'siegeUntil', now) ? 2 : 1
+    const spread = hasBuff(this.buffs, 'scatterUntil', now) ? [-SCATTER_SPREAD, 0, SCATTER_SPREAD] : [0]
+    for (const offset of spread) {
+      const angle = this.tank.gun + offset
+      const x = this.tank.x + Math.cos(angle) * MUZZLE_OFFSET
+      const y = this.tank.y + Math.sin(angle) * MUZZLE_OFFSET
+      const shell = spawnShell(randomId(), this.identity.sessionPubkey, x, y, angle, bounces, damage)
+      this.shells.set(shell.id, shell)
+      // Bounce budget and damage go out with the shell rather than being looked
+      // up on arrival: one so a shell outlives a block boundary under the rules
+      // it was fired under, the other because the victim applies the damage and
+      // cannot see the shooter's buffs.
+      const payload: ShellPayload = { id: shell.id, t0: now, x, y, a: angle, b: bounces, d: damage }
+      this.publishAsSession(KIND_SHELL, payload)
+    }
     this.sound('fire')
   }
 
@@ -536,9 +572,7 @@ export class Game {
     this.tank.dead = true
     this.tank.hp = 0
     this.streak = 0
-    this.buffs.rapidUntil = 0
-    this.buffs.shieldUntil = 0
-    this.buffs.speedUntil = 0
+    clearBuffs(this.buffs)
     this.tank.respawnAt = performance.now() + RESPAWN_DELAY * 1000 * this.modifier.respawn
     this.deaths++
     this.sound('death')
@@ -729,9 +763,7 @@ export class Game {
     this.deaths = 0
     this.streak = 0
     this.bestStreak = 0
-    this.buffs.rapidUntil = 0
-    this.buffs.shieldUntil = 0
-    this.buffs.speedUntil = 0
+    clearBuffs(this.buffs)
     // Peer tallies are ours to keep, not theirs to send, so they reset here too.
     for (const peer of this.peers.values()) {
       peer.kills = 0
@@ -789,7 +821,11 @@ export class Game {
         applyPickup(this.buffs, pickup.kind, now)
       }
       this.sound('pickup')
-      this.announce(spec.label.toUpperCase(), pickup.kind === 'repair' ? 'full hull' : `${spec.seconds}s`, spec.hue)
+      this.announce(
+        spec.label.toUpperCase(),
+        pickup.kind === 'repair' ? spec.blurb : `${spec.blurb} — ${spec.seconds}s`,
+        spec.hue,
+      )
       this.publishClaim(pickup)
     }
   }
@@ -839,14 +875,15 @@ export class Game {
     return performance.now() < this.intermissionUntil
   }
 
-  scoreboard(): { name: string; kills: number; deaths: number; color: number; you: boolean }[] {
-    const rows = [
+  scoreboard(): Standing[] {
+    const rows: Standing[] = [
       {
         name: this.name,
         kills: this.kills,
         deaths: this.deaths,
         color: this.displayColor,
         you: true,
+        pubkey: this.identity.pubkey,
       },
       ...[...this.peers.values()].map((p) => ({
         name: p.name,
@@ -854,6 +891,7 @@ export class Game {
         deaths: p.deaths,
         color: p.displayColor,
         you: false,
+        pubkey: p.pubkey,
       })),
     ]
     return rows.sort((a, b) => b.kills - a.kills || a.deaths - b.deaths)

@@ -69,8 +69,13 @@ export interface StatePayload {
 /**
  * A shell leaving a barrel. Peers re-simulate it deterministically from t0.
  *
- * `b` is the bounce budget, and it travels with the shell rather than being
- * read from the round's modifier on arrival. The Ricochet block gives shells
+ * `b` is the bounce budget and `d` is the damage, and both travel with the shell
+ * rather than being read from local state on arrival. Damage has to: the victim
+ * is authoritative over its own HP, and the victim cannot know what the shooter
+ * had picked up ten seconds ago.
+ *
+ * The bounce budget is here for a subtler reason — it is read from the round's
+ * modifier, not from a buff. The Ricochet block gives shells
  * three bounces instead of one; without this field, a shell fired a moment
  * before a block landed would bounce once on the shooter's screen and three
  * times on everybody else's for as long as the boundary took to settle.
@@ -82,6 +87,7 @@ export interface ShellPayload {
   y: number
   a: number // angle, radians
   b?: number // wall bounces before it dies; defaults to 1
+  d?: number // hull points it takes off; defaults to 1, capped at 3 on arrival
 }
 
 /** Victim-authoritative death report. `k` is the session pubkey of the killer. */
