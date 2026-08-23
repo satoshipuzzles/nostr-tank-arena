@@ -26,6 +26,23 @@ import puppeteer from 'puppeteer-core'
 
 const URL = process.env.TANK_URL ?? 'http://localhost:4173/'
 
+// The fakes are plain `ws://` on localhost, and a browser will not open one from
+// an https page — mixed content, blocked, and the failure surfaces as a socket
+// that never answers. Which is genuinely indistinguishable from the silent
+// relay this suite deliberately stands up, so against a deployed build every
+// relay reads as `no-verdict` and sixteen checks fail for a reason that has
+// nothing to do with the client.
+//
+// Skipped loudly rather than quietly. A suite that prints "passed" without
+// having observed anything is the failure this whole file exists to catch.
+if (!/^http:\/\/(localhost|127\.0\.0\.1)/.test(URL)) {
+  console.log(`SKIP  relay behaviour needs a plain-http origin; TANK_URL is ${URL}`)
+  console.log('      ws:// fakes are blocked as mixed content from https, so every')
+  console.log('      relay would read as silent and nothing would actually be tested.')
+  console.log('      Run it against `npm run preview` instead.')
+  process.exit(0)
+}
+
 const CHROME_CANDIDATES = [
   process.env.CHROME_PATH,
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',

@@ -676,7 +676,7 @@ test/sound.mjs       taps the master bus and measures what each sound emits
 test/controls.mjs    hands the page a fake gamepad and checks WASD survives it
 test/relays.mjs      four fake relays that misbehave on cue, on localhost
 test/couch.mjs       two pads, two players, one tab
-test/relays.mjs      six fake relays misbehaving in six different ways
+test/relays.mjs      six fake relays misbehaving in six different ways (localhost only)
 test/shot.mjs        photographs a pinned block, because pixels are not the DOM
 ```
 
@@ -688,6 +688,7 @@ npm run test:live
 npm run test:sound
 npm run test:controls
 npm run test:couch
+npm run test:relays
 npm run test:relays
 ```
 
