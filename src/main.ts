@@ -13,7 +13,7 @@ import { modifierForBlock } from './modifiers'
 import { type Buffs, PICKUPS, type PickupKind } from './pickups'
 import { type Profile, Profiles, shortNpub } from './profiles'
 import {
-  type BlockResult,
+  type BlockWall,
   type ScoreRow,
   EPOCH_BLOCKS,
   fetchBlockScores,
@@ -981,15 +981,20 @@ $('publish-score').addEventListener('click', async () => {
  * between tiles rather than announced anywhere, because it is derived from the
  * height and every client computes the same one.
  */
-function renderWall(wall: BlockResult[]): string {
-  if (!wall.length) return 'No block has been played yet. Win one and it is the first tile here.'
-  const champions = new Map(seasonWinners(wall).map((s) => [s.season, s]))
+function renderWall({ blocks, truncated }: BlockWall): string {
+  if (!blocks.length) return 'No block has been played yet. Win one and it is the first tile here.'
+  const champions = new Map(seasonWinners(blocks).map((s) => [s.season, s]))
+  // The oldest season on screen is the one the window cut into, so its tally is
+  // not a tally of the season — it is a tally of the part we can see. Saying
+  // "leads with four" while twenty of its blocks are off the end is worse than
+  // saying nothing, so that line is dropped rather than qualified.
+  const clipped = truncated ? blocks[blocks.length - 1].season : null
   const tiles: string[] = []
   let season: number | null = null
-  for (const b of wall) {
+  for (const b of blocks) {
     if (b.season !== season) {
       season = b.season
-      const champ = champions.get(season)
+      const champ = season === clipped ? undefined : champions.get(season)
       // Named by the epoch's first block, which is a number anybody can check
       // against a block explorer, rather than by an ordinal this game invented.
       tiles.push(
@@ -1013,7 +1018,12 @@ function renderWall(wall: BlockResult[]): string {
         `<div class="bt-fine">${b.players} player${b.players === 1 ? '' : 's'}</div></div>`,
     )
   }
-  return `<div class="wall">${tiles.join('')}</div>`
+  return (
+    `<div class="wall">${tiles.join('')}</div>` +
+    `<p class="fine wall-note">${blocks.length} block${blocks.length === 1 ? '' : 's'} played` +
+    (truncated ? ', most recent first — there are older ones the relays did not return.' : '.') +
+    `</p>`
+  )
 }
 
 /**
@@ -1027,7 +1037,7 @@ function renderWall(wall: BlockResult[]): string {
  * which is what makes a repaint free.
  */
 let boardCache:
-  | { scope: 'wall'; wall: BlockResult[] }
+  | { scope: 'wall'; wall: BlockWall }
   | { scope: 'block' | 'all'; scores: ScoreRow[]; height?: number }
   | null = null
 
@@ -1073,7 +1083,7 @@ async function loadBoard(scope: 'block' | 'all' | 'wall'): Promise<void> {
       // Faces arrive after the tiles do, exactly as on the other two tabs: the
       // wall renders with short npubs immediately and upgrades itself when the
       // kind-0 events land, so a slow profile relay never holds up the board.
-      for (const b of wall) running?.profiles.want(b.winner.pubkey)
+      for (const b of wall.blocks) running?.profiles.want(b.winner.pubkey)
       boardCache = { scope, wall }
       paintBoard()
     } catch {

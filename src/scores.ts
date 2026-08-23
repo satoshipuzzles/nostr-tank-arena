@@ -178,7 +178,23 @@ export interface BlockResult {
  * who signed it. Winning a block means having published the largest number, not
  * having scored it. The README's "How to cheat this" is the honest version.
  */
-export async function fetchBlockWall(net: Net, limit = 60): Promise<BlockResult[]> {
+export interface BlockWall {
+  blocks: BlockResult[]
+  /**
+   * True when the relays had more blocks than fit, so this is a window and not
+   * the history.
+   *
+   * It exists because of what the caller does with it. A season tally computed
+   * over a truncated window is *wrong*, not merely incomplete — the oldest
+   * season in view is missing however many of its blocks fell off the end, and
+   * a screen saying "so-and-so leads with four blocks" when it cannot see the
+   * other twenty is a confident lie. The UI drops that line for the oldest
+   * season rather than qualifying it.
+   */
+  truncated: boolean
+}
+
+export async function fetchBlockWall(net: Net, limit = 60): Promise<BlockWall> {
   const events: Event[] = await net.list({
     kinds: [KIND_SCORE],
     '#t': ['nostr-tank-arena'],
@@ -222,7 +238,8 @@ export async function fetchBlockWall(net: Net, limit = 60): Promise<BlockResult[
       kills: rows.reduce((n, r) => n + r.kills, 0),
     })
   }
-  return wall.sort((a, b) => b.height - a.height).slice(0, limit)
+  wall.sort((a, b) => b.height - a.height)
+  return { blocks: wall.slice(0, limit), truncated: wall.length > limit }
 }
 
 /**
@@ -234,6 +251,7 @@ export async function fetchBlockWall(net: Net, limit = 60): Promise<BlockResult[
  * measure of free time rather than of anything that happened in a match.
  */
 export function seasonWinners(wall: BlockResult[]): { season: number; pubkey: string; blocks: number }[] {
+  if (!wall.length) return []
   const bySeason = new Map<number, Map<string, number>>()
   for (const b of wall) {
     let tally = bySeason.get(b.season)

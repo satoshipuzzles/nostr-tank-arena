@@ -167,6 +167,44 @@ wss.on('connection', (ws) => {
 })
 const relayUrl = `ws://localhost:${wss.address().port}`
 
+// -------------------------------------------------- a history that does not fit
+//
+// The wall shows the most recent 60 blocks. A season tally computed over a
+// window that cut into a season is not incomplete, it is *wrong* — the oldest
+// season on screen is missing however many blocks fell off the end, so
+// "so-and-so leads with four" is a confident lie about a season with twenty
+// more blocks in it. This relay has more history than fits, and the checks
+// below are about the screen admitting that.
+const DEEP_SEASON = 300
+const DEEP_BASE = DEEP_SEASON * EPOCH
+const DEEP = []
+for (let i = 0; i < 70; i++) {
+  // Ace takes every one of them. If the wall showed a season tally over its
+  // window it would say "ace leads with 60", of a season with 70 blocks in it.
+  DEEP.push(score(ace, DEEP_BASE + i, 4, 1, now - (70 - i)))
+}
+const deepWss = new WebSocketServer({ port: 0 })
+deepWss.on('connection', (ws) => {
+  ws.on('message', (raw) => {
+    let msg
+    try {
+      msg = JSON.parse(raw.toString())
+    } catch {
+      return
+    }
+    if (msg[0] === 'EVENT') return ws.send(JSON.stringify(['OK', msg[1].id, true, '']))
+    if (msg[0] !== 'REQ') return
+    const [, id, ...filters] = msg
+    for (const f of filters) {
+      if ((f.kinds ?? []).includes(KIND_SCORE)) {
+        for (const e of DEEP) ws.send(JSON.stringify(['EVENT', id, e]))
+      }
+    }
+    ws.send(JSON.stringify(['EOSE', id]))
+  })
+})
+const deepUrl = `ws://localhost:${deepWss.address().port}`
+
 const browser = await puppeteer.launch({
   executablePath: CHROME,
   headless: 'new',
@@ -314,11 +352,49 @@ try {
   }
 
   await page.close()
+
+  // --- more history than the wall holds ------------------------------------
+
+  const deep = await browser.newPage()
+  await deep.setViewport({ width: 1280, height: 900 })
+  await deep.goto(SITE, { waitUntil: 'domcontentloaded', timeout: 30_000 })
+  await deep.$eval('#relays', (el, v) => { el.value = v }, deepUrl)
+  await deep.type('#name', 'deeptest')
+  await deep.type('#room', 'deep' + Math.floor(Math.random() * 1e6))
+  await deep.click('#play-guest')
+  const deepStarted = await deep
+    .waitForFunction(() => !!window.__game, { timeout: 25_000 })
+    .then(() => true)
+    .catch(() => false)
+  check('a session starts against a relay with more blocks than fit', deepStarted)
+
+  if (deepStarted) {
+    await deep.click('#show-board')
+    const deepTiles = await until(async () => {
+      const n = await deep.evaluate(() => document.querySelectorAll('.blocktile').length)
+      return n > 0 ? n : null
+    })
+    check('the wall stops at its limit rather than rendering everything', deepTiles === 60,
+      `${deepTiles} tiles from 70 blocks`)
+    const note = await deep.evaluate(() => document.querySelector('.wall-note')?.textContent ?? '')
+    // A cap nobody is told about reads as "this is all of it".
+    check('and says so, rather than looking like the whole history',
+      /older ones/.test(note), JSON.stringify(note))
+    const leads = await deep.evaluate(() =>
+      [...document.querySelectorAll('.season-fine')].map((n) => n.textContent))
+    check(
+      'no season tally is claimed for a season the window cut into',
+      !leads.some((t) => /leads with/.test(t ?? '')),
+      JSON.stringify(leads),
+    )
+    await deep.close()
+  }
 } catch (err) {
   check('the run completed', false, err.message)
 } finally {
   await browser.close()
   wss.close()
+  deepWss.close()
 }
 
 console.log('')
