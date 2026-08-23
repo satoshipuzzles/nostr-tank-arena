@@ -72,13 +72,35 @@ const browsers = [
   // check — it must arrive *after* a claim has been published, which is the
   // whole point of it.
   await puppeteer.launch({ executablePath, headless: 'new', args: FLAGS }),
+  // The fourth runs five minutes fast.
+  await puppeteer.launch({ executablePath, headless: 'new', args: FLAGS }),
 ]
 
 const pageErrors = []
 
-async function join(browser, label, name) {
+async function join(browser, label, name, skewSeconds = 0) {
   const page = await browser.newPage()
   await page.setViewport({ width: 1280, height: 800 })
+  if (skewSeconds) {
+    // A wrong wall clock, installed before any page script runs. `Date.now` and
+    // `new Date()` both move; `performance.now` deliberately does not, because a
+    // machine with a wrong clock still has a working monotonic timer and every
+    // animation in the game rides on it.
+    await page.evaluateOnNewDocument((ms) => {
+      const realNow = Date.now
+      Date.now = () => realNow() + ms
+      const RealDate = Date
+      // eslint-disable-next-line no-global-assign
+      Date = class extends RealDate {
+        constructor(...args) {
+          super(...(args.length ? args : [realNow() + ms]))
+        }
+        static now() {
+          return realNow() + ms
+        }
+      }
+    }, skewSeconds * 1000)
+  }
   page.on('pageerror', (e) => pageErrors.push(`[${label}] ${e.message}`))
   await page.goto(URL, { waitUntil: 'domcontentloaded' })
   await page.evaluate(() => localStorage.clear())
@@ -704,12 +726,15 @@ try {
     const n = document.getElementById('alarm')
     return { display: getComputedStyle(n).display, text: n.textContent.replace(/\s+/g, ' ').trim() }
   })
-  check('the screen says behind, by our own number, and what it costs',
+  // The quiet regime gets the opposite headline, because the opposite thing is
+  // broken: the match is fine and only the pads misbehave.
+  check('the quiet failure leads with the pads, not the clock',
     behind.display !== 'none' &&
-      /BEHIND/.test(behind.text) &&
-      /10 minutes/.test(behind.text) &&
-      /pickup you take comes straight back/.test(behind.text),
-    behind.text.slice(0, 170))
+      /EVERY PICKUP YOU TAKE COMES STRAIGHT BACK/.test(behind.text) &&
+      /match is fine/.test(behind.text) &&
+      /behind/.test(behind.text) &&
+      /10 minutes/.test(behind.text),
+    behind.text.slice(0, 190))
 
   // The control, and the reason this signal is trustworthy at all: the ticks
   // landing prove the relays are reachable and reading our events. Take that
@@ -1095,9 +1120,15 @@ try {
     }, [direction, reason, agreed])
 
   const fast = await alarmText('ahead', 'invalid: created_at too far in the future (window 900000 ms)')
+  // The headline is the symptom, not the cause. A player is looking at an arena
+  // where nobody moves; "your clock is wrong" answers a question they did not
+  // ask, and reads as a lie next to what is on their screen.
+  check('the headline names what is broken rather than what caused it',
+    fast.display !== 'none' && /OTHER PLAYERS CAN'T SEE YOU/.test(fast.text),
+    fast.text.slice(0, 90))
   check('a fast clock is named as fast, with the relay\'s window when it gives one',
-    fast.display !== 'none' && /AHEAD/.test(fast.text) && /15 minutes/.test(fast.text),
-    fast.text.slice(0, 150))
+    /ahead/.test(fast.text) && /15 minutes/.test(fast.text),
+    fast.text.slice(0, 190))
 
   // The one that matters, and the one the old code got wrong in production.
   // Three of the four relays this game ships with say `created_at too late` —
@@ -1105,15 +1136,15 @@ try {
   // words silently produced no direction at all. Counted rather than read now.
   const strfry = await alarmText('ahead', 'invalid: created_at too late')
   check('and a wording with neither keyword in it is still named as fast',
-    strfry.display !== 'none' && /AHEAD/.test(strfry.text) && !/behind/i.test(strfry.text),
-    strfry.text.slice(0, 150))
+    strfry.display !== 'none' && /ahead/.test(strfry.text) && !/behind/i.test(strfry.text),
+    strfry.text.slice(0, 190))
   check('without inventing a number the relay never gave',
     !/\d+ minutes/.test(strfry.text), strfry.text.slice(0, 150))
 
   const slow = await alarmText('behind', 'invalid: ephemeral event expired')
   check('and a slow clock is named as slow rather than just "wrong"',
-    slow.display !== 'none' && /BEHIND/.test(slow.text) && !/AHEAD/.test(slow.text),
-    slow.text.slice(0, 150))
+    slow.display !== 'none' && /behind/.test(slow.text) && !/ahead/.test(slow.text),
+    slow.text.slice(0, 190))
 
   check('and the screen says how many relays agreed', /3 relays agree/.test(slow.text),
     slow.text.slice(0, 90))
@@ -1128,6 +1159,48 @@ try {
   }))
   check('and it leaves the page entirely once the alarm clears',
     cleared.attr && cleared.display === 'none', JSON.stringify(cleared))
+
+  // --------------------------------------------- a clock nobody complains about
+  //
+  // The widest silent failure in the game, and it was arithmetic on a number we
+  // chose rather than any relay's policy. The live subscription carried
+  // `since: now - 30`, so a clock ahead by more than thirty seconds made `since`
+  // later than the `created_at` every other player stamps — and a relay applies
+  // a filter to live events, not just to backfill. Five minutes fast: every
+  // other tank invisible, your own tank on all of their screens, every shell you
+  // fire landing. Nothing refuses anything, because these relays tolerate
+  // fifteen minutes forward on the write path.
+  //
+  // The obvious self-check gives a false all-clear, which is why this needs a
+  // *second* client to be believed: our own ticks come back, always, because our
+  // `created_at` and our `since` are computed from the same broken clock. The
+  // filter selects exactly the events stamped wrong.
+  const SKEW = 300
+  const fastClock = await join(browsers[3], 'D', 'delta', SKEW)
+  const skewReal = await fastClock.evaluate(
+    ([s]) => Math.round(Date.now() / 1000) - s,
+    [Math.round(Date.now() / 1000)],
+  )
+  check('the fourth client really is running fast', Math.abs(skewReal - SKEW) < 5,
+    `${skewReal}s ahead, wanted ${SKEW}`)
+
+  let sees = null
+  for (let i = 0; i < 14; i++) {
+    await wait(1500)
+    sees = await fastClock.evaluate(() => ({
+      peers: [...window.__game.peers.values()].map((p) => p.name),
+      ownTicks: window.__game.sawTraffic,
+    }))
+    if (sees.peers.length) break
+  }
+  check('a client five minutes fast can still see the room',
+    !!sees && sees.peers.length > 0, JSON.stringify(sees))
+  // And the other direction of the same failure: the room has to see them too,
+  // which it always did — that asymmetry is what made it invisible.
+  const seenBack = await a.evaluate(() =>
+    [...window.__game.peers.values()].map((p) => p.name))
+  check('and the room can see them, which it always could',
+    seenBack.includes('delta'), JSON.stringify(seenBack))
 
   check('no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '))
 

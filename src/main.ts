@@ -494,24 +494,29 @@ function drawClockAlarm(): void {
   }
   node.hidden = false
   if (fast) {
+    // Name what is broken, then what caused it. A player 61 seconds slow is
+    // looking at an arena where nobody moves and every pad works perfectly —
+    // "your clock is behind" is true and reads as a lie, because it answers a
+    // question they did not ask. The symptom is the headline; the direction is
+    // the fix, and it goes underneath.
+    const alsoPickups = players.some((p) => p.game.claimsReachingNobody)
     node.innerHTML =
-      `<b>THIS MACHINE'S CLOCK IS ${fast.direction === 'ahead' ? 'AHEAD' : 'BEHIND'}</b>` +
-      `<span>${clockAdvice(fast.direction, fast.reason, fast.agreed)}</span>` +
+      `<b>OTHER PLAYERS CAN'T SEE YOU</b>` +
+      `<span>The relays are refusing everything this game sends${
+        alsoPickups ? ', and <b>every pickup you take comes straight back</b>' : ''
+      }. ${clockAdvice(fast.direction, fast.reason, fast.agreed)}</span>` +
       `<code>${escapeHtml(fast.reason)}</code>`
     return
   }
-  // The number here is ours rather than the relay's, and it is a *lower bound*
-  // that the signal's own precondition establishes: a claim only outlives its
-  // deadline if we are behind by more than that deadline, and the ticks landing
-  // prove the relay would have taken it otherwise. Said as "more than", because
-  // that is exactly what is known — it could be an hour.
+  // The quiet regime: ticks are landing, so the room is fine and the only
+  // casualty is the one event kind carrying a deadline of ours.
   const minutes = Math.round(slow!.behindBySeconds / 60)
   node.innerHTML =
-    `<b>THIS MACHINE'S CLOCK IS BEHIND</b>` +
-    `<span>By more than ${minutes} minutes. The game plays fine, ` +
-    `but <b>every pickup you take comes straight back</b> — the relays drop the claim as ` +
-    `already expired before anyone else hears it. Set the clock, or turn on automatic ` +
-    `time, and this will clear itself.</span>` +
+    `<b>EVERY PICKUP YOU TAKE COMES STRAIGHT BACK</b>` +
+    `<span>Other players can see you and the match is fine — but the relays drop ` +
+    `every pickup claim as already expired before anyone else hears it. ` +
+    `<b>This machine's clock is behind</b>, by more than ${minutes} minutes. ` +
+    `Set the clock, or turn on automatic time, and this will clear itself.</span>` +
     `<code>${escapeHtml(slow!.reason)}</code>`
 }
 
@@ -547,8 +552,7 @@ function clockAdvice(direction: ClockDirection, reason: string, agreed: number):
       : 'the clock here is <b>behind</b> — our events arrive already out of date'
   return (
     `${agreed} relays agree: ${which}. ` +
-    'Nothing you do in the game will fix it — set the clock, or turn on automatic time, ' +
-    'and this will clear itself.'
+    'Set the clock, or turn on automatic time, and this will clear itself.'
   )
 }
 

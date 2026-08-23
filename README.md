@@ -742,6 +742,48 @@ than ten minutes in that direction, which is what somebody needs in order to go
 and fix it, but it cannot rule out two relays that are both fast. The quorum is
 what makes that unlikely.
 
+### The local clock is off the read path
+
+A subscriber's clock has no business in a filter the **relay** evaluates.
+
+The live subscription used to carry `since: now - 30`. A clock ahead by more than
+thirty seconds makes `since` later than the `created_at` every other player
+stamps — and a relay applies a filter to live events, not only to backfill. So:
+
+**Five minutes fast, and every other tank is invisible to you, while your own
+tank is on all of their screens and every shell you fire lands.** Nothing refuses
+anything; these relays tolerate fifteen minutes forward on the write path. No
+rejection, no streak, no quorum, no alarm. It was arithmetic on a number we
+chose, not a relay's policy.
+
+The obvious self-check gives a false all-clear, and that is the part worth
+remembering. "Are we getting our own ticks back?" — yes, always, because our
+`created_at` and our `since` come from the same broken clock. **The filter selects
+exactly the events stamped wrong and rejects every event stamped right.** Loopback
+green, room empty. It takes a second client to see it, and the suite now runs one
+with `Date.now` moved five minutes forward.
+
+Both subscriptions are bounded by `limit` now. The room tag already narrows them,
+and these relays keep ephemeral events for five minutes.
+
+### The screen names the symptom, not the cause
+
+There are two silent bands and they break opposite things:
+
+| clock | publishing | receiving | what the player sees |
+|---|---|---|---|
+| >900s ahead | all refused | nothing | everything dead |
+| 30–900s ahead | accepted *and delivered* | **nothing** | empty arena, and you are visible in it |
+| 60s behind – 30s ahead | fine | fine | healthy |
+| 60–600s behind | ticks refused | fine | **nobody moves, pads work perfectly** |
+| >600s behind | ticks refused, claims expire | fine | everything dead |
+
+"Your clock is behind" on a screen where every pad behaves beautifully is true and
+reads as a lie, because it answers a question the player did not ask. So the
+headline is the row of that table — *other players can't see you*, or *every
+pickup you take comes straight back* — and the direction goes underneath, where a
+cause belongs.
+
 ### Direction is counted, not read
 
 The screen used to work out which way the clock was wrong by looking for

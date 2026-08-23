@@ -80,6 +80,32 @@ const MAX_HULL = 3
  * few is a pad that shows as live when it is gone — which is silent, and looks
  * like netcode.
  */
+/**
+ * How much of the room's recent traffic to ask for on join.
+ *
+ * Bounded by a count rather than by a time, and that is the entire point. This
+ * filter used to carry `since: now - 30`, and cowboy measured what that costs:
+ * a clock **ahead** by more than thirty seconds makes `since` later than the
+ * `created_at` every other player stamps, so no event anybody publishes can ever
+ * match it. Not a relay policy — arithmetic on a number we chose.
+ *
+ * Five minutes fast and every other tank is invisible to you, while your own
+ * tank is on all of their screens and every shell you fire lands. Nothing
+ * refuses anything, so no streak, no quorum, no alarm: the write gate on these
+ * relays tolerates fifteen minutes forward, so the publishes sail through.
+ *
+ * And the obvious self-test gives a false all-clear. "Are we getting our own
+ * ticks back?" — yes, always, because our `created_at` and our `since` are both
+ * computed from the same broken clock. The filter selects exactly the events
+ * stamped wrong and rejects every event stamped right. Loopback green, room
+ * empty.
+ *
+ * So the local clock is off the read path entirely. The `#t` room tag already
+ * bounds this, and these relays keep ephemeral events for five minutes, so a
+ * count is all the bound it needs.
+ */
+const LIVE_BACKFILL = 400
+
 const CLAIM_BACKFILL = 250
 /**
  * How long a relay is asked to keep a claim, in seconds.
@@ -244,6 +270,16 @@ export class Game {
   /** Claims every relay refused, so the pad was put back. Non-zero is worth reading. */
   refusedClaims = 0
   /**
+   * True when the most recent claim reached nobody, for any reason.
+   *
+   * Read by the HUD, which names the *symptom* rather than the cause. A player
+   * whose clock is a minute slow sees other tanks frozen and pads working
+   * perfectly; one whose clock is a quarter of an hour fast sees both break.
+   * Those are different sentences and the direction alone does not distinguish
+   * them.
+   */
+  claimsReachingNobody = false
+  /**
    * Consecutive claims two or more relays rejected as already expired.
    *
    * This is the slow half of the clock diagnosis, and it needs its own signal
@@ -337,39 +373,36 @@ export class Game {
   /**
    * Subscribe to the room and publish the session attestation.
    *
-   * Two subscriptions, not one, and the split matters.
+   * Two subscriptions, split by how much a missed event costs, and **neither
+   * carries a `since`** — a subscriber's clock has no business in a filter the
+   * *relay* evaluates.
    *
-   * The live stream is ephemeral traffic. `since` is a courtesy there: sessions
-   * rebroadcast every 12 seconds and state and shells are continuous, so if the
-   * window is wrong by a minute nothing notices — it all self-heals within
-   * seconds.
+   * The claim went first, because it is published exactly once and is the only
+   * kind here where a wrong answer is permanent for the round. `since = now -
+   * 30` was narrower than a pad's 32-second life, and it was computed from this
+   * client's clock while the relay matches it against `created_at` written by
+   * other clients — so a joiner sixty seconds fast asked for events from the
+   * future and backfilled nothing at all.
    *
-   * A claim is published exactly **once**. It is the only thing here that
-   * genuinely depends on the backfill window being right, and the only one
-   * where a wrong answer is permanent for the round. cowboy found two ways the
-   * old shared filter got it wrong, and both were silent:
+   * The live stream had the identical bug and it is far worse, because this one
+   * is not merely a backfill window: a relay applies the filter to live events
+   * too. See `LIVE_BACKFILL`. The reason it survived a round of fixing is that
+   * ephemeral traffic self-heals within seconds *when it arrives at all*, which
+   * made `since` look like a courtesy rather than a gate.
    *
-   *   - `since = now - 30` against pads that live `waveSeconds - 2` = 32
-   *     seconds. A claim 31 seconds old, for a pad still on the board and still
-   *     taken, was simply never asked for.
-   *   - `since` was computed from *this* client's clock while the relay matches
-   *     it against `created_at` written by *other* clients. A joiner sixty
-   *     seconds fast asks for events from the future and backfills nothing at
-   *     all.
-   *
-   * So claims drop `since` entirely and are bounded by `limit` instead. The
-   * NIP-40 expiration already caps how long a relay keeps one, so the window is
-   * enforced where it can be enforced honestly — by the publisher, in the event
-   * — rather than by a subscriber guessing with a clock nobody else shares.
-   * Over-fetching is free now that an unknown claim is buffered rather than
-   * dropped: a claim for a pad that never materialises just ages out.
+   * Both are bounded by `limit` now. A claim's NIP-40 expiration already caps
+   * how long a relay keeps it, so that window is enforced where it can be
+   * enforced honestly — by the publisher, in the event — rather than by a
+   * subscriber guessing with a clock nobody else shares. Over-fetching is free
+   * now that an unknown claim is buffered rather than dropped: one for a pad
+   * that never materialises just ages out.
    */
   async start(): Promise<void> {
     this.net.subscribe(
       {
         kinds: [KIND_SESSION, KIND_STATE, KIND_SHELL, KIND_DEATH],
         '#t': [roomTag(this.room)],
-        since: Math.floor(Date.now() / 1000) - 30,
+        limit: LIVE_BACKFILL,
       },
       (e) => this.onEvent(e),
     )
@@ -1152,6 +1185,7 @@ export class Game {
 
   private settleClaim(pickup: Pickup, outcome: PublishOutcome): void {
     this.noteClaimVerdict(outcome)
+    this.claimsReachingNobody = outcome.definitelyNowhere
     // `definitelyNowhere`, not `unanimouslyRefused`. The two questions came
     // apart: whether to give up on a relay is answered by policy refusals
     // alone, but whether the event exists anywhere has to count `invalid:` as
