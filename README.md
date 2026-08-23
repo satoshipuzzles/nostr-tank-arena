@@ -805,8 +805,23 @@ kind here survives it: a tick is replaced 100ms later, an attestation is
 re-announced when a new peer appears, and a missed shell is a hit that never
 lands on a victim who is authoritative over its own hull regardless. Accepting a
 stored one costs a ghost match. `Game.storedDropped` counts them so the trade is
-observable rather than an assumption — a number still climbing long after the
-join is a relay ordering its buffer the other way.
+observable rather than an assumption.
+
+Rate does not say which population they came from, which is a correction to an
+earlier version of this note. A relay that flushes its live buffer onto the
+stored side does it once per subscription registration and then goes live —
+bounded by however long its historical query took, and so the same shape as a
+stored replay: a burst at join, then nothing. A *sustained* climb is therefore
+not ordering at all, it is churn, something resubscribing over and over and
+re-opening its own pre-EOSE window each pass.
+
+Age is the discriminator, and `Game.storedFresh` is the half of the count that
+carries it. A stored ghost is seconds to minutes old; a live event flushed early
+is milliseconds old, and no plausible clock skew closes a gap that wide. Only
+that half is worth a player's attention — it is the half that cost a real event
+— so it is the half the HUD says out loud, and the drop count on its own stays
+off the screen. Read it as a relative signal: the subtraction is against our own
+clock, so a skewed client shifts every reading by its own offset.
 
 This is also the clearest bill for the monoculture. Three stock strfry is three
 votes and one opinion, and the first thing a second implementation did was
