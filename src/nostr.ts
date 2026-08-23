@@ -749,11 +749,24 @@ export class Net {
    * pool still dedupes connections by URL — and duplicate deliveries were
    * already handled, because relays echo and `Game.onEvent` keys on event id.
    */
-  subscribe(filter: Filter, onevent: (e: Event) => void): void {
+  /**
+   * `stored` tells the caller which side of EOSE an event arrived on.
+   *
+   * Every relay sends `EOSE` when it has finished replaying its store, so it is
+   * an exact, clock-free boundary between "this already happened" and "this is
+   * happening" — and it is per relay, which is why one subscription each matters
+   * for more than seeing a `CLOSED`. Tracked here rather than in the caller
+   * because only this side knows which relay an event came from.
+   */
+  subscribe(filter: Filter, onevent: (e: Event, stored: boolean) => void): void {
     for (const url of this.relays) {
+      let live = false
       this.closers.push(
         this.pool.subscribeMany([url], filter, {
-          onevent,
+          onevent: (e: Event) => onevent(e, !live),
+          oneose: () => {
+            live = true
+          },
           // One subscription per relay costs nostr-tools' cross-relay dedupe:
           // its `_knownIds` is allocated per `subscribeMany` call, so three
           // calls means three sets and every event arrives about three times.

@@ -70,6 +70,15 @@ const SCATTER_SPREAD = 0.16
  */
 const EXPIRED_CLAIM_STREAK = 2
 
+/**
+ * How long inbound silence has to last before the HUD says the ear is gone.
+ *
+ * Generously longer than a tick interval and shorter than `PEER_TIMEOUT_MS` *
+ * 1.5, so it fires before every peer has quietly aged out and left a player
+ * staring at an arena that looks merely empty.
+ */
+const READ_SILENCE_MS = 12_000
+
 /** The most damage one shell may claim, however the event was written. */
 const MAX_HULL = 3
 /**
@@ -81,30 +90,28 @@ const MAX_HULL = 3
  * like netcode.
  */
 /**
- * How much of the room's recent traffic to ask for on join.
+ * How much of the room's recent traffic to ask a relay for on join: as close to
+ * none as a filter allows.
  *
- * Bounded by a count rather than by a time, and that is the entire point. This
- * filter used to carry `since: now - 30`, and cowboy measured what that costs:
- * a clock **ahead** by more than thirty seconds makes `since` later than the
- * `created_at` every other player stamps, so no event anybody publishes can ever
- * match it. Not a relay policy — arithmetic on a number we chose.
+ * This started as `since: now - 30` and cowboy found both halves of why that was
+ * wrong. First the clock: a subscriber's `since` is matched by the relay against
+ * `created_at` written by everybody else, so a client thirty seconds fast made
+ * the floor later than every event in the room and received nothing — and the
+ * loopback self-check passed the whole time, because our own `created_at` and
+ * our own `since` come off the same broken clock.
  *
- * Five minutes fast and every other tank is invisible to you, while your own
- * tank is on all of their screens and every shell you fire lands. Nothing
- * refuses anything, so no streak, no quorum, no alarm: the write gate on these
- * relays tolerates fifteen minutes forward, so the publishes sail through.
+ * Replacing it with a count fixed the clock and removed the only thing keeping a
+ * *finished match* out of a fresh join. A count never binds: it does not drop
+ * until the relay's store drops it, and the real bound turned out to be
+ * `ephemeralEventsLifetimeSeconds`, a default in three config files we do not
+ * own. A firefight arrived intact three and a half minutes after it ended.
  *
- * And the obvious self-test gives a false all-clear. "Are we getting our own
- * ticks back?" — yes, always, because our `created_at` and our `since` are both
- * computed from the same broken clock. The filter selects exactly the events
- * stamped wrong and rejects every event stamped right. Loopback green, room
- * empty.
- *
- * So the local clock is off the read path entirely. The `#t` room tag already
- * bounds this, and these relays keep ephemeral events for five minutes, so a
- * count is all the bound it needs.
+ * So neither a clock nor a count decides this — `onEvent` drops everything that
+ * arrives before EOSE, which is exact, per relay, and needs nothing from
+ * anybody. This number only exists because a filter always gets some store pass
+ * on the way to EOSE, and one event is the smallest honest way to ask for none.
  */
-const LIVE_BACKFILL = 400
+const LIVE_BACKFILL = 1
 
 const CLAIM_BACKFILL = 250
 /**
@@ -132,6 +139,16 @@ const STREAK_RAPID_MS = 14_000
 /** How long the podium sits between rounds. */
 export const INTERMISSION_MS = 9_000
 const SESSION_REBROADCAST_MS = 12_000
+/**
+ * How often to re-announce ourselves while somebody in the room is unnamed.
+ *
+ * Both sides do this, so two clients that join together converge in about a
+ * second and a half rather than in twelve. It costs one extra event each while
+ * anyone is a stranger and nothing at all once the room is settled.
+ */
+const SESSION_HELLO_MS = 1_500
+/** How long to wait after a new arrival before re-announcing, to batch them. */
+const HELLO_COALESCE_MS = 250
 const INTERP_MS = 130
 const MAX_EXTRAPOLATE_MS = 260
 const PEER_TIMEOUT_MS = 9_000
@@ -312,6 +329,8 @@ export class Game {
   displayColor: number
   /** Set when a relay subscription has produced at least one event. */
   sawTraffic = false
+  /** performance.now() of the last event any relay delivered. Drives the watchdog. */
+  lastInboundAt = 0
   /**
    * The rule change this block is playing under, derived from the same hash
    * that picks the map. Nothing is announced and nobody agrees to it — every
@@ -347,6 +366,8 @@ export class Game {
   private seenPrev = new Set<string>()
   private lastTick = 0
   private lastSessionBroadcast = 0
+  /** When to re-announce because somebody new turned up. 0 when nothing is due. */
+  private helloAt = 0
   private disposed = false
 
   constructor(
@@ -402,13 +423,20 @@ export class Game {
       {
         kinds: [KIND_SESSION, KIND_STATE, KIND_SHELL, KIND_DEATH],
         '#t': [roomTag(this.room)],
+        // Deliberately tiny. Nothing on this subscription is worth replaying —
+        // `onEvent` drops everything that arrives before EOSE — so this only
+        // exists because a filter always gets *some* store pass, and asking for
+        // one event is the smallest honest way to say "none, thank you".
         limit: LIVE_BACKFILL,
       },
-      (e) => this.onEvent(e),
+      (e, stored) => this.onEvent(e, stored),
     )
     this.net.subscribe(
       { kinds: [KIND_CLAIM], '#t': [roomTag(this.room)], limit: CLAIM_BACKFILL },
-      (e) => this.onEvent(e),
+      // A claim is *meant* to be read from the store — that is the whole reason
+      // it is not an ephemeral event. It is the one kind here where an old copy
+      // is the point rather than a hazard.
+      (e) => this.onEvent(e, false),
     )
     await this.broadcastSession()
   }
@@ -449,8 +477,46 @@ export class Game {
 
   // ---------------------------------------------------------------- inbound
 
-  onEvent(e: Event): void {
+  /**
+   * `stored` is true for anything a relay replayed out of its store on join.
+   *
+   * That distinction has to exist and it cannot be a time window. Dropping
+   * `since` from the live filter fixed a clock bug and removed the only thing
+   * keeping a *finished match* out of a fresh join — `limit` never binds,
+   * because the count does not drop until the relay's store drops it, and the
+   * bound turned out to be `ephemeralEventsLifetimeSeconds` in somebody else's
+   * config. cowboy measured a firefight arriving intact three and a half
+   * minutes after it ended, on all three relays.
+   *
+   * What that did to a joining player: shells from a match that was over
+   * spawning at the muzzle and taking hull points off them, somebody else's
+   * deaths in their kill feed and on their scoreboard, and ghost tanks standing
+   * in the arena for the nine seconds of `PEER_TIMEOUT_MS`.
+   *
+   * The fast-forward in `onShell` looks like it bounds this and cannot: for a
+   * peer never seen before, `updateOffset` sets `peer.offset` from that very
+   * event, so `lateMs` is exactly zero and a shell fired minutes ago arrives
+   * with its full four seconds of flight and its full damage. **A staleness
+   * check whose reference is derived from the stale data** — the same shape as
+   * a loopback that passes because both sides come off the same broken clock.
+   *
+   * EOSE is the honest boundary: every relay sends it when its store is
+   * exhausted, it is exact, and it needs no clock, no `since`, and nothing
+   * agreed with anybody. A shell fired before we joined is not a shell, it is a
+   * record that one was fired — there is no such thing as a late one.
+   */
+  onEvent(e: Event, stored = false): void {
     if (this.disposed) return
+    // Nothing on the ephemeral subscription survives the store, not even the
+    // roster. A stored tick names somebody who *was* here and does not place
+    // them: creating a peer from it stands a ghost tank in the middle of the
+    // arena for the nine seconds of `PEER_TIMEOUT_MS`, and its timestamp would
+    // seed `peer.offset` off a minutes-old clock, which is what made the shell
+    // fast-forward read zero. Anyone genuinely present rebroadcasts their
+    // session attestation every `SESSION_REBROADCAST_MS` and ticks ten times a
+    // second, so the roster rebuilds from live traffic within moments — at the
+    // cost of nothing, because a stale roster entry is a lie about who is here.
+    if (stored) return
     if (this.seen.has(e.id) || this.seenPrev.has(e.id)) return
     this.seen.add(e.id)
     if (this.seen.size > 3000) {
@@ -460,6 +526,7 @@ export class Game {
       this.seen = new Set()
     }
     this.sawTraffic = true
+    this.lastInboundAt = performance.now()
 
     switch (e.kind) {
       case KIND_SESSION:
@@ -508,6 +575,10 @@ export class Game {
         streak: 0,
       }
       this.peers.set(session, peer)
+      // Somebody just arrived, and they missed everything we have already said.
+      // Coalesced through a deadline rather than published here, so four tanks
+      // joining at once produce one hello each instead of four.
+      if (!this.helloAt) this.helloAt = performance.now() + HELLO_COALESCE_MS
     }
     return peer
   }
@@ -681,6 +752,30 @@ export class Game {
       : null
   }
 
+  /**
+   * True when nothing has come back from any relay for a while.
+   *
+   * One check that covers every read-path failure in this game, and the reason
+   * it works is that **relays echo our own events to our own subscription.**
+   * `onEvent` discards our ticks a few lines later, but they arrive — ten a
+   * second, from every relay that is still listening — so a healthy read path
+   * is never quiet, whether or not anybody else is in the room. Silence means
+   * the ear is gone, not that the arena is empty.
+   *
+   * Which covers a dropped socket, a `CLOSED` we could not act on, and a filter
+   * that matches nothing — three failures with three unrelated causes and one
+   * symptom, and every one of them used to be completely invisible: still
+   * publishing, still on everybody else's screen, seeing nothing.
+   *
+   * `sawTraffic` and `lastInboundAt` were both already wired up. Nothing read
+   * them, which is its own lesson — an instrument with no consumer is not an
+   * instrument.
+   */
+  get readPathStalled(): boolean {
+    if (!this.sawTraffic || this.tank.dead) return false
+    return performance.now() - this.lastInboundAt > READ_SILENCE_MS
+  }
+
   /** Hull points this round. Glass Cannon makes it 1. */
   get maxHp(): number {
     return this.modifier.maxHp
@@ -728,7 +823,27 @@ export class Game {
       this.lastTick = now
       this.publishState(now)
     }
-    if (now - this.lastSessionBroadcast >= SESSION_REBROADCAST_MS) {
+    // Say hello again whenever somebody new turns up, and rebroadcast on a slow
+    // timer otherwise.
+    //
+    // The attestation is the only thing binding a tick key to a real npub, so an
+    // unverified peer renders as `tank-1a2b` with a `?` after it. That used to
+    // be papered over by the relay's store, which handed a joining client
+    // everyone's last attestation for free. Nothing is replayed now — a stored
+    // tick is a ghost and a stored death is somebody else's scoreboard — so the
+    // roster has to be built from live traffic.
+    //
+    // The trigger has to be *a new peer*, not "somebody here is unverified".
+    // The first version used the latter and was one-sided in exactly the way
+    // that matters: the player who arrived first sees the newcomer's attestation
+    // immediately, so they have no strangers, no reason to speak, and the
+    // newcomer sits looking at an anonymous tank until the twelve-second timer
+    // comes round. The one who needs to be re-announced to is the one who cannot
+    // tell they are missing anything.
+    if (this.helloAt && now >= this.helloAt && now - this.lastSessionBroadcast >= SESSION_HELLO_MS) {
+      this.helloAt = 0
+      void this.broadcastSession()
+    } else if (now - this.lastSessionBroadcast >= SESSION_REBROADCAST_MS) {
       void this.broadcastSession()
     }
     while (this.feed.length && now - this.feed[0].at > 6000) this.feed.shift()

@@ -353,6 +353,15 @@ function loop(now = performance.now()): void {
 }
 
 let hudAt = 0
+/** Matches `READ_SILENCE_MS` in game.ts; only used for the sentence. */
+const READ_SILENCE_S = 12
+const host = (url: string) => {
+  try {
+    return new URL(url).host
+  } catch {
+    return url
+  }
+}
 
 /** Which buff timer each pickup runs. `repair` is instant and has none. */
 const BUFF_TIMERS: Partial<Record<PickupKind, keyof Buffs>> = {
@@ -480,6 +489,9 @@ function drawClockAlarm(): void {
   // any relay whose tolerance for an *old* event is tighter than our own claim
   // deadline — which is the common case, because the four relays this game
   // ships with give an ephemeral event sixty seconds.
+  // Loudest first, and this one is loudest because it is the one the player
+  // cannot infer. A dead read path looks exactly like an empty room.
+  const deaf = players.find((p) => p.game.readPathStalled) ?? null
   const fast = players.map((p) => p.game.net.clockAlarm).find((a) => a !== null)
   // And the quiet one, which `Net` structurally cannot see. Where the relay's
   // tolerance for an old event is *looser* than our claim's deadline, the only
@@ -488,11 +500,25 @@ function drawClockAlarm(): void {
   // every pickup comes straight back.
   const slow = fast ? null : players.map((p) => p.game.slowClockAlarm).find((a) => a != null)
 
-  if (!fast && !slow) {
+  if (!deaf && !fast && !slow) {
     node.hidden = true
     return
   }
   node.hidden = false
+  if (deaf) {
+    // Relays echo our own events back to our own subscription, so a healthy read
+    // path is never silent even alone in a room. Silence means the ear is gone.
+    const closed = deaf.game.net.deafRelays
+    node.innerHTML =
+      `<b>YOU HAVE STOPPED HEARING THE ROOM</b>` +
+      `<span>Nothing has come back from any relay for ${READ_SILENCE_S} seconds. ` +
+      `Other players may still see you — this side of the connection is the one that ` +
+      `died. Reload to reconnect.</span>` +
+      (closed.length
+        ? `<code>${escapeHtml(closed.map((r) => `${host(r.url)}: ${r.reason}`).join(' · '))}</code>`
+        : '<code>no relay said why — the socket simply went quiet</code>')
+    return
+  }
   if (fast) {
     // Name what is broken, then what caused it. A player 61 seconds slow is
     // looking at an arena where nobody moves and every pad works perfectly —

@@ -182,14 +182,20 @@ try {
 
   // Movement propagates.
   const beforeMove = (await snap(b)).peers[0]
-  // Long enough to clear the threshold even when the renderer is in software
-  // and the simulation is therefore running at a fraction of wall-clock speed.
+  // Polled, not waited out. Under software rasterisation the simulation runs in
+  // slow motion by a factor that varies with the load on the machine, so any
+  // fixed duration is a window that eventually stops containing the behaviour —
+  // which is the flake I have hit more than any other in this suite.
   await a.keyboard.down('KeyW')
-  await wait(3200)
+  let moved = 0
+  for (let i = 0; i < 14; i++) {
+    await wait(700)
+    const now = (await snap(b)).peers[0]
+    moved = beforeMove && now ? Math.hypot(now.x - beforeMove.x, now.y - beforeMove.y) : 0
+    if (moved > 60) break
+  }
   await a.keyboard.up('KeyW')
-  await wait(1800)
-  const afterMove = (await snap(b)).peers[0]
-  const moved = beforeMove && afterMove ? Math.hypot(afterMove.x - beforeMove.x, afterMove.y - beforeMove.y) : 0
+  await wait(600)
   check('B sees A move', moved > 60, `${Math.round(moved)}px`)
 
   // Duel: park them in a clear lane and put three shells into bravo.
@@ -1153,10 +1159,20 @@ try {
     delete window.__game.net.clockAlarm
   })
   await wait(400)
-  const cleared = await a.evaluate(() => ({
-    attr: document.getElementById('alarm').hidden,
-    display: getComputedStyle(document.getElementById('alarm')).display,
-  }))
+  // Polled: the HUD repaints on a throttle, so "is it gone yet" a fixed moment
+  // after the state changed is a guess about a timer.
+  let cleared = null
+  for (let i = 0; i < 12; i++) {
+    cleared = await a.evaluate(() => ({
+      attr: document.getElementById('alarm').hidden,
+      display: getComputedStyle(document.getElementById('alarm')).display,
+      text: document.getElementById('alarm').textContent.replace(/\s+/g, ' ').trim().slice(0, 70),
+      stalled: window.__game.readPathStalled,
+      slow: window.__game.slowClockAlarm,
+    }))
+    if (cleared.attr && cleared.display === 'none') break
+    await wait(300)
+  }
   check('and it leaves the page entirely once the alarm clears',
     cleared.attr && cleared.display === 'none', JSON.stringify(cleared))
 
@@ -1201,6 +1217,115 @@ try {
     [...window.__game.peers.values()].map((p) => p.name))
   check('and the room can see them, which it always could',
     seenBack.includes('delta'), JSON.stringify(seenBack))
+
+  // ------------------------------------------- nothing replayed from the store
+  //
+  // Dropping `since` fixed a clock bug and removed the only thing keeping a
+  // finished match out of a fresh join. `limit` never binds — the count does not
+  // drop until the relay's store drops it — so a joining player was handed
+  // somebody else's firefight in full: shells spawning at the muzzle with their
+  // full damage, deaths in their kill feed, ghost tanks in the arena.
+  //
+  // EOSE is the boundary, and it needs no clock. Everything before it is a
+  // record that something happened; only a live event is a thing happening.
+  const replay = await a.evaluate(() => {
+    const g = window.__game
+    const before = { shells: g.shells.size, feed: g.feed.length, peers: g.peers.size }
+    const stamp = () => Math.floor(Date.now() / 1000)
+    const ghost = 'aa'.repeat(32)
+    // Exactly what a relay hands back out of its store on join.
+    g.onEvent({
+      id: 'rs' + Math.random(), kind: 21001, pubkey: ghost, created_at: stamp(),
+      tags: [], content: JSON.stringify({ id: 'ghostshell', t0: performance.now(), x: 500, y: 500, a: 0, d: 3 }),
+    }, true)
+    g.onEvent({
+      id: 'rd' + Math.random(), kind: 21002, pubkey: ghost, created_at: stamp(),
+      tags: [], content: JSON.stringify({ t: performance.now(), k: null, x: 500, y: 500 }),
+    }, true)
+    g.onEvent({
+      id: 'rt' + Math.random(), kind: 21000, pubkey: ghost, created_at: stamp(),
+      tags: [], content: JSON.stringify({ t: performance.now(), x: 500, y: 500, h: 0, g: 0, hp: 3, d: false }),
+    }, true)
+    return {
+      before,
+      after: { shells: g.shells.size, feed: g.feed.length, peers: g.peers.size },
+      ghostPeer: g.peers.has(ghost),
+    }
+  })
+  check('a shell replayed out of the store does not become a shell',
+    replay.after.shells === replay.before.shells, JSON.stringify(replay))
+  check("and somebody else's death does not land in your kill feed",
+    replay.after.feed === replay.before.feed, JSON.stringify(replay))
+  check('and a stored tick does not stand a ghost tank in the arena',
+    !replay.ghostPeer && replay.after.peers === replay.before.peers, JSON.stringify(replay))
+
+  // The other direction: a *live* event of the same shape must still work, or
+  // "nothing replays" would pass against a client that had stopped listening.
+  const liveOne = await a.evaluate(() => {
+    const g = window.__game
+    const before = g.shells.size
+    g.onEvent({
+      id: 'ls' + Math.random(), kind: 21001, pubkey: 'bb'.repeat(32), created_at: Math.floor(Date.now() / 1000),
+      tags: [], content: JSON.stringify({ id: 'liveshell', t0: performance.now(), x: 520, y: 520, a: 0 }),
+    }, false)
+    return { before, after: g.shells.size }
+  })
+  check('while a live one of exactly the same shape still does',
+    liveOne.after > liveOne.before, JSON.stringify(liveOne))
+
+  // ------------------------------------------------- the ear, not the mouth
+  //
+  // Relays echo our own events back to our own subscription, so a healthy read
+  // path is never silent — even alone in a room. That is what makes one check
+  // cover a dropped socket, a CLOSED we could not act on, and a filter matching
+  // nothing: three causes, one symptom, all of them previously invisible.
+  const healthy = await a.evaluate(() => ({
+    stalled: window.__game.readPathStalled,
+    quietFor: Math.round(performance.now() - window.__game.lastInboundAt),
+  }))
+  check('a live client is not deaf, because its own echo comes back',
+    healthy.stalled === false && healthy.quietFor < 12_000, JSON.stringify(healthy))
+
+  // Inbound has to actually stop. Backdating `lastInboundAt` on its own proves
+  // nothing — the echo overwrites it ten times a second, which is a control the
+  // thing under test rewrites, the same trap as the accepted-count watermark
+  // earlier in this file. The ear is unplugged instead.
+  const wentQuiet = await a.evaluate(async () => {
+    const g = window.__game
+    const realOnEvent = g.onEvent.bind(g)
+    g.onEvent = () => {}
+    g.lastInboundAt = performance.now() - 20_000
+    g.tank.dead = false
+    await new Promise((r) => setTimeout(r, 500))
+    const n = document.getElementById('alarm')
+    const seen = {
+      stalled: g.readPathStalled,
+      quietFor: Math.round(performance.now() - g.lastInboundAt),
+      display: getComputedStyle(n).display,
+      text: n.textContent.replace(/\s+/g, ' ').trim(),
+    }
+    g.onEvent = realOnEvent
+    return seen
+  })
+  check('and twelve seconds of silence puts it on the screen',
+    wentQuiet.stalled && wentQuiet.display !== 'none' &&
+      /STOPPED HEARING THE ROOM/.test(wentQuiet.text),
+    wentQuiet.text.slice(0, 120))
+  check('and it says this side died rather than blaming the room',
+    /may still see you/.test(wentQuiet.text), wentQuiet.text.slice(0, 200))
+  // Polled for the same reason as above: the state clears on the next inbound
+  // event and the panel clears on the next HUD repaint, which are two timers.
+  let recovered = null
+  for (let i = 0; i < 12; i++) {
+    await wait(300)
+    recovered = await a.evaluate(() => ({
+      stalled: window.__game.readPathStalled,
+      hidden: document.getElementById('alarm').hidden,
+    }))
+    if (!recovered.stalled && recovered.hidden) break
+  }
+  check('and it clears the moment anything arrives',
+    !recovered.stalled && recovered.hidden, JSON.stringify(recovered))
 
   check('no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '))
 

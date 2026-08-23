@@ -766,6 +766,56 @@ with `Date.now` moved five minutes forward.
 Both subscriptions are bounded by `limit` now. The room tag already narrows them,
 and these relays keep ephemeral events for five minutes.
 
+### Nothing is replayed into a live match
+
+Dropping `since` fixed the clock and removed the only thing keeping a **finished
+match** out of a fresh join. A `limit` does not replace it: the count never binds,
+because it does not drop until the relay's store drops it — and the real bound
+turned out to be `ephemeralEventsLifetimeSeconds`, a default in three config
+files nobody here owns. cowboy measured a firefight arriving intact three and a
+half minutes after it ended, on all three relays.
+
+What a joining player got: shells from a match that was over spawning at the
+muzzle and taking hull points off them, somebody else's deaths in their kill feed
+and on their scoreboard, and ghost tanks standing in the arena for nine seconds.
+
+The fast-forward in `onShell` looks like it bounds this and cannot. For a peer
+never seen before, `updateOffset` seeds `peer.offset` from that very event, so
+the computed lateness is exactly zero and a shell fired minutes ago arrives with
+its full four seconds of flight and its full damage. **A staleness check whose
+reference is derived from the stale data** — the same shape as a loopback that
+passes because both sides come off the same broken clock.
+
+**EOSE is the boundary.** Every relay sends it when its store is exhausted; it is
+exact, it is per relay, and it needs no clock, no `since` and nothing agreed with
+anybody. Everything before it is dropped. A shell fired before you joined is not
+a shell, it is a record that one was fired, and there is no such thing as a late
+one.
+
+Not even the roster survives: a stored tick names somebody who *was* here and
+does not place them. So the attestation is re-announced whenever a new peer
+appears, and the trigger has to be *a new peer* rather than *somebody unverified*
+— the first version used the latter and was one-sided in exactly the way that
+matters. The player already in the room sees the newcomer's attestation
+immediately, so they have no strangers and no reason to speak, while the newcomer
+looks at an anonymous tank until the slow timer comes round. **The one who needs
+to be re-announced to is the one who cannot tell they are missing anything.**
+
+### One check for a read path that has stopped
+
+Relays echo our own events back to our own subscription. `onEvent` discards them
+a few lines later, but they *arrive* — ten a second, from every relay still
+listening — so a healthy read path is never quiet, whether or not anybody else is
+in the room. **Silence means the ear is gone, not that the arena is empty.**
+
+Which is one check covering three unrelated causes with one symptom: a dropped
+socket, a `CLOSED` we could not act on, and a filter that matches nothing. All
+three used to be completely invisible — still publishing, still on everybody
+else's screen, seeing nothing.
+
+`sawTraffic` had been wired up the whole time and nothing read it. An instrument
+with no consumer is not an instrument.
+
 ### The screen names the symptom, not the cause
 
 There are two silent bands and they break opposite things:
