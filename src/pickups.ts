@@ -51,8 +51,14 @@ const KINDS: PickupKind[] = ['repair', 'rapid', 'shield', 'speed']
 
 /** Seconds between spawn waves. Long enough that an item is worth crossing for. */
 export const WAVE_SECONDS = 22
-/** How long an untouched pickup stays on the board before the next wave. */
-export const PICKUP_TTL = WAVE_SECONDS - 2
+/** How the round's modifier bends the schedule. Both come from the block hash. */
+export interface WaveRules {
+  /** Seconds between waves. */
+  waveSeconds: number
+  /** How many pads stay empty each wave. */
+  emptyPads: number
+}
+export const DEFAULT_WAVES: WaveRules = { waveSeconds: WAVE_SECONDS, emptyPads: 1 }
 
 export interface Pickup {
   /** `<height>:<wave>:<padIndex>`. Unique for the whole round, and derivable. */
@@ -90,15 +96,23 @@ function mix(seed: string, a: number, b: number): number {
  * and the same elapsed time, every client in the room builds the same list, in
  * the same order, with the same ids.
  */
-export function scheduleFor(blockHash: string, elapsed: number): Pickup[] {
+export function scheduleFor(
+  blockHash: string,
+  elapsed: number,
+  rules: WaveRules = DEFAULT_WAVES,
+): Pickup[] {
   if (!PADS.length) return []
-  const wave = Math.floor(elapsed / WAVE_SECONDS)
-  const born = wave * WAVE_SECONDS
-  if (elapsed - born > PICKUP_TTL) return []
+  const period = Math.max(2, rules.waveSeconds)
+  const wave = Math.floor(elapsed / period)
+  const born = wave * period
+  // An untouched pickup clears shortly before the next wave, so there is always
+  // a beat of empty board rather than one item silently becoming another.
+  if (elapsed - born > period - 2) return []
 
-  // One pad per wave stays empty, so the board is never fully stocked and there
-  // is a reason to contest the ones that are.
-  const skip = mix(blockHash, wave, 999) % PADS.length
+  // Normally one pad per wave stays empty, so the board is never fully stocked
+  // and there is a reason to contest the ones that are. Supply Run stocks the
+  // lot.
+  const skip = rules.emptyPads > 0 ? mix(blockHash, wave, 999) % PADS.length : -1
   const out: Pickup[] = []
   for (let pad = 0; pad < PADS.length; pad++) {
     if (pad === skip) continue

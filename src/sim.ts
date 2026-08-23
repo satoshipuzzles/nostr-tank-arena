@@ -26,6 +26,14 @@ export interface Shell {
   vx: number
   vy: number
   bounces: number
+  /**
+   * Bounce budget, carried per shell rather than read from a global.
+   *
+   * The Ricochet block gives shells three. Keeping it on the shell means a
+   * shell that was fired under the old rules keeps playing by them everywhere,
+   * including on a client that has already seen the next block.
+   */
+  maxBounces: number
   age: number
   dead: boolean
 }
@@ -48,6 +56,7 @@ export function spawnShell(
   x: number,
   y: number,
   angle: number,
+  maxBounces = SHELL_BOUNCES,
 ): Shell {
   return {
     id,
@@ -57,6 +66,7 @@ export function spawnShell(
     vx: Math.cos(angle) * SHELL_SPEED,
     vy: Math.sin(angle) * SHELL_SPEED,
     bounces: 0,
+    maxBounces,
     age: 0,
     dead: false,
   }
@@ -99,7 +109,7 @@ export function stepShell(s: Shell, dt: number): void {
       s.vy = -s.vy
     }
     s.bounces++
-    if (s.bounces > SHELL_BOUNCES) {
+    if (s.bounces > s.maxBounces) {
       s.dead = true
       return
     }

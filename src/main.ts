@@ -1,10 +1,12 @@
 import './style.css'
 import { layoutForBlock, layoutName, setLayout } from './arena'
+import { Sfx } from './audio'
 import { BlockClock } from './blocks'
 import { Game } from './game'
 import { Input, type Scheme } from './input'
 import { DEFAULT_RELAYS, Identity, Net } from './nostr'
 import { Renderer } from './render'
+import { modifierForBlock } from './modifiers'
 import { fetchBlockScores, fetchScores, publishScore } from './scores'
 
 const $ = <T extends HTMLElement>(id: string): T => {
@@ -21,6 +23,7 @@ const nameInput = $<HTMLInputElement>('name')
 const roomInput = $<HTMLInputElement>('room')
 const relayInput = $<HTMLTextAreaElement>('relays')
 const schemeInput = $<HTMLSelectElement>('scheme')
+const soundInput = $<HTMLSelectElement>('sound')
 const lobbyError = $('lobby-error')
 
 const params = new URLSearchParams(location.search)
@@ -43,6 +46,37 @@ nameInput.value = stored('tank.name') ?? ''
 roomInput.value = params.get('room') ?? stored('tank.room') ?? 'lobby'
 relayInput.value = (stored('tank.relays') ?? DEFAULT_RELAYS.join('\n')).trim()
 schemeInput.value = stored('tank.scheme') === 'tank' ? 'tank' : 'direct'
+
+/**
+ * One AudioContext for the page, built on the first real click.
+ *
+ * Browsers refuse to start audio before a gesture and leave an early context
+ * `suspended` for good, so this is created from the lobby button rather than at
+ * module load — and `M` toggles it mid-match, because a shooter you cannot mute
+ * is a shooter people close the tab on.
+ */
+const sfx = new Sfx()
+soundInput.value = sfx.muted ? 'off' : 'on'
+
+function paintSoundButton(): void {
+  $('sound-toggle').textContent = sfx.muted ? 'Sound: off' : 'Sound: on'
+}
+paintSoundButton()
+
+$('sound-toggle').addEventListener('click', () => {
+  sfx.toggle()
+  soundInput.value = sfx.muted ? 'off' : 'on'
+  paintSoundButton()
+})
+
+window.addEventListener('keydown', (e) => {
+  if (e.code !== 'KeyM' || e.repeat) return
+  const target = e.target as HTMLElement | null
+  if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return
+  sfx.toggle()
+  soundInput.value = sfx.muted ? 'off' : 'on'
+  paintSoundButton()
+})
 
 function readRelays(): string[] {
   const list = relayInput.value
@@ -92,8 +126,16 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     // palette slot and resolves clashes with whoever else is in the room.
     const color = parseInt(identity.pubkey.slice(0, 4), 16) % 360
 
+    // This runs inside the click handler, which is the only place a browser
+    // will let an AudioContext start.
+    if (soundInput.value === 'off' && !sfx.muted) sfx.toggle()
+    if (soundInput.value === 'on' && sfx.muted) sfx.toggle()
+    sfx.unlock()
+    paintSoundButton()
+
     const net = new Net(relays)
     const game = new Game(identity, net, room, name, color)
+    game.sfx = (sound, opts) => sfx.play(sound, opts)
     await game.start()
 
     // The round clock. Starting it before the first frame means the board is
@@ -135,6 +177,7 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     ;(window as unknown as { __game: Game; __renderer: Renderer }).__game = game
     ;(window as unknown as { __renderer: Renderer }).__renderer = renderer
     ;(window as unknown as { __clock: BlockClock }).__clock = clock
+    ;(window as unknown as { __sfx: Sfx }).__sfx = sfx
 
     canvas.addEventListener('mousemove', (e) => {
       input.mouseWorld = renderer.toWorld(e.clientX, e.clientY)
@@ -191,6 +234,8 @@ function drawHud(game: Game): void {
     )
     .join('')
 
+  drawRules(game)
+
   const others = game.peers.size
   const clock = running?.clock
   // The relay line earns its place: a rate-limited publish used to be silent,
@@ -203,6 +248,7 @@ function drawHud(game: Game): void {
         ? 'block <b>?</b>'
         : 'block <b>…</b>',
     `map <b id="hud-map">${escapeHtml(layoutName)}</b>`,
+    `rules <b id="hud-rules">${escapeHtml(game.modifier.name)}</b>`,
     `room <b>${escapeHtml(game.room)}</b>`,
     `${others} opponent${others === 1 ? '' : 's'}`,
     game.streak >= 2 ? `<b>${game.streak} in a row</b>` : '',
@@ -220,6 +266,26 @@ function drawHud(game: Game): void {
 
   drawNotice(game, now)
   drawBuffs(game, now)
+}
+
+/**
+ * The round's rule change, parked under the scoreboard for the whole round.
+ *
+ * It is not a banner, because it is not an event — it is a fact about the block
+ * you are playing in, and someone who joins ninety seconds late needs to see it
+ * as much as the person who was there when it landed. Straight Deathmatch shows
+ * nothing at all: the default needs no billboard.
+ */
+function drawRules(game: Game): void {
+  const node = $('rules')
+  const mod = game.modifier
+  if (mod.id === 'standard') {
+    node.hidden = true
+    return
+  }
+  node.hidden = false
+  node.style.setProperty('--rules-hue', String(mod.hue))
+  node.innerHTML = `<b>${escapeHtml(mod.name)}</b><span>${escapeHtml(mod.blurb)}</span>`
 }
 
 /**
@@ -268,7 +334,15 @@ let podiumTimer: ReturnType<typeof setTimeout> | null = null
 function showPodium(result: import('./game').RoundResult): void {
   const panel = $('podium')
   $('podium-title').textContent = `Block ${result.height} — round over`
+  const next = running?.clock.tip ? modifierForBlock(running.clock.tip.hash) : null
   $('podium-sub').textContent = `Next round is live on ${layoutName}. Drive whenever you like.`
+  // The block that just closed picked the next round's rules at the same moment
+  // it picked the next map, so the podium can already say what changed.
+  $('podium-rules').textContent = next
+    ? next.id === 'standard'
+      ? `That round played ${result.modifier}. This one is a straight deathmatch.`
+      : `That round played ${result.modifier}. This one is ${next.name} — ${next.blurb.toLowerCase()}`
+    : `That round played ${result.modifier}.`
   $('podium-note').textContent =
     'Publishing signs a record with your npub and puts it on the relays under this block height. ' +
     'Nothing publishes itself.'

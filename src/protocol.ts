@@ -47,7 +47,14 @@ export interface SessionPayload {
   exp: number // unix seconds
 }
 
-/** Tank state tick. Signed by the session key, ~12x/second. */
+/**
+ * Tank state tick. Signed by the session key, ~10x/second.
+ *
+ * `k` rides along because a streak is only worth having if the rest of the room
+ * can see it. It costs a handful of bytes on an event that was already going
+ * out, needs no new kind, and is exactly as trustworthy as the HP in the same
+ * payload — which is to say the sender decides it, and always could.
+ */
 export interface StatePayload {
   t: number // sender clock, ms
   x: number
@@ -56,15 +63,25 @@ export interface StatePayload {
   g: number // gun heading, radians
   hp: number
   d: boolean // dead / respawning
+  k?: number // kills in a row, for the streak glow
 }
 
-/** A shell leaving a barrel. Peers re-simulate it deterministically from t0. */
+/**
+ * A shell leaving a barrel. Peers re-simulate it deterministically from t0.
+ *
+ * `b` is the bounce budget, and it travels with the shell rather than being
+ * read from the round's modifier on arrival. The Ricochet block gives shells
+ * three bounces instead of one; without this field, a shell fired a moment
+ * before a block landed would bounce once on the shooter's screen and three
+ * times on everybody else's for as long as the boundary took to settle.
+ */
 export interface ShellPayload {
   id: string
   t0: number // sender clock at spawn, ms
   x: number
   y: number
   a: number // angle, radians
+  b?: number // wall bounces before it dies; defaults to 1
 }
 
 /** Victim-authoritative death report. `k` is the session pubkey of the killer. */

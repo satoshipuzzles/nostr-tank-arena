@@ -47,6 +47,12 @@ const FLAGS = [
   '--disable-background-timer-throttling',
   '--disable-backgrounding-occluded-windows',
   '--disable-renderer-backgrounding',
+  // The game only starts its AudioContext from a click, which puppeteer does
+  // make — but a headless Chrome with no output device still refuses unless
+  // told not to care. Without this the sound checks can never pass, and would
+  // be testing the flag rather than the game.
+  '--autoplay-policy=no-user-gesture-required',
+  '--mute-audio',
 ]
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -166,6 +172,76 @@ try {
   check('alpha credited with the kill', finalA.kills >= 1, JSON.stringify(finalA.feed))
   check('kill feed names the killer', finalA.feed.some((t) => t.includes('alpha') && t.includes('bravo')))
   check('bravo respawned at full hp', !finalB.dead && finalB.hp === 3, `hp=${finalB.hp} dead=${finalB.dead}`)
+
+  // -------------------------------------------------------------------- sound
+  //
+  // Two separate claims, and they fail for different reasons, so they are two
+  // checks. First: an AudioContext actually reached `running`. A context built
+  // before a user gesture lands in `suspended` and stays there forever, which
+  // is silent in every sense — no error, no sound, nothing in the console.
+  //
+  // Second: the game emits the right event at the right moment. That is tested
+  // through the sink rather than by listening, because "did a speaker move" is
+  // not answerable from here and is not the part that breaks.
+  const audioLive = await Promise.all([a, b].map((p) => p.evaluate(() => window.__sfx?.running === true)))
+  check('an AudioContext is actually running, not suspended', audioLive.every(Boolean),
+    JSON.stringify(audioLive))
+
+  await Promise.all([a, b].map((p) => p.evaluate(() => {
+    const g = window.__game
+    window.__heard = []
+    const real = g.sfx
+    g.sfx = (sound, opts) => {
+      window.__heard.push(sound)
+      real(sound, opts)
+    }
+  })))
+  await a.evaluate(() => {
+    const g = window.__game
+    g.tank.x = 300
+    g.tank.y = 600
+    g.tank.hull = 0
+    g.tank.gun = 0
+    g.tank.reloadAt = 0
+  })
+  await a.keyboard.down('Space')
+  await wait(200)
+  await a.keyboard.up('Space')
+  await wait(2500)
+  const heard = await Promise.all([a, b].map((p) => p.evaluate(() => window.__heard)))
+  check('firing makes a noise', heard[0].includes('fire'), JSON.stringify(heard[0]))
+  // The interesting half: a shell fired on the other machine has to arrive as a
+  // sound here, positioned, or the room is silent except for your own gun.
+  check("and the other client hears somebody else's shot", heard[1].includes('fire'),
+    JSON.stringify(heard[1]))
+
+  const muted = await a.evaluate(() => {
+    document.getElementById('sound-toggle').click()
+    const off = window.__sfx.muted
+    window.__heard = []
+    window.__sfx.play('fire')
+    return { off, label: document.getElementById('sound-toggle').textContent }
+  })
+  check('and the toggle mutes it', muted.off && /off/i.test(muted.label), JSON.stringify(muted))
+  await a.evaluate(() => document.getElementById('sound-toggle').click())
+
+  // ------------------------------------------------------------- streak glow
+  //
+  // A streak used to be a number in your own HUD. It now rides in the state
+  // tick, which is the one event already going out ten times a second, so the
+  // rest of the room can see who is on a run and gang up on them. Same trust as
+  // the HP in the same payload: self-reported, and always was.
+  await a.evaluate(() => { window.__game.streak = 4 })
+  await wait(1600)
+  const glow = await b.evaluate(() => {
+    const g = window.__game
+    const peer = [...g.peers.values()].find((p) => p.name === 'alpha')
+    const rig = window.__renderer?.rigs?.get(peer?.session)
+    return { streak: peer?.streak ?? 0, ring: rig ? rig.ring.visible : null }
+  })
+  check("a rival's streak reaches the other client", glow.streak === 4, JSON.stringify(glow))
+  check('and lights their ring up on this screen', glow.ring === true, JSON.stringify(glow))
+  await a.evaluate(() => { window.__game.streak = 0 })
   // A round is one Bitcoin block. Nobody announces the change and nobody is the
   // host: both clients watch the same chain tip and both act on it. Driven here
   // through `BlockClock.accept`, which is the same entry point a real poll uses,
@@ -178,7 +254,9 @@ try {
   check('alpha has kills to lose', beforeBlock[0].kills >= 1, JSON.stringify(beforeBlock))
 
   // A hash ending 00 and one ending 03 pick different boards, so this also
-  // proves the map is a pure function of the tip rather than a broadcast.
+  // proves the map is a pure function of the tip rather than a broadcast. The
+  // two hex digits before those pick the round's rule change, independently —
+  // `ab` is 171, and 171 % 5 lands on Glass Cannon.
   const HEIGHT = 999001
   await Promise.all([a, b].map((p) => p.evaluate((h) => {
     window.__clock.accept({ height: h, hash: 'ab'.repeat(31) + '03' })
@@ -192,6 +270,12 @@ try {
     podium: !document.getElementById('podium').hidden,
     shown: getComputedStyle(document.getElementById('podium')).display !== 'none',
     map: document.getElementById('hud-map')?.textContent ?? '',
+    rules: window.__game.modifier.id,
+    maxHp: window.__game.maxHp,
+    hp: window.__game.tank.hp,
+    chip: document.getElementById('rules').hidden
+      ? ''
+      : document.getElementById('rules').textContent.replace(/\s+/g, ' ').trim(),
     rows: document.getElementById('podium-rows').textContent.replace(/\s+/g, ' ').trim(),
   }))))
   check('a block ends the round on both clients',
@@ -201,6 +285,16 @@ try {
   check('and both land on the same map, without telling each other',
     afterBlock[0].map === afterBlock[1].map && afterBlock[0].map === 'The Ring',
     afterBlock.map((r) => r.map).join(' vs '))
+  // The rules come out of the same number as the map and are not sent anywhere,
+  // so two clients agreeing on them is the same proof as two clients agreeing
+  // on the board.
+  check('the block picked the round rules too, and both clients picked the same ones',
+    afterBlock[0].rules === afterBlock[1].rules && afterBlock[0].rules === 'glass',
+    afterBlock.map((r) => r.rules).join(' vs '))
+  check('and Glass Cannon actually narrowed the hull to one hit',
+    afterBlock.every((r) => r.maxHp === 1 && r.hp === 1), JSON.stringify(afterBlock.map((r) => [r.maxHp, r.hp])))
+  check('and the HUD says which rules are running', /Glass Cannon/.test(afterBlock[0].chip),
+    afterBlock[0].chip)
   check('the podium shows the round that just ended',
     afterBlock.every((r) => r.podium && r.shown), JSON.stringify(afterBlock.map((r) => [r.podium, r.shown])))
   check('and names who was in it', /alpha|bravo/.test(afterBlock[0].rows), afterBlock[0].rows)
@@ -217,6 +311,30 @@ try {
   })
   check('and closing it actually removes it from the page',
     closed.attr && closed.display === 'none' && closed.h === 0, JSON.stringify(closed))
+
+  // A second block, chosen to land on different rules and a different board.
+  // `05` is 5, and 5 % 5 is Straight Deathmatch; `01` picks The Lanes. Nothing
+  // was sent between the two clients to make either of them agree.
+  await Promise.all([a, b].map((p) => p.evaluate((h) => {
+    window.__clock.accept({ height: h, hash: 'cd'.repeat(30) + '0501' })
+  }, HEIGHT + 1)))
+  await wait(1400)
+  const secondBlock = await Promise.all([a, b].map((p) => p.evaluate(() => ({
+    rules: window.__game.modifier.id,
+    maxHp: window.__game.maxHp,
+    map: document.getElementById('hud-map')?.textContent ?? '',
+    chipHidden: document.getElementById('rules').hidden,
+    chipDisplay: getComputedStyle(document.getElementById('rules')).display,
+  }))))
+  check('the next block changes the rules again, in step, with nothing on the wire',
+    secondBlock.every((r) => r.rules === 'standard' && r.maxHp === 3) &&
+      secondBlock[0].map === secondBlock[1].map && secondBlock[0].map === 'The Lanes',
+    JSON.stringify(secondBlock))
+  // Straight Deathmatch is the default and gets no billboard — and `hidden`
+  // alone would not have removed it, since #rules is display:grid.
+  check('and a standard round shows no rules chip at all',
+    secondBlock.every((r) => r.chipHidden && r.chipDisplay === 'none'), JSON.stringify(secondBlock))
+  await Promise.all([a, b].map((p) => p.evaluate(() => { document.getElementById('podium').hidden = true })))
 
   // ------------------------------------------------------------------ pickups
   //
@@ -250,12 +368,15 @@ try {
       taken: !!p?.taken,
       kind: p?.kind,
       hp: g.tank.hp,
+      maxHp: g.maxHp,
       buffs: { ...g.buffs },
       notice: g.notice?.text ?? '',
     }
   }, target.id)
   const gotSomething =
-    grabbed.kind === 'repair' ? grabbed.hp === 3 : Object.values(grabbed.buffs).some((v) => v > 0)
+    grabbed.kind === 'repair'
+      ? grabbed.hp === grabbed.maxHp
+      : Object.values(grabbed.buffs).some((v) => v > 0)
   check('driving over one takes it', grabbed.taken, JSON.stringify(grabbed))
   check(`and ${target.kind} actually does something`, gotSomething, JSON.stringify(grabbed))
   check('and it is announced on the banner, not just in the feed', !!grabbed.notice, grabbed.notice)

@@ -1,0 +1,258 @@
+// Sound, synthesised on the spot.
+//
+// Not a single audio file. Every noise in this game is a handful of
+// oscillators and a burst of filtered white noise, built when it is played and
+// thrown away afterwards. That is a deliberate trade and worth stating: a set
+// of samples would sound better, and it would also be half a megabyte of
+// assets to download before the first shot, a build step to manage them, and a
+// licence to check on every one. The game already loads on a TV browser in a
+// couple of seconds and this keeps it that way.
+//
+// ## The gesture rule
+//
+// Every browser refuses to start an AudioContext until the user has clicked
+// something, and a context created too early lands in `suspended` and stays
+// there — silently. So the context is built from the lobby button, which is a
+// real click by definition, and `resume()` is retried on the next one if the
+// browser was still unconvinced.
+//
+// ## Distance
+//
+// A shell fired across the map should not be as loud as the one under your
+// hull. Peer sounds carry a world position, which becomes gain and stereo pan
+// relative to your own tank. It is not HRTF and it is not trying to be — it is
+// enough to make you turn toward gunfire.
+
+export type Sound =
+  | 'fire'
+  | 'hit'
+  | 'shield'
+  | 'kill'
+  | 'death'
+  | 'pickup'
+  | 'streak'
+  | 'block'
+  | 'respawn'
+
+export interface PlayOpts {
+  /** Where it happened, in arena pixels. Omit for something that happened to you. */
+  at?: { x: number; y: number }
+  /** Listener position, i.e. your own tank. Required for `at` to mean anything. */
+  ear?: { x: number; y: number }
+  /** Extra multiplier, e.g. hue-tinted pickups. */
+  gain?: number
+}
+
+/** Past this many pixels a sound is inaudible. Roughly one board width. */
+const EARSHOT = 1400
+
+const STORAGE_KEY = 'tank.sound'
+
+export class Sfx {
+  private ctx: AudioContext | null = null
+  private master: GainNode | null = null
+  private noiseBuffer: AudioBuffer | null = null
+  muted: boolean
+
+  constructor() {
+    let saved: string | null = null
+    try {
+      saved = localStorage.getItem(STORAGE_KEY)
+    } catch {
+      /* private mode */
+    }
+    this.muted = saved === 'off'
+  }
+
+  /**
+   * Call from a click handler. Safe to call repeatedly — a context that was
+   * created while the page was still untrusted comes back `suspended`, and the
+   * only fix is to resume it from a later gesture.
+   */
+  unlock(): void {
+    if (this.muted) return
+    if (!this.ctx) {
+      const Ctor =
+        window.AudioContext ??
+        (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+      if (!Ctor) return
+      try {
+        this.ctx = new Ctor()
+      } catch {
+        return
+      }
+      this.master = this.ctx.createGain()
+      this.master.gain.value = 0.5
+      this.master.connect(this.ctx.destination)
+    }
+    if (this.ctx.state === 'suspended') void this.ctx.resume()
+  }
+
+  /** True once a real, unsuspended AudioContext exists. Drives the lobby copy. */
+  get running(): boolean {
+    return !this.muted && this.ctx?.state === 'running'
+  }
+
+  toggle(): boolean {
+    this.muted = !this.muted
+    try {
+      localStorage.setItem(STORAGE_KEY, this.muted ? 'off' : 'on')
+    } catch {
+      /* private mode */
+    }
+    if (this.muted) {
+      if (this.master) this.master.gain.value = 0
+    } else {
+      this.unlock()
+      if (this.master) this.master.gain.value = 0.5
+    }
+    return this.muted
+  }
+
+  play(sound: Sound, opts: PlayOpts = {}): void {
+    const ctx = this.ctx
+    const master = this.master
+    if (!ctx || !master || this.muted || ctx.state !== 'running') return
+
+    let volume = opts.gain ?? 1
+    let pan = 0
+    if (opts.at && opts.ear) {
+      const dx = opts.at.x - opts.ear.x
+      const distance = Math.hypot(dx, opts.at.y - opts.ear.y)
+      if (distance > EARSHOT) return
+      // Falls off toward zero rather than snapping, so a tank driving out of
+      // earshot fades instead of cutting.
+      volume *= (1 - distance / EARSHOT) ** 1.6
+      pan = Math.max(-0.85, Math.min(0.85, dx / (EARSHOT * 0.45)))
+    }
+    if (volume <= 0.01) return
+
+    const out = this.panned(ctx, master, pan)
+    const t = ctx.currentTime
+    switch (sound) {
+      case 'fire':
+        // A crack and a thump: the noise is the muzzle, the falling square is
+        // the weight behind it.
+        this.noise(ctx, out, t, { dur: 0.09, gain: 0.5 * volume, from: 4200, to: 700 })
+        this.tone(ctx, out, t, { type: 'square', from: 300, to: 80, dur: 0.14, gain: 0.28 * volume })
+        break
+      case 'hit':
+        // Yours. Low, close, and unmistakable against a peer's shot.
+        this.tone(ctx, out, t, { type: 'sawtooth', from: 190, to: 55, dur: 0.3, gain: 0.4 * volume })
+        this.noise(ctx, out, t, { dur: 0.18, gain: 0.3 * volume, from: 1800, to: 300 })
+        break
+      case 'shield':
+        this.tone(ctx, out, t, { type: 'triangle', from: 1250, to: 1250, dur: 0.35, gain: 0.22 * volume })
+        this.tone(ctx, out, t, { type: 'triangle', from: 1878, to: 1878, dur: 0.32, gain: 0.16 * volume })
+        break
+      case 'kill':
+        this.tone(ctx, out, t, { type: 'square', from: 660, to: 660, dur: 0.08, gain: 0.22 * volume })
+        this.tone(ctx, out, t + 0.08, { type: 'square', from: 990, to: 990, dur: 0.14, gain: 0.22 * volume })
+        break
+      case 'death':
+        this.noise(ctx, out, t, { dur: 0.65, gain: 0.75 * volume, from: 2600, to: 90 })
+        this.tone(ctx, out, t, { type: 'sawtooth', from: 150, to: 35, dur: 0.55, gain: 0.35 * volume })
+        break
+      case 'pickup':
+        for (const [i, f] of [523.25, 659.25, 987.77].entries()) {
+          this.tone(ctx, out, t + i * 0.055, {
+            type: 'triangle',
+            from: f,
+            to: f,
+            dur: 0.16,
+            gain: 0.24 * volume,
+          })
+        }
+        break
+      case 'streak':
+        for (const [i, f] of [440, 587.33, 739.99, 1046.5].entries()) {
+          this.tone(ctx, out, t + i * 0.07, {
+            type: 'square',
+            from: f,
+            to: f,
+            dur: 0.2,
+            gain: 0.2 * volume,
+          })
+        }
+        break
+      case 'block':
+        // The round bell. Long, clean, and nothing else in the game sounds
+        // remotely like it, because it is the only sound that means "stop".
+        for (const [i, f] of [523.25, 783.99, 1046.5].entries()) {
+          this.tone(ctx, out, t + i * 0.012, {
+            type: 'sine',
+            from: f,
+            to: f,
+            dur: 1.5,
+            gain: 0.3 * volume,
+          })
+        }
+        break
+      case 'respawn':
+        this.tone(ctx, out, t, { type: 'triangle', from: 220, to: 440, dur: 0.22, gain: 0.22 * volume })
+        break
+    }
+  }
+
+  private panned(ctx: AudioContext, master: GainNode, pan: number): AudioNode {
+    if (pan === 0 || !ctx.createStereoPanner) return master
+    const node = ctx.createStereoPanner()
+    node.pan.value = pan
+    node.connect(master)
+    return node
+  }
+
+  private tone(
+    ctx: AudioContext,
+    out: AudioNode,
+    at: number,
+    o: { type: OscillatorType; from: number; to: number; dur: number; gain: number },
+  ): void {
+    const osc = ctx.createOscillator()
+    const g = ctx.createGain()
+    osc.type = o.type
+    osc.frequency.setValueAtTime(o.from, at)
+    if (o.to !== o.from) osc.frequency.exponentialRampToValueAtTime(Math.max(20, o.to), at + o.dur)
+    // Ramp rather than set: an envelope that starts at full volume clicks, and
+    // a click on every shot is the whole reason synthesised audio sounds cheap.
+    g.gain.setValueAtTime(0.0001, at)
+    g.gain.exponentialRampToValueAtTime(Math.max(0.0002, o.gain), at + 0.008)
+    g.gain.exponentialRampToValueAtTime(0.0001, at + o.dur)
+    osc.connect(g).connect(out)
+    osc.start(at)
+    osc.stop(at + o.dur + 0.02)
+  }
+
+  private noise(
+    ctx: AudioContext,
+    out: AudioNode,
+    at: number,
+    o: { dur: number; gain: number; from: number; to: number },
+  ): void {
+    if (!this.noiseBuffer) {
+      const frames = Math.floor(ctx.sampleRate * 1.2)
+      const buf = ctx.createBuffer(1, frames, ctx.sampleRate)
+      const data = buf.getChannelData(0)
+      for (let i = 0; i < frames; i++) data[i] = Math.random() * 2 - 1
+      this.noiseBuffer = buf
+    }
+    const src = ctx.createBufferSource()
+    src.buffer = this.noiseBuffer
+    // Start somewhere random in the buffer so twenty shells in a row are not
+    // twenty copies of the same crackle.
+    const offset = Math.random() * 0.5
+    const filter = ctx.createBiquadFilter()
+    filter.type = 'lowpass'
+    filter.frequency.setValueAtTime(o.from, at)
+    filter.frequency.exponentialRampToValueAtTime(Math.max(40, o.to), at + o.dur)
+    const g = ctx.createGain()
+    g.gain.setValueAtTime(Math.max(0.0002, o.gain), at)
+    g.gain.exponentialRampToValueAtTime(0.0001, at + o.dur)
+    src.connect(filter).connect(g).connect(out)
+    src.start(at, offset, o.dur + 0.05)
+  }
+}
+
+/** What `Game` calls. A no-op by default so the netcode never depends on audio. */
+export type SoundSink = (sound: Sound, opts?: PlayOpts) => void
+export const silence: SoundSink = () => {}

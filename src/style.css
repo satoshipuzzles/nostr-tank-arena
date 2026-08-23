@@ -204,6 +204,34 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
 }
 #notice span { font-size: 14px; color: #e8eef8; text-shadow: 0 1px 4px #000; }
 
+/*
+ * The round's rule change. Top-centre, on screen the whole round rather than
+ * for two seconds, because it is a standing fact about the block rather than an
+ * event — somebody joining ninety seconds in still needs to read it.
+ */
+#rules {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: grid;
+  justify-items: center;
+  gap: 1px;
+  padding: 7px 16px;
+  border-radius: 12px;
+  background: var(--panel);
+  border: 1px solid hsl(var(--rules-hue, 205) 60% 45%);
+  pointer-events: none;
+  text-align: center;
+  z-index: 4;
+}
+#rules b {
+  font-size: 14px;
+  letter-spacing: 1px;
+  color: hsl(var(--rules-hue, 205) 85% 70%);
+}
+#rules span { font-size: 11px; color: var(--dim); }
+
 #buffs {
   position: absolute;
   bottom: 118px;

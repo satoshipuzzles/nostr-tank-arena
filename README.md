@@ -104,7 +104,7 @@ each other.
 
 **Controls** — `WASD` or arrows to drive, mouse to aim, click or `Space` to fire.
 Gamepad: left stick drives, right stick aims, right trigger or `A` fires. It
-plays fine on a TV browser with a controller, which is the point.
+plays fine on a TV browser with a controller, which is the point. `M` mutes.
 
 Two steering schemes, switchable in the lobby. **Direct** (the default) reads the
 keys or the stick as a *direction on the board*: press up-left and the tank turns
@@ -124,19 +124,35 @@ subscribes you to an entire match.
 | Kind | Name | Storage | Signed by | Content |
 |------|------|---------|-----------|---------|
 | `21003` | session attestation | ephemeral | **real npub** | `{ s, name, color, exp }` |
-| `21000` | tank state tick | ephemeral | session key | `{ t, x, y, h, g, hp, d }` |
-| `21001` | shell fired | ephemeral | session key | `{ id, t0, x, y, a }` |
+| `21000` | tank state tick | ephemeral | session key | `{ t, x, y, h, g, hp, d, k? }` |
+| `21001` | shell fired | ephemeral | session key | `{ id, t0, x, y, a, b? }` |
 | `21002` | death report | ephemeral | session key | `{ t, k, x, y }` |
 | `30078` | score record | addressable (NIP-78) | **real npub** | `{ kills, deaths, room, at }` |
 | `30078` | pickup claim | addressable (NIP-78) + NIP-40 | session key | `{ id, kind, at }` |
 
 Field key: `s` session pubkey, `t`/`t0` sender clock in ms, `h` hull heading,
-`g` gun heading, `d` dead flag, `a` shell angle, `k` killer's session pubkey
+`g` gun heading, `d` dead flag, `k` kills in a row, `a` shell angle, `b` the
+shell's bounce budget, `k` on a death report is the killer's session pubkey
 (`null` for a self-destruct). Angles are radians, positions are arena pixels — the
 board size is per-layout and lives in `ARENA_W`/`ARENA_H`. Score records use `d`
 tag `nostr-tank-arena/score`; the per-block record uses
 `nostr-tank-arena/score/<height>`, and a pickup claim uses
 `nostr-tank-arena/claim/<blockhash-prefix>:<wave>:<pad>:<claimant>`.
+
+Two of those fields are new and both are riders on events that were already
+going out, which is the cheapest place to put anything.
+
+`k` on the state tick is your current kill streak. A streak that only shows in
+your own HUD is not a streak — it is a number. On the wire, everyone can see the
+rainbow ring around the tank that is on a run and decide to do something about
+it. It is exactly as trustworthy as the `hp` beside it: self-reported, and always
+was.
+
+`b` on the fire event is the shell's bounce budget, and it travels with the shell
+rather than being read from the current round's rules when the event arrives.
+Otherwise a shell fired seconds before a block landed would bounce once on the
+shooter's screen and three times on everybody else's for as long as the boundary
+took to settle.
 
 ### Pickups, and why the claim is stored rather than ephemeral
 
@@ -338,11 +354,58 @@ yours first in the Relays box and leave the public ones in as genuine peers, not
 cold standby — one relay is one point of failure, and you want events landing on
 more than one box the first time yours reboots.
 
+## One rule change per block
+
+The block hash already picks the map. It is a 256-bit number that every client
+discovers at the same moment and nobody controls, so it can equally pick *how the
+round plays* — and that is free variety: no new event kind, no announcement, no
+host, no vote. Two clients agree on the rules for exactly the same reason they
+agree on the geometry. A different two hex digits than the map selection uses, so
+a board you know well can still surprise you.
+
+| Rules | What changes |
+|-------|--------------|
+| Straight Deathmatch | Nothing. The default, and it gets no billboard. |
+| Glass Cannon | One hit kills. Respawns are quick. |
+| Overdrive | Everyone drives 40% faster and reloads 35% faster. |
+| Supply Run | Pickup waves every 9 seconds, and every pad is stocked. |
+| Ricochet | Shells bounce three times instead of once. |
+
+A modifier is only allowed to touch things a client already decides for itself.
+HP, reload, speed and respawn are local — your own tank has always been
+authoritative over them — and the pickup schedule is derived from the same hash
+on every client. So a modifier adds no trust and cannot desync anybody. Shell
+bounces are the one exception, which is why the budget rides on the fire event
+rather than being looked up on arrival.
+
+## Sound
+
+There is not a single audio file in this repo. Every noise is a handful of
+oscillators and a burst of filtered white noise, built when it is played and
+thrown away afterwards.
+
+That is a trade worth stating: samples would sound better, and they would also be
+half a megabyte to download before the first shot, a build step to manage, and a
+licence to check on every one. The game loads on a TV browser in a couple of
+seconds and this keeps it that way.
+
+Peer sounds carry a world position, which becomes gain and stereo pan relative to
+your own tank — not HRTF and not trying to be, just enough to make you turn
+toward gunfire. `M` mutes, and so does the button on the HUD.
+
+The one real trap is the gesture rule: browsers refuse to start an AudioContext
+before a click, and a context created too early lands in `suspended` and stays
+there, silently. So it is built inside the lobby button's own handler, and the
+smoke test asserts the context reached `running` rather than merely that the code
+ran.
+
 ## Layout
 
 ```
 src/arena.ts     the boards, collision, spawn points, block-hash selection
 src/pickups.ts   block-hash-derived spawn schedule and the claim record
+src/modifiers.ts the round's rule change, also out of the block hash
+src/audio.ts     synthesised sound; no assets, positioned for peer events
 src/sim.ts       tank and shell physics, all the feel constants
 src/game.ts      netcode: subscribe, interpolate, hit detection, authority
 src/nostr.ts     identity (real key + session key) and relay pool

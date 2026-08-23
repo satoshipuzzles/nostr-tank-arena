@@ -16,6 +16,7 @@
       <div class="panel" id="scoreboard"></div>
       <div class="panel" id="status"></div>
       <div id="notice" hidden></div>
+      <div id="rules" hidden></div>
       <div id="buffs" hidden></div>
       <div id="feed"></div>
       <div id="controls-hint">
@@ -26,6 +27,7 @@
         <div class="card">
           <h2 id="podium-title">Round over</h2>
           <p class="fine" id="podium-sub"></p>
+          <p class="fine" id="podium-rules"></p>
           <div id="podium-rows"></div>
           <div class="row">
             <button id="podium-publish">Sign and publish this round</button>
@@ -36,6 +38,7 @@
       </div>
 
       <div id="hud-actions">
+        <button id="sound-toggle" class="ghost" title="Sound on or off (M)">Sound: on</button>
         <button id="copy-link" class="ghost">Copy invite link</button>
         <button id="publish-score" class="ghost">Publish score</button>
         <button id="show-board" class="ghost">Leaderboard</button>
@@ -52,6 +55,13 @@
 
         <label>Callsign<input id="name" maxlength="16" placeholder="tank" /></label>
         <label>Room<input id="room" maxlength="24" placeholder="lobby" /></label>
+
+        <label class="choice">Sound
+          <select id="sound">
+            <option value="on">On — synthesised, no downloads</option>
+            <option value="off">Off</option>
+          </select>
+        </label>
 
         <label class="choice">Steering
           <select id="scheme">

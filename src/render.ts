@@ -155,6 +155,24 @@ const BARREL_GEO = new RoundedBoxGeometry(36, 7, 7, 2, 3)
 const PIP_GEO = new RoundedBoxGeometry(13, 13, 13, 2, 4)
 const FLASH_GEO = new THREE.SphereGeometry(11, 10, 8)
 
+/** Everything the renderer needs about one tank for one frame. */
+interface TankView {
+  x: number
+  y: number
+  hull: number
+  gun: number
+  hp: number
+  /** This round's hull maximum, which Glass Cannon changes. */
+  maxHp: number
+  dead: boolean
+  hue: number
+  name: string
+  verified: boolean
+  streak: number
+  /** True for the local player, whose ring is always drawn. */
+  mine: boolean
+}
+
 function makeTank(): TankRig {
   const root = new THREE.Group()
   const bob = new THREE.Group()
@@ -634,14 +652,39 @@ export class Renderer {
     const now = performance.now()
 
     this.syncPeers(game)
-    this.applyTank(this.you, game.tank.x, game.tank.y, game.tank.hull, game.tank.gun, game.tank.hp,
-      game.tank.dead, game.displayColor, game.name, true, dt, now)
+    const maxHp = game.maxHp
+    this.applyTank(this.you, dt, now, {
+      x: game.tank.x,
+      y: game.tank.y,
+      hull: game.tank.hull,
+      gun: game.tank.gun,
+      hp: game.tank.hp,
+      maxHp,
+      dead: game.tank.dead,
+      hue: game.displayColor,
+      name: game.name,
+      verified: true,
+      streak: game.streak,
+      mine: true,
+    })
 
     for (const peer of game.peers.values()) {
       const rig = this.rigs.get(peer.session)
       if (!rig) continue
-      this.applyTank(rig, peer.view.x, peer.view.y, peer.view.hull, peer.view.gun, peer.view.hp,
-        peer.view.dead, peer.displayColor, peer.name, peer.pubkey !== null, dt, now)
+      this.applyTank(rig, dt, now, {
+        x: peer.view.x,
+        y: peer.view.y,
+        hull: peer.view.hull,
+        gun: peer.view.gun,
+        hp: peer.view.hp,
+        maxHp,
+        dead: peer.view.dead,
+        hue: peer.displayColor,
+        name: peer.name,
+        verified: peer.pubkey !== null,
+        streak: peer.streak,
+        mine: false,
+      })
     }
 
     this.syncShells(game)
@@ -666,19 +709,6 @@ export class Renderer {
         life: 0.4,
       })
     }
-    // A streak you can see from across the board.
-    this.you.ring.visible = !game.tank.dead
-    const ringMat = this.you.ring.material as THREE.MeshBasicMaterial
-    if (game.streak >= 3) {
-      ringMat.color.setHSL(((now / 12) % 360) / 360, 0.9, 0.6)
-      ringMat.opacity = 0.85
-      this.you.ring.scale.setScalar(1.15 + Math.sin(now / 140) * 0.08)
-    } else {
-      ringMat.color.setHex(0xffffff)
-      ringMat.opacity = 0.55
-      this.you.ring.scale.setScalar(1)
-    }
-
     if (game.tank.hp < this.lastHp && !game.tank.dead) this.shake = Math.max(this.shake, 9)
     this.lastHp = game.tank.hp
 
@@ -747,20 +777,8 @@ export class Renderer {
     }
   }
 
-  private applyTank(
-    rig: TankRig,
-    x: number,
-    y: number,
-    hull: number,
-    gun: number,
-    hp: number,
-    dead: boolean,
-    hue: number,
-    name: string,
-    verified: boolean,
-    dt: number,
-    now: number,
-  ): void {
+  private applyTank(rig: TankRig, dt: number, now: number, v: TankView): void {
+    const { x, y, hull, gun, hp, dead, hue, name, verified } = v
     rig.root.position.set(x, 0, y)
     rig.hull.rotation.y = -hull
     rig.turret.rotation.y = -gun
@@ -804,9 +822,13 @@ export class Renderer {
     }
     rig.label.visible = !dead
 
+    // Glass Cannon narrows the hull to one point, so the extra pips are not
+    // drawn at all and the remaining ones re-centre. Three pips with two
+    // permanently dark would read as damage rather than as the round's rules.
     for (let i = 0; i < rig.pips.length; i++) {
       const pip = rig.pips[i]
-      pip.visible = !dead
+      pip.visible = !dead && i < v.maxHp
+      pip.position.x = (i - (v.maxHp - 1) / 2) * 19
       const material = pip.material as THREE.MeshStandardMaterial
       if (i < hp) {
         material.color.setHSL(hue / 360, 0.85, 0.62)
@@ -816,6 +838,23 @@ export class Renderer {
         material.emissive.setHex(0x000000)
       }
       pip.rotation.y = now / 900 + i
+    }
+
+    // The streak glow. Yours is always on — it is how you find yourself in a
+    // four-way scramble — and a rival's only lights up once they are on three,
+    // which is the whole point of putting the streak on the wire: the room can
+    // see who to gang up on without anyone opening a scoreboard.
+    const ringMat = rig.ring.material as THREE.MeshBasicMaterial
+    const hot = v.streak >= 3
+    rig.ring.visible = !dead && (v.mine || hot)
+    if (hot) {
+      ringMat.color.setHSL(((now / 12) % 360) / 360, 0.9, 0.6)
+      ringMat.opacity = 0.85
+      rig.ring.scale.setScalar(1.15 + Math.sin(now / 140) * 0.08)
+    } else {
+      ringMat.color.setHex(0xffffff)
+      ringMat.opacity = 0.55
+      rig.ring.scale.setScalar(1)
     }
   }
 

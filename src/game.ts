@@ -37,7 +37,6 @@ import {
   roomTag,
 } from './protocol'
 import {
-  MAX_HP,
   MUZZLE_OFFSET,
   RELOAD,
   RESPAWN_DELAY,
@@ -50,6 +49,8 @@ import {
   stepTank,
 } from './sim'
 import type { Controls } from './input'
+import { DEFAULT_MODIFIER, type Modifier, modifierForBlock } from './modifiers'
+import { type PlayOpts, type Sound, type SoundSink, silence } from './audio'
 
 const TICK_MS = 100 // 10Hz state broadcast
 /** Kills in a row that earn a full repair. */
@@ -79,6 +80,8 @@ export interface Peer {
   view: { x: number; y: number; hull: number; gun: number; hp: number; dead: boolean }
   kills: number
   deaths: number
+  /** Their kills in a row, from the state tick, so their glow is visible here too. */
+  streak: number
 }
 
 interface StateSample {
@@ -100,6 +103,8 @@ export interface FeedEntry {
 export interface RoundResult {
   height: number
   layout: string
+  /** The rules that round played under, banked before the next block changes them. */
+  modifier: string
   standings: { name: string; kills: number; deaths: number; color: number; you: boolean }[]
   endedAt: number
 }
@@ -142,6 +147,18 @@ export class Game {
   displayColor: number
   /** Set when a relay subscription has produced at least one event. */
   sawTraffic = false
+  /**
+   * The rule change this block is playing under, derived from the same hash
+   * that picks the map. Nothing is announced and nobody agrees to it — every
+   * client computes it from the tip.
+   */
+  modifier: Modifier = DEFAULT_MODIFIER
+  /**
+   * Where sound comes out. A no-op by default, so nothing in the netcode or
+   * the simulation depends on audio existing — the smoke test runs the whole
+   * match through the default sink without an AudioContext anywhere.
+   */
+  sfx: SoundSink = silence
 
   private seen = new Set<string>()
   private seenPrev = new Set<string>()
@@ -163,7 +180,7 @@ export class Game {
       y: spawn.y,
       hull: Math.atan2(ARENA_H / 2 - spawn.y, ARENA_W / 2 - spawn.x),
       gun: Math.atan2(ARENA_H / 2 - spawn.y, ARENA_W / 2 - spawn.x),
-      hp: MAX_HP,
+      hp: DEFAULT_MODIFIER.maxHp,
       dead: false,
       respawnAt: 0,
       reloadAt: 0,
@@ -268,9 +285,10 @@ export class Game {
         hasOffset: false,
         lastSeen: performance.now(),
         buffer: [],
-        view: { x: ARENA_W / 2, y: ARENA_H / 2, hull: 0, gun: 0, hp: MAX_HP, dead: false },
+        view: { x: ARENA_W / 2, y: ARENA_H / 2, hull: 0, gun: 0, hp: this.maxHp, dead: false },
         kills: 0,
         deaths: 0,
+        streak: 0,
       }
       this.peers.set(session, peer)
     }
@@ -305,9 +323,12 @@ export class Game {
       y: p.y,
       hull: p.h,
       gun: p.g,
-      hp: typeof p.hp === 'number' ? p.hp : MAX_HP,
+      hp: typeof p.hp === 'number' ? p.hp : this.maxHp,
       dead: !!p.d,
     }
+    // Cosmetic and self-reported, exactly like the HP beside it. A streak you
+    // cannot see on the tank that has it is a number in somebody else's HUD.
+    peer.streak = typeof p.k === 'number' && p.k > 0 ? Math.min(99, Math.floor(p.k)) : 0
     // Relays deliver out of order often enough to matter; keep the buffer sorted.
     const b = peer.buffer
     let i = b.length
@@ -326,7 +347,9 @@ export class Game {
     peer.lastSeen = performance.now()
     this.updateOffset(peer, p.t0)
 
-    const shell = spawnShell(p.id, e.pubkey, p.x, p.y, p.a)
+    const bounces = typeof p.b === 'number' && p.b >= 0 ? Math.min(8, Math.floor(p.b)) : 1
+    const shell = spawnShell(p.id, e.pubkey, p.x, p.y, p.a, bounces)
+    this.sound('fire', { at: { x: p.x, y: p.y } })
     // Fast-forward by however long the event spent in flight, so the shell
     // appears where the shooter already sees it rather than at the muzzle.
     const lateMs = performance.now() - (p.t0 + peer.offset)
@@ -351,8 +374,11 @@ export class Game {
           ? (this.peers.get(p.k)?.name ?? 'someone')
           : null
 
+    victim.streak = 0
+    this.sound('death', { at: { x: p.x, y: p.y } })
     if (p.k === this.identity.sessionPubkey) {
       this.kills++
+      this.sound('kill')
       this.onOwnKill()
     } else if (p.k) {
       const killer = this.peers.get(p.k)
@@ -379,10 +405,12 @@ export class Game {
     this.bestStreak = Math.max(this.bestStreak, this.streak)
 
     if (this.streak === STREAK_REPAIR) {
-      this.tank.hp = MAX_HP
+      this.tank.hp = this.maxHp
       this.repairedAt = now
+      this.sound('streak')
       this.announce(`${STREAK_REPAIR} IN A ROW`, 'hull repaired', 130)
     } else if (this.streak === STREAK_RAPID) {
+      this.sound('streak')
       this.buffs.rapidUntil = Math.max(this.buffs.rapidUntil, now) + STREAK_RAPID_MS
       this.announce(`${STREAK_RAPID} IN A ROW`, 'rapid fire — and everyone can see you', 20)
     } else if (this.streak > STREAK_RAPID) {
@@ -401,6 +429,16 @@ export class Game {
   /** Set when a repair lands, so the renderer can show it. */
   repairedAt = 0
 
+  /** Hull points this round. Glass Cannon makes it 1. */
+  get maxHp(): number {
+    return this.modifier.maxHp
+  }
+
+  /** Sound that happened somewhere on the board, attenuated from our own tank. */
+  private sound(name: Sound, opts: PlayOpts = {}): void {
+    this.sfx(name, opts.at ? { ...opts, ear: { x: this.tank.x, y: this.tank.y } } : opts)
+  }
+
   private pushFeed(text: string): void {
     this.feed.push({ text, at: performance.now() })
     if (this.feed.length > 6) this.feed.shift()
@@ -414,7 +452,7 @@ export class Game {
     if (this.tank.dead) {
       if (now >= this.tank.respawnAt) this.respawn()
     } else {
-      const boost = hasBuff(this.buffs, 'speedUntil', now) ? 1.45 : 1
+      const boost = (hasBuff(this.buffs, 'speedUntil', now) ? 1.45 : 1) * this.modifier.speed
       stepTank(this.tank, controls.throttle, controls.steer, controls.aim, dt, boost)
       if (controls.fire && now >= this.tank.reloadAt) this.fire(now)
       this.sweepPickups(now)
@@ -459,10 +497,12 @@ export class Game {
       // state tick like any other change.
       if (hasBuff(this.buffs, 'shieldUntil', performance.now())) {
         this.buffs.shieldUntil = 0
+        this.sound('shield')
         this.announce('SHIELD BROKE', 'that one was free', 200)
         return
       }
       this.tank.hp--
+      if (this.tank.hp > 0) this.sound('hit')
       if (this.tank.hp <= 0) this.die(shell.owner)
       return
     }
@@ -477,13 +517,19 @@ export class Game {
   }
 
   private fire(now: number): void {
-    this.tank.reloadAt = now + RELOAD * 1000 * (hasBuff(this.buffs, 'rapidUntil', now) ? 0.42 : 1)
+    const rapid = hasBuff(this.buffs, 'rapidUntil', now) ? 0.42 : 1
+    this.tank.reloadAt = now + RELOAD * 1000 * rapid * this.modifier.reload
     const x = this.tank.x + Math.cos(this.tank.gun) * MUZZLE_OFFSET
     const y = this.tank.y + Math.sin(this.tank.gun) * MUZZLE_OFFSET
-    const shell = spawnShell(randomId(), this.identity.sessionPubkey, x, y, this.tank.gun)
+    const bounces = this.modifier.bounces
+    const shell = spawnShell(randomId(), this.identity.sessionPubkey, x, y, this.tank.gun, bounces)
     this.shells.set(shell.id, shell)
-    const payload: ShellPayload = { id: shell.id, t0: now, x, y, a: this.tank.gun }
+    // The bounce budget goes out with the shell rather than being looked up on
+    // arrival, so a shell outlives a block boundary with the rules it was fired
+    // under.
+    const payload: ShellPayload = { id: shell.id, t0: now, x, y, a: this.tank.gun, b: bounces }
     this.publishAsSession(KIND_SHELL, payload)
+    this.sound('fire')
   }
 
   private die(killer: string | null): void {
@@ -493,8 +539,9 @@ export class Game {
     this.buffs.rapidUntil = 0
     this.buffs.shieldUntil = 0
     this.buffs.speedUntil = 0
-    this.tank.respawnAt = performance.now() + RESPAWN_DELAY * 1000
+    this.tank.respawnAt = performance.now() + RESPAWN_DELAY * 1000 * this.modifier.respawn
     this.deaths++
+    this.sound('death')
     const payload: DeathPayload = {
       t: performance.now(),
       k: killer,
@@ -525,8 +572,9 @@ export class Game {
     }
     this.tank.x = best.x
     this.tank.y = best.y
-    this.tank.hp = MAX_HP
+    this.tank.hp = this.maxHp
     this.tank.dead = false
+    this.sound('respawn')
     this.tank.hull = Math.atan2(ARENA_H / 2 - best.y, ARENA_W / 2 - best.x)
     this.tank.gun = this.tank.hull
   }
@@ -637,6 +685,7 @@ export class Game {
       g: Math.round(this.tank.gun * 1000) / 1000,
       hp: this.tank.hp,
       d: this.tank.dead,
+      ...(this.streak > 0 ? { k: this.streak } : {}),
     }
     this.publishAsSession(KIND_STATE, payload)
   }
@@ -655,12 +704,21 @@ export class Game {
     this.roundHash = hash
     this.roundStartedAt = performance.now()
     this.pickups.clear()
+    this.modifier = modifierForBlock(hash)
+    // Glass Cannon narrows the hull; a tank carrying three points into a
+    // one-hit round would be invincible for two shots and nobody would know
+    // why. Coming the other way, a full hull is the fair read of "new round".
+    this.tank.hp = this.tank.dead ? 0 : this.maxHp
+    if (this.modifier.id !== 'standard') {
+      this.pushFeed(`${this.modifier.name.toLowerCase()} — ${this.modifier.blurb.toLowerCase()}`)
+    }
   }
 
   endRound(height: number, layoutName: string): RoundResult {
     const result: RoundResult = {
       height: this.round || height - 1,
       layout: layoutName,
+      modifier: this.modifier.name,
       standings: this.scoreboard(),
       endedAt: Date.now(),
     }
@@ -678,7 +736,9 @@ export class Game {
     for (const peer of this.peers.values()) {
       peer.kills = 0
       peer.deaths = 0
+      peer.streak = 0
     }
+    this.sound('block')
     this.pushFeed(`block ${height} — new round on ${layoutName}`)
     return result
   }
@@ -696,7 +756,10 @@ export class Game {
   private refreshPickups(now: number): void {
     if (!this.roundHash) return
     const elapsed = (now - this.roundStartedAt) / 1000
-    const want = scheduleFor(this.roundHash, elapsed)
+    const want = scheduleFor(this.roundHash, elapsed, {
+      waveSeconds: this.modifier.waveSeconds,
+      emptyPads: this.modifier.emptyPads,
+    })
     const wanted = new Set(want.map((p) => p.id))
 
     for (const id of [...this.pickups.keys()]) {
@@ -720,11 +783,12 @@ export class Game {
       pickup.taken = true
       const spec = PICKUPS[pickup.kind]
       if (pickup.kind === 'repair') {
-        this.tank.hp = MAX_HP
+        this.tank.hp = this.maxHp
         this.repairedAt = now
       } else {
         applyPickup(this.buffs, pickup.kind, now)
       }
+      this.sound('pickup')
       this.announce(spec.label.toUpperCase(), pickup.kind === 'repair' ? 'full hull' : `${spec.seconds}s`, spec.hue)
       this.publishClaim(pickup)
     }
