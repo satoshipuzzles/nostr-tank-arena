@@ -531,6 +531,7 @@ src/scores.ts    signed score records and the leaderboard query
 src/main.ts      lobby, HUD, game loop
 test/two-player.mjs  headless two-browser smoke test against live relays
 test/sound.mjs       taps the master bus and measures what each sound emits
+test/controls.mjs    hands the page a fake gamepad and checks WASD survives it
 test/shot.mjs        photographs a pinned block, because pixels are not the DOM
 ```
 
@@ -540,6 +541,7 @@ test/shot.mjs        photographs a pinned block, because pixels are not the DOM
 npm run build && npm run preview &
 npm run test:live
 npm run test:sound
+npm run test:controls
 ```
 
 Two real browsers, two guest npubs, one room, live public relays. It waits for
@@ -631,6 +633,67 @@ gets it right; that line just is not what checks it. `test/sound.mjs` checks the
 counts every `AudioContext` the page constructs and requires zero before the
 first click. Moving the constructor into `new Sfx()` turns it red, which is
 exactly the bug the rule exists to prevent.
+
+### The gamepad that eats your keyboard
+
+`npm run test:controls` exists because of a bug that a controller sitting
+untouched on a desk could cause, and that nobody with no controller plugged in
+would ever see.
+
+`Input.read()` called `readPad()` first and returned its answer outright, and a
+pad counted as "in use" the moment any axis left the 0.22 deadzone. Worn sticks
+do not return to zero. `onKeyDown` set `usingGamepad = false`, but the very next
+frame latched it straight back, so the keyboard never got a turn.
+
+Measured by injecting a fake pad and holding W:
+
+```
+no gamepad at all                        W moved  111px
+pad connected, perfectly centred         W moved  140px
+pad connected, left stick drift 0.25     W moved   35px   fighting the stick
+pad centred but trigger resting at 0.15  W moved    0px   keyboard dead
+pad with RIGHT stick drift 0.30          W moved    0px   keyboard dead
+```
+
+The right-stick case is the one worth staring at: that axis only aims. You could
+lose the ability to *drive* to a stick that does not steer. And the trigger case
+is two bugs at once, because the trigger is also fire — a dead keyboard and a
+tank shooting on its own.
+
+Three changes, in increasing order of how much they are load-bearing:
+
+- **Every pad's rest position is learned, not assumed.** Each axis converges on
+  the smallest magnitude it has ever reported. A stick that genuinely passes
+  through centre calibrates to zero; one that never does calibrates to its true
+  rest. It only ever moves toward zero, so it cannot get stuck high. The trigger
+  gets the same treatment, for the same reason twice over.
+- **Claiming the input takes a deliberate push** (`CLAIM`, 0.35) rather than
+  merely clearing the deadzone. Reading a stick and deciding to ignore the
+  keyboard are different questions and they no longer share a threshold.
+- **A held key beats the pad outright.** This is the backstop that does not
+  depend on the calibration being right: if someone is holding W, no reading of
+  a stick they are not touching outranks that.
+
+The suite checks both directions, because the obvious way to overshoot this fix
+is to make the controller useless. It asserts W/A/S/D each travel the right way
+*on screen* — the hull is pre-aligned first, or every reading is dominated by
+whichever way the tank happened to be facing — that six kinds of broken pad
+cannot stop them, and that a real pad still drives, aims, and fires on both the
+A button and the trigger.
+
+Each scenario gets its **own pad index**, because each one stands for different
+hardware. Calibration is per-pad and remembers the lowest reading it has seen,
+so sharing an index would mean a trigger "resting" at 0.6 on a pad previously
+seen at 0.0 — which is a player pulling it, the opposite of the case under test.
+
+Confirmed red before being trusted: against the previous `input.ts`, five checks
+fail, including the tank firing by itself.
+
+One measurement note, the same one the sound suite learned: hold for long
+enough. At swiftshader's frame rate the sim runs at roughly a third of
+wall-clock, and a short hold leaves the signal the same size as the jitter — a
+working keyboard measured 37px against a 61px baseline, which is a coin flip
+rather than a check.
 
 ## Tuning
 

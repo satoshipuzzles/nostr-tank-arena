@@ -14,6 +14,16 @@ export interface Controls {
 }
 
 const DEADZONE = 0.22
+/**
+ * How hard a stick has to be pushed before we conclude the player has picked
+ * the pad up, as opposed to the pad merely existing. Larger than DEADZONE:
+ * reading a stick and deciding to ignore the keyboard are different questions
+ * and they do not deserve the same threshold. Kept close to it so a deliberate
+ * push still registers on the first frame.
+ */
+const CLAIM = 0.35
+/** Triggers rest a little off zero on plenty of pads. Match the fire threshold. */
+const TRIGGER_FIRE = 0.35
 
 const deadzone = (v: number) => (Math.abs(v) < DEADZONE ? 0 : v)
 const clamp = (v: number, lo: number, hi: number) => (v < lo ? lo : v > hi ? hi : v)
@@ -41,6 +51,28 @@ export class Input {
   /** Mouse position in world coordinates, kept up to date by the renderer. */
   mouseWorld: { x: number; y: number } | null = null
   private usingGamepad = false
+  /**
+   * Where each pad's axes rest, learned rather than assumed.
+   *
+   * Worn sticks do not return to zero. A pad resting at 0.25 is outside the
+   * deadzone on every frame, which used to read as a permanent hard-left and —
+   * because `read()` returns the pad's answer outright — took the keyboard away
+   * from a player who had never touched the thing. Right-stick drift did it too,
+   * and that axis only aims, so you could lose the ability to drive to a stick
+   * that does not steer.
+   *
+   * Each entry converges on the smallest magnitude that axis has ever reported.
+   * A stick that genuinely passes through centre calibrates itself to zero; one
+   * that never does calibrates to its true rest position. It cannot get stuck
+   * high, because the only update is downward.
+   */
+  private neutral = new Map<number, number[]>()
+  /**
+   * The same treatment for the trigger, and for the same reason twice over: a
+   * trigger that rests above zero is both a dead keyboard and a tank that fires
+   * on its own, which is the worse half of the two.
+   */
+  private triggerRest = new Map<number, number>()
 
   constructor(private canvas: HTMLCanvasElement) {
     window.addEventListener('keydown', this.onKeyDown)
@@ -77,10 +109,15 @@ export class Input {
   }
 
   read(tank: { x: number; y: number; gun: number; hull: number }): Controls {
-    const pad = this.readPad(tank)
+    const has = (...codes: string[]) => codes.some((c) => this.keys.has(c))
+    // A held key beats the pad, always. Drift calibration should mean no pad
+    // ever claims the input it did not earn, but this is the backstop that does
+    // not depend on getting that right: if someone is holding W, they want to
+    // drive, and no reading of a stick they are not touching outranks that.
+    const driving = has('KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowLeft', 'ArrowDown', 'ArrowRight')
+    const pad = driving ? null : this.readPad(tank)
     if (pad) return pad
 
-    const has = (...codes: string[]) => codes.some((c) => this.keys.has(c))
     const x = (has('KeyD', 'ArrowRight') ? 1 : 0) - (has('KeyA', 'ArrowLeft') ? 1 : 0)
     const y = (has('KeyS', 'ArrowDown') ? 1 : 0) - (has('KeyW', 'ArrowUp') ? 1 : 0)
 
@@ -117,20 +154,24 @@ export class Input {
     const pads = navigator.getGamepads?.() ?? []
     for (const pad of pads) {
       if (!pad) continue
-      const lx = deadzone(pad.axes[0] ?? 0)
-      const ly = deadzone(pad.axes[1] ?? 0)
-      const rx = deadzone(pad.axes[2] ?? 0)
-      const ry = deadzone(pad.axes[3] ?? 0)
-      const trigger = pad.buttons[7]?.value ?? 0
+      const axis = this.calibrate(pad)
+      const lx = deadzone(axis(0))
+      const ly = deadzone(axis(1))
+      const rx = deadzone(axis(2))
+      const ry = deadzone(axis(3))
+      const trigger = this.calibrateTrigger(pad)
       const aButton = pad.buttons[0]?.pressed ?? false
       const rb = pad.buttons[5]?.pressed ?? false
-      const touched = lx || ly || rx || ry || trigger > 0.1 || aButton || rb
-      if (!touched && !this.usingGamepad) continue
-      if (touched) this.usingGamepad = true
+      const fire = trigger > TRIGGER_FIRE || aButton || rb
+      // Claiming the input needs a deliberate push or a real button. A stick
+      // sitting just past the deadzone is not somebody asking to play.
+      const claimed =
+        Math.hypot(lx, ly) > CLAIM || Math.hypot(rx, ry) > CLAIM || aButton || rb || trigger > TRIGGER_FIRE
+      if (!claimed && !this.usingGamepad) continue
+      if (claimed) this.usingGamepad = true
 
       // Right stick sets absolute gun angle; if it is centred the gun holds.
       const aim = rx || ry ? Math.atan2(ry, rx) : null
-      const fire = trigger > 0.35 || aButton || rb
       // A stick already gives a direction, so `direct` is what it wants — and
       // it is what every twin-stick game on a couch has trained people to
       // expect from the left stick.
@@ -143,6 +184,31 @@ export class Input {
       return { throttle: -ly, steer: lx, aim, fire }
     }
     return null
+  }
+
+  /**
+   * Per-pad drift compensation. Returns a reader that subtracts each axis's
+   * learned rest position, so a worn stick reports zero when nobody is holding
+   * it. See `neutral` for why the estimate only ever moves toward zero.
+   */
+  private calibrateTrigger(pad: Gamepad): number {
+    const raw = pad.buttons[7]?.value ?? 0
+    const rest = Math.min(this.triggerRest.get(pad.index) ?? raw, raw)
+    this.triggerRest.set(pad.index, rest)
+    return raw - rest
+  }
+
+  private calibrate(pad: Gamepad): (i: number) => number {
+    let rest = this.neutral.get(pad.index)
+    if (!rest || rest.length !== pad.axes.length) {
+      rest = [...pad.axes]
+      this.neutral.set(pad.index, rest)
+    }
+    for (let i = 0; i < pad.axes.length; i++) {
+      const v = pad.axes[i] ?? 0
+      if (Math.abs(v) < Math.abs(rest[i])) rest[i] = v
+    }
+    return (i: number) => (pad.axes[i] ?? 0) - (rest![i] ?? 0)
   }
 
   dispose(): void {
