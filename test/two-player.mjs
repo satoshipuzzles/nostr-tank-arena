@@ -1294,15 +1294,24 @@ try {
     const g = window.__game
     const realOnEvent = g.onEvent.bind(g)
     g.onEvent = () => {}
-    g.lastInboundAt = performance.now() - 20_000
-    g.tank.dead = false
-    await new Promise((r) => setTimeout(r, 500))
     const n = document.getElementById('alarm')
-    const seen = {
-      stalled: g.readPathStalled,
-      quietFor: Math.round(performance.now() - g.lastInboundAt),
-      display: getComputedStyle(n).display,
-      text: n.textContent.replace(/\s+/g, ' ').trim(),
+    let seen = null
+    // Polled, and the tank is kept alive each pass: `readPathStalled` stands
+    // down while you are respawning, and with inbound unplugged the shells
+    // already in flight can still land on you.
+    for (let i = 0; i < 16; i++) {
+      g.lastInboundAt = performance.now() - 20_000
+      g.tank.dead = false
+      g.tank.hp = g.maxHp
+      await new Promise((r) => setTimeout(r, 300))
+      seen = {
+        stalled: g.readPathStalled,
+        dead: g.tank.dead,
+        clockAlarm: g.net.clockAlarm?.direction ?? null,
+        display: getComputedStyle(n).display,
+        text: n.textContent.replace(/\s+/g, ' ').trim(),
+      }
+      if (/STOPPED HEARING THE ROOM/.test(seen.text)) break
     }
     g.onEvent = realOnEvent
     return seen
@@ -1310,7 +1319,7 @@ try {
   check('and twelve seconds of silence puts it on the screen',
     wentQuiet.stalled && wentQuiet.display !== 'none' &&
       /STOPPED HEARING THE ROOM/.test(wentQuiet.text),
-    wentQuiet.text.slice(0, 120))
+    JSON.stringify({ ...wentQuiet, text: wentQuiet.text.slice(0, 60) }))
   check('and it says this side died rather than blaming the room',
     /may still see you/.test(wentQuiet.text), wentQuiet.text.slice(0, 200))
   // Polled for the same reason as above: the state clears on the next inbound
