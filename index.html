@@ -142,7 +142,7 @@
         </p>
         <p class="error" id="lobby-error" hidden></p>
 
-        <details class="advanced">
+        <details class="advanced" id="advanced">
           <summary>Controllers and relays</summary>
           <div id="pads">No gamepad detected. Plug one in or press a button on it.</div>
           <p class="fine">
@@ -150,11 +150,44 @@
             pairing step, and there is nothing for this game to configure. Left stick drives,
             right stick aims, right trigger or <b>A</b> fires.
           </p>
-          <textarea id="relays" rows="4" spellcheck="false"></textarea>
+          <!-- The relay editor. This was a bare textarea that only wrote to
+               storage when you pressed Play, which is how a new default took
+               three deploys to reach the person who asked for it. The textarea
+               is still the model — the rows are a view of it, and "Edit as
+               text" hands it back for a paste. -->
+          <div class="relay-editor">
+            <div class="relay-head">
+              <span class="relay-title">Relays <b id="relay-count">0</b></span>
+              <button id="relay-test" class="ghost tiny" type="button">Test all</button>
+            </div>
+            <ul id="relay-rows" class="relay-rows"></ul>
+            <div class="relay-add">
+              <input
+                id="relay-add-url"
+                placeholder="wss://relay.example.com"
+                spellcheck="false"
+                autocomplete="off"
+                autocapitalize="off"
+                inputmode="url"
+                aria-label="Relay to add"
+              />
+              <button id="relay-add-go" type="button">Add</button>
+            </div>
+            <p class="relay-msg" id="relay-msg" hidden></p>
+            <div class="relay-actions">
+              <button id="relay-save" type="button">Save</button>
+              <button id="relay-reset" class="ghost" type="button">Restore defaults</button>
+            </div>
+            <details class="relay-text">
+              <summary>Edit as text</summary>
+              <textarea id="relays" rows="4" spellcheck="false"></textarea>
+            </details>
+          </div>
           <p class="fine">
-            One websocket URL per line. Shells and positions ride on ephemeral events, so relays
+            One websocket URL per row. Shells and positions ride on ephemeral events, so relays
             forward them and store nothing. A relay you control will always feel better than a busy
-            public one.
+            public one. <b>Test all</b> opens one socket per relay and asks for a kind nobody
+            stores, so it costs two frames and no history.
           </p>
         </details>
       </div>
