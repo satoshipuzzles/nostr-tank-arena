@@ -96,6 +96,16 @@ try {
   })
   await page.goto(URL_, { waitUntil: 'domcontentloaded', timeout: 30_000 })
   await page.$eval('#relays', (el, v) => (el.value = v), RELAY)
+  if (URL_.startsWith('https:')) {
+    // Said out loud rather than left as a silent caveat: Chrome will not let a
+    // public https origin open a socket to this machine, so against a deployed
+    // target the fake relay above is unreachable and the match runs with no
+    // relay at all. That is fine for what this suite measures — the turret is
+    // pure local simulation and never consults a relay — but it means this run
+    // proves nothing about netcode.
+    console.log('  note against an https target the local relay is unreachable, so this match')
+    console.log('       runs offline. The turret is local simulation, so the sweep still holds.')
+  }
   await page.type('#name', 'sweep')
   await page.type('#room', 'aim' + Math.floor(Math.random() * 1e6))
   await page.click('#play-guest')
