@@ -37,9 +37,8 @@ await build({
   outfile: '.scratch/relays-bundle.mjs',
   logLevel: 'silent',
 })
-const { normalizeRelay, parseRelayList, blockedByMixedContent } = await import(
-  '../.scratch/relays-bundle.mjs'
-)
+const { normalizeRelay, parseRelayList, blockedByMixedContent, isLocalAddress, localNetworkHint } =
+  await import('../.scratch/relays-bundle.mjs')
 rmSync('.scratch/relays-bundle.mjs')
 
 // The shipped defaults, so the seeded `offered` record can name them exactly.
@@ -95,7 +94,25 @@ check(
 check(blockedByMixedContent('ws://relay.example.com', 'http:') === false, 'ws:// from http is fine')
 check(
   blockedByMixedContent('ws://localhost:4173', 'https:') === false,
-  'localhost is the exception browsers make, and it is how this game is tested',
+  'localhost is the exception the mixed-content rule makes',
+)
+check(
+  isLocalAddress('ws://localhost:7788') && isLocalAddress('wss://192.168.1.9:4848') &&
+    isLocalAddress('ws://tank.local'),
+  'localhost, a LAN address and an mDNS name all count as this machine',
+)
+check(
+  !isLocalAddress('wss://relay.example.com') && !isLocalAddress('wss://172.32.0.1'),
+  'a public host does not, and neither does an address just outside 172.16/12',
+)
+check(
+  localNetworkHint('ws://localhost:7788', 'https:').includes('https page'),
+  'and an https page gets told why it cannot reach this machine',
+)
+check(
+  localNetworkHint('ws://localhost:7788', 'http:') === '' &&
+    localNetworkHint('wss://relay.example.com', 'https:') === '',
+  'the hint stays off when it would not be true',
 )
 
 // ------------------------------------------------------------- fake relays
@@ -182,7 +199,27 @@ try {
     'nothing is dirty on load, so Save is disabled',
   )
 
-  console.log('opening the panel tests the relays, and tells the three apart')
+  // Chrome refuses a socket from a public https origin to anything on this
+  // machine — ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS, not mixed content,
+  // and it applies to wss:// too. So the three-way probe can only be measured
+  // against a local build. Against the deployed site it is a different check:
+  // that a local relay's row says why, rather than reading as a dead relay.
+  const local = !URL_.startsWith('https:')
+  if (local) {
+    console.log('opening the panel tests the relays, and tells the three apart')
+  } else {
+    console.log('opening the panel tests the relays')
+    console.log(
+      '  SKIP ok/silent/refused are not measurable against an https target — Chrome blocks a',
+    )
+    console.log(
+      '       public origin from reaching this machine at all, whatever the scheme',
+    )
+    console.log(
+      '       (ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS). Run it against `npm run preview`',
+    )
+    console.log('       to measure the three apart. What is checked here instead: the row says so.')
+  }
   await page.$eval('#advanced', (d) => {
     d.open = true
     d.dispatchEvent(new Event('toggle'))
@@ -193,17 +230,34 @@ try {
   })
   check(settled, 'every dot resolves')
   const s1 = await statuses(page)
-  check(s1[HEALTHY] === 'ok', 'a relay that answers reads ok', s1[HEALTHY])
-  check(s1[DEAD] === 'refused', 'a port with nothing on it reads refused', s1[DEAD])
-  check(
-    s1[SILENT] === 'silent',
-    'a relay that takes the socket and says nothing is silent, not refused',
-    s1[SILENT],
-  )
-  check(
-    (await page.$eval(`#relay-rows .relay-row[data-url="${HEALTHY}"] .state`, (el) => el.textContent)).includes('ms'),
-    'and the healthy row carries the round trip',
-  )
+  if (local) {
+    check(s1[HEALTHY] === 'ok', 'a relay that answers reads ok', s1[HEALTHY])
+    check(s1[DEAD] === 'refused', 'a port with nothing on it reads refused', s1[DEAD])
+    check(
+      s1[SILENT] === 'silent',
+      'a relay that takes the socket and says nothing is silent, not refused',
+      s1[SILENT],
+    )
+    check(
+      (await page.$eval(`#relay-rows .relay-row[data-url="${HEALTHY}"] .state`, (el) => el.textContent)).includes('ms'),
+      'and the healthy row carries the round trip',
+    )
+  } else {
+    check(
+      Object.values(s1).every((v) => v === 'refused'),
+      'every local relay is refused from the deployed site, which is the browser rule not the relay',
+      JSON.stringify(s1),
+    )
+    const said = await page.$eval(
+      `#relay-rows .relay-row[data-url="${HEALTHY}"] .state`,
+      (el) => el.textContent,
+    )
+    check(
+      said.includes('https page is not allowed'),
+      'and the row says why instead of reading as a dead relay',
+      said,
+    )
+  }
 
   // A probe landing must not rebuild the list. It used to, and mid-"Test all"
   // — exactly when a player is deciding what to delete — a tap landed on a

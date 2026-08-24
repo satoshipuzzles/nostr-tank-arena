@@ -87,8 +87,36 @@ export function parseRelayList(text: string): string[] {
 export function blockedByMixedContent(url: string, pageProtocol: string): boolean {
   if (pageProtocol !== 'https:') return false
   if (!/^ws:\/\//i.test(url)) return false
-  const host = url.slice(5).split('/')[0].split(':')[0].toLowerCase()
-  return !(host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '::1')
+  return !isLocalAddress(url)
+}
+
+/** A relay on the machine the browser is running on, or the network it is on. */
+export function isLocalAddress(url: string): boolean {
+  const host = url.replace(/^wss?:\/\//i, '').split('/')[0].split('@').pop() ?? ''
+  const name = host.replace(/:\d+$/, '').replace(/^\[|\]$/g, '').toLowerCase()
+  if (name === 'localhost' || name.endsWith('.localhost') || name === '::1') return true
+  if (name.endsWith('.local')) return true
+  if (/^127\./.test(name) || /^10\./.test(name) || /^192\.168\./.test(name)) return true
+  return /^172\.(1[6-9]|2\d|3[01])\./.test(name)
+}
+
+/**
+ * Why an https page could not reach a relay on this machine.
+ *
+ * Mixed content is not the only rule in the way any more. Chrome's local
+ * network access checks stop a public https origin opening a socket to
+ * localhost or a LAN address *whatever* the scheme, which arrives as
+ * `ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS` in the console and as a plain
+ * error event in the page. The lobby's own copy invites people to run their
+ * own relay, so this is a case players will walk into.
+ *
+ * It is a hint appended to a refusal, not a status of its own: a local relay
+ * that simply is not running refuses in exactly the same way, and claiming
+ * "blocked" would be asserting a cause we cannot see from here.
+ */
+export function localNetworkHint(url: string, pageProtocol: string): string {
+  if (pageProtocol !== 'https:' || !isLocalAddress(url)) return ''
+  return ' — and an https page is not allowed to reach this machine anyway'
 }
 
 /**
@@ -146,11 +174,13 @@ export function checkRelay(url: string, timeoutMs = 5000): Promise<RelayProbe> {
       resolve(probe)
     }
 
+    const local = localNetworkHint(url, location.protocol)
+
     const timer = setTimeout(() => {
       finish(
         opened
           ? { status: 'silent', detail: `connected, no answer in ${Math.round(timeoutMs / 1000)}s` }
-          : { status: 'refused', detail: 'could not connect' },
+          : { status: 'refused', detail: `could not connect${local}` },
       )
     }, timeoutMs)
 
@@ -172,10 +202,10 @@ export function checkRelay(url: string, timeoutMs = 5000): Promise<RelayProbe> {
       finish({ status: 'ok', detail: `${word} in ${ms}ms`, ms })
     }
     socket.onerror = () => {
-      finish({ status: 'refused', detail: opened ? 'connection dropped' : 'could not connect' })
+      finish({ status: 'refused', detail: opened ? 'connection dropped' : `could not connect${local}` })
     }
     socket.onclose = () => {
-      finish({ status: 'refused', detail: opened ? 'connection dropped' : 'could not connect' })
+      finish({ status: 'refused', detail: opened ? 'connection dropped' : `could not connect${local}` })
     }
   })
 }
