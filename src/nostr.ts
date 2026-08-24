@@ -111,10 +111,14 @@ import {
  * see `troubleSummary`.
  */
 export const DEFAULT_RELAYS = [
+  // First, on Puzz's instruction, and the ordering is not cosmetic: `Net`
+  // walks this list in order when it opens sockets and when it picks who to
+  // read from, so the relay with the highest published cap and an operator in
+  // the room should be the one carrying the tick stream.
+  'wss://coolfeed.feeds.relay.tools',
   'wss://relay.primal.net',
   'wss://purplerelay.com',
   'wss://relay.mostr.pub',
-  'wss://coolfeed.feeds.relay.tools',
 ]
 
 declare global {
