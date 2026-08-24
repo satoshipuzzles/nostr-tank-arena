@@ -28,7 +28,7 @@
 // landed bounces once on the shooter's screen and three times on everybody
 // else's, for the four seconds it takes the boundary to settle.
 //
-// `waveSeconds` and `emptyPads` feed the pickup schedule, and the wave index
+// `waveSeconds` and `padsPerWave` feed the pickup schedule, and the wave index
 // ends up inside the pickup id — so two clients disagreeing about the modifier
 // compute different ids for the same pad and silently discard each other's
 // claims. This was listed as "cannot desync" and it could. It is anchored now
@@ -53,10 +53,10 @@ export interface Modifier {
   reload: number
   /** Multiplier on the respawn wait. */
   respawn: number
-  /** Seconds between pickup waves. */
+  /** Length of one pickup spawn frame, in seconds. */
   waveSeconds: number
-  /** How many pads stay empty each wave. */
-  emptyPads: number
+  /** Pads stocked per wave, or 0 to let the block hash decide (one, sometimes two). */
+  padsPerWave: number
   /** Wall bounces a shell gets before it dies. */
   bounces: number
 }
@@ -66,8 +66,8 @@ const BASE = {
   speed: 1,
   reload: 1,
   respawn: 1,
-  waveSeconds: 34,
-  emptyPads: 1,
+  waveSeconds: 52,
+  padsPerWave: 0,
   bounces: 1,
 }
 
@@ -101,10 +101,10 @@ export const MODIFIERS: Modifier[] = [
     ...BASE,
     id: 'supply',
     name: 'Supply Run',
-    blurb: 'Pickups every 10 seconds, and every pad is stocked.',
+    blurb: 'Pickups twice as often, two pads at a time.',
     hue: 130,
-    waveSeconds: 10,
-    emptyPads: 0,
+    waveSeconds: 22,
+    padsPerWave: 2,
   },
   {
     ...BASE,

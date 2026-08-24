@@ -86,7 +86,11 @@ try {
   // moves with it.
   await page.waitForFunction(() => window.__renderer && window.__game, { timeout: 20_000 })
   await page.evaluate(() => {
-    window.__clock.accept({ height: 999999, hash: 'ab'.repeat(30) + '0300' })
+    window.__clock.accept({
+      height: 999999,
+      hash: 'ab'.repeat(30) + '0300',
+      time: Math.floor(Date.now() / 1000) - 30,
+    })
   })
   await page.waitForFunction(() => document.getElementById('podium'), { timeout: 10_000 })
   await new Promise((r) => setTimeout(r, 1500))

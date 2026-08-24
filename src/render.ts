@@ -22,11 +22,11 @@
 
 import * as THREE from 'three'
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js'
-import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { ARENA_H, ARENA_W, WALLS, onLayoutChange, pointInWall } from './arena'
 import type { Game, Peer } from './game'
 import { MAX_HP, RELOAD, TANK_RADIUS } from './sim'
-import { PICKUPS, hasBuff } from './pickups'
+import { ICON_POLYS, PICKUPS, hasBuff } from './pickups'
+import type { PickupKind } from './pickups'
 import { Avatar } from './avatars'
 
 // Board furniture, in arena units so it stays in scale with the simulation.
@@ -124,21 +124,131 @@ export const GROUND_Y = 2.5
 /** How far a flat decal floats above the felt to avoid z-fighting with it. */
 export const DECAL_LIFT = 0.9
 
-/** The board's checker, drawn once and tiled. */
-function checkerTexture(): THREE.Texture {
+/**
+ * A tiny deterministic generator, so the turf looks the same every load.
+ *
+ * `Math.random` would work and would also mean the board has a slightly
+ * different grain each refresh, which is the sort of thing that makes a
+ * screenshot comparison useless and a "did that change?" question unanswerable.
+ */
+function noise(seed: number): () => number {
+  let s = seed >>> 0
+  return () => {
+    s = (Math.imul(s ^ (s >>> 15), 0x2545f491) + 0x9e3779b9) >>> 0
+    return s / 4294967296
+  }
+}
+
+/**
+ * The board's turf.
+ *
+ * Was two flat greens in a checker, which read as a spreadsheet from the board
+ * camera — the arena had no surface, just an area. This keeps the checker,
+ * because it is what gives distance a unit you can count, and lays grain over
+ * it: a few thousand blade strokes and a mow direction per square. It doubles
+ * as the material's bump map, so the sun actually catches the texture instead
+ * of it being a flat picture of texture.
+ */
+function feltTexture(): THREE.Texture {
   const canvas = document.createElement('canvas')
-  canvas.width = canvas.height = 64
+  canvas.width = canvas.height = 256
   const ctx = canvas.getContext('2d')!
-  ctx.fillStyle = '#8fd97a'
-  ctx.fillRect(0, 0, 64, 64)
-  ctx.fillStyle = '#7ecb69'
-  ctx.fillRect(0, 0, 32, 32)
-  ctx.fillRect(32, 32, 32, 32)
+  const rnd = noise(0x7a4b19)
+
+  ctx.fillStyle = '#8ed57a'
+  ctx.fillRect(0, 0, 256, 256)
+  ctx.fillStyle = '#7cc767'
+  ctx.fillRect(0, 0, 128, 128)
+  ctx.fillRect(128, 128, 128, 128)
+
+  // Mow lines, one direction per square, the way a real pitch is cut.
+  ctx.globalAlpha = 0.11
+  for (let sq = 0; sq < 4; sq++) {
+    const ox = (sq % 2) * 128
+    const oy = Math.floor(sq / 2) * 128
+    const vertical = sq % 2 === 0
+    ctx.fillStyle = '#ffffff'
+    for (let i = 6; i < 128; i += 16) {
+      if (vertical) ctx.fillRect(ox + i, oy, 7, 128)
+      else ctx.fillRect(ox, oy + i, 128, 7)
+    }
+  }
+
+  // Grain. Short strokes rather than dots: a dot field reads as noise, and a
+  // stroke field reads as grass.
+  ctx.globalAlpha = 0.16
+  for (let i = 0; i < 5200; i++) {
+    const x = rnd() * 256
+    const y = rnd() * 256
+    ctx.strokeStyle = rnd() > 0.5 ? '#ffffff' : '#3f7a37'
+    ctx.lineWidth = 1
+    ctx.beginPath()
+    ctx.moveTo(x, y)
+    ctx.lineTo(x + (rnd() - 0.5) * 3, y - 1 - rnd() * 3)
+    ctx.stroke()
+  }
+  ctx.globalAlpha = 1
+
   const texture = new THREE.CanvasTexture(canvas)
   texture.wrapS = texture.wrapT = THREE.RepeatWrapping
-  texture.repeat.set(ARENA_W / 160, ARENA_H / 160)
+  texture.repeat.set(ARENA_W / 320, ARENA_H / 320)
   texture.colorSpace = THREE.SRGBColorSpace
-  texture.magFilter = THREE.NearestFilter
+  texture.anisotropy = 4
+  return texture
+}
+
+/**
+ * Chalk on the pitch: an inset touchline, a centre circle, and a corner arc at
+ * every spawn.
+ *
+ * Not decoration. On a 2000-unit board with no landmarks the only way to judge
+ * "can I make that gap before he reloads" is by counting checker squares, and
+ * the centre circle turns the middle of the map into a place people can name.
+ * Drawn per layout at the board's own aspect, so nothing stretches when the
+ * next block picks a different-sized arena.
+ */
+function chalkTexture(): THREE.Texture {
+  const W = 1024
+  const H = Math.round((1024 * ARENA_H) / ARENA_W)
+  const canvas = document.createElement('canvas')
+  canvas.width = W
+  canvas.height = H
+  const ctx = canvas.getContext('2d')!
+  const sx = W / ARENA_W
+  const inset = 70 * sx
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.42)'
+  ctx.lineWidth = Math.max(2, 5 * sx)
+  ctx.strokeRect(inset, inset, W - inset * 2, H - inset * 2)
+
+  ctx.beginPath()
+  ctx.moveTo(W / 2, inset)
+  ctx.lineTo(W / 2, H - inset)
+  ctx.stroke()
+
+  ctx.beginPath()
+  ctx.arc(W / 2, H / 2, 230 * sx, 0, Math.PI * 2)
+  ctx.stroke()
+
+  ctx.fillStyle = 'rgba(255,255,255,0.42)'
+  ctx.beginPath()
+  ctx.arc(W / 2, H / 2, 9 * sx, 0, Math.PI * 2)
+  ctx.fill()
+
+  for (const [cx, cy, from] of [
+    [inset, inset, 0],
+    [W - inset, inset, Math.PI / 2],
+    [W - inset, H - inset, Math.PI],
+    [inset, H - inset, -Math.PI / 2],
+  ]) {
+    ctx.beginPath()
+    ctx.arc(cx, cy, 60 * sx, from, from + Math.PI / 2)
+    ctx.stroke()
+  }
+
+  const texture = new THREE.CanvasTexture(canvas)
+  texture.colorSpace = THREE.SRGBColorSpace
+  texture.anisotropy = 4
   return texture
 }
 
@@ -382,34 +492,45 @@ function makeTank(): TankRig {
 }
 
 /**
- * A silhouette per pickup type.
+ * The pickup's icon, extruded.
  *
- * Six pickups that were all the same octahedron in six colours made reading a
- * pad from across the board a colour-match puzzle — and an impossible one for
- * anyone who cannot separate the orange from the red. Six shapes are legible at
- * arena zoom, and legible in a screenshot.
+ * Built from `ICON_POLYS` — the same polygons the HUD chip draws as an `<svg>`,
+ * so the shape standing on the pad and the shape on the timer are the same
+ * shape by construction rather than by two people drawing carefully. The icon
+ * grid is 32 units with y pointing down, which is SVG's convention and the
+ * opposite of three.js's, hence the flip.
+ *
+ * These are billboarded rather than spun. A spinning extrusion of a flat icon
+ * goes edge-on twice a second and disappears, which is a strange thing to do to
+ * the one object on the board whose entire job is to be identified from across
+ * the arena.
  */
-function pickupGeometry(shape: string): THREE.BufferGeometry {
-  switch (shape) {
-    case 'cross': {
-      // The repair cross, built from two boxes so it reads at any angle.
-      const bar = new RoundedBoxGeometry(54, 18, 18, 1, 4)
-      const post = new RoundedBoxGeometry(18, 54, 18, 1, 4)
-      return mergeGeometries([bar, post]) ?? bar
-    }
-    case 'bolt':
-      return new THREE.ConeGeometry(21, 54, 4)
-    case 'dome':
-      return new THREE.SphereGeometry(28, 18, 12, 0, Math.PI * 2, 0, Math.PI / 2)
-    case 'ring':
-      return new THREE.TorusGeometry(23, 8, 12, 22)
-    case 'star':
-      return new THREE.IcosahedronGeometry(29, 0)
-    case 'spike':
-      return new THREE.ConeGeometry(24, 56, 6)
-    default:
-      return new THREE.OctahedronGeometry(27, 0)
-  }
+function pickupGeometry(kind: PickupKind): THREE.BufferGeometry {
+  // Sized so the silhouette survives the board camera. At 2.1 the shield read
+  // as a coloured blob from the far end of The Lanes, which is the exact
+  // failure the icons were added to fix.
+  const SCALE = 2.8
+  const shapes = ICON_POLYS[kind].map((poly) => {
+    const shape = new THREE.Shape()
+    poly.forEach(([x, y], i) => {
+      const px = (x - 16) * SCALE
+      const py = (16 - y) * SCALE
+      if (i === 0) shape.moveTo(px, py)
+      else shape.lineTo(px, py)
+    })
+    shape.closePath()
+    return shape
+  })
+  const geo = new THREE.ExtrudeGeometry(shapes, {
+    depth: 9,
+    bevelEnabled: true,
+    bevelSize: 2.2,
+    bevelThickness: 2.2,
+    bevelSegments: 2,
+    curveSegments: 1,
+  })
+  geo.center()
+  return geo
 }
 
 // --------------------------------------------------------------- particles
@@ -543,6 +664,18 @@ export class Renderer {
 
   private rigs = new Map<string, TankRig>()
   private you = makeTank()
+
+  /**
+   * Whether this client's own tank is on screen.
+   *
+   * Exposed because "a spectator draws no tank" is otherwise unobservable from
+   * outside: the rig exists, the simulation steps it, and every structural
+   * check on it reads exactly the same as a playing client's. This is the one
+   * value that differs, so it is the one worth being able to read.
+   */
+  get ownTankVisible(): boolean {
+    return this.you.root.visible
+  }
   private shells = new Map<string, THREE.Mesh>()
   private shellGeo = new THREE.SphereGeometry(7, 12, 10)
   private siegeGeo = new THREE.SphereGeometry(11, 12, 10)
@@ -675,14 +808,31 @@ export class Renderer {
     base.receiveShadow = true
     this.board.add(base)
 
+    const turf = feltTexture()
     const felt = new THREE.Mesh(
       new THREE.PlaneGeometry(ARENA_W, ARENA_H),
-      new THREE.MeshStandardMaterial({ map: checkerTexture(), roughness: 0.95 }),
+      // The same canvas as the bump map, so the grain is lit rather than
+      // painted. It is one texture upload and the sun does the rest.
+      new THREE.MeshStandardMaterial({ map: turf, bumpMap: turf, bumpScale: 3, roughness: 0.95 }),
     )
     felt.rotation.x = -Math.PI / 2
     felt.position.set(ARENA_W / 2, GROUND_Y, ARENA_H / 2)
     felt.receiveShadow = true
     this.board.add(felt)
+
+    // Chalk sits between the felt and everything else that lies flat, so a
+    // pickup ring still draws over a touchline rather than fighting it.
+    const chalk = new THREE.Mesh(
+      new THREE.PlaneGeometry(ARENA_W, ARENA_H),
+      new THREE.MeshBasicMaterial({
+        map: chalkTexture(),
+        transparent: true,
+        depthWrite: false,
+      }),
+    )
+    chalk.rotation.x = -Math.PI / 2
+    chalk.position.set(ARENA_W / 2, GROUND_Y + DECAL_LIFT * 0.4, ARENA_H / 2)
+    this.board.add(chalk)
 
     // The outer ring is the board's fence and gets its own height and colour;
     // the inner cover is what you actually hide behind.
@@ -942,6 +1092,11 @@ export class Renderer {
       streak: game.streak,
       mine: true,
     })
+    // A spectator's tank exists in the simulation — it is where the board
+    // camera and `toWorld` measure from — but it must never reach a pixel.
+    // Everything under `this.you` comes off together, including the ring, the
+    // plate and the driver, because half a hidden tank is a ghost.
+    this.you.root.visible = !game.watching
 
     for (const peer of game.peers.values()) {
       const rig = this.rigs.get(peer.session)
@@ -965,8 +1120,12 @@ export class Renderer {
 
     this.syncShells(game)
     this.syncPickups(game, now)
-    this.deaths(game)
-    this.reload(game, now)
+    if (!game.watching) {
+      this.deaths(game)
+      this.reload(game, now)
+    } else {
+      this.reloadBar.visible = false
+    }
 
     // Shield bubble and overdrive trail. Both have to be legible to the other
     // three players, not just to you — knowing who is currently hard to kill is
@@ -1233,7 +1392,7 @@ export class Renderer {
         const hue = PICKUPS[pickup.kind].hue / 360
         group = new THREE.Group()
         const gem = new THREE.Mesh(
-          pickupGeometry(PICKUPS[pickup.kind].shape),
+          pickupGeometry(pickup.kind),
           new THREE.MeshStandardMaterial({
             color: new THREE.Color().setHSL(hue, 0.9, 0.62),
             // Lit hard on purpose. The camera sits a long way back and an item
@@ -1283,9 +1442,14 @@ export class Renderer {
       const pad = group.getObjectByName('pad') as THREE.Mesh
       const beam = group.getObjectByName('beam') as THREE.Mesh
       gem.visible = !pickup.taken
-      gem.rotation.y = now / 620
-      gem.rotation.x = 0.42
-      gem.position.y = 52 + Math.sin(now / 320) * 9
+      // Face the camera, whichever camera is live — board or cockpit. An icon
+      // is only an icon while you can see its outline, and this one has to
+      // survive being read from the far corner of a 2000-unit board.
+      gem.quaternion.copy(this.camera.quaternion)
+      // A slow tilt so it is not a dead sticker, small enough that the
+      // silhouette never goes edge-on.
+      gem.rotateZ(Math.sin(now / 900) * 0.16)
+      gem.position.y = 62 + Math.sin(now / 320) * 9
       ;(pad.material as THREE.MeshBasicMaterial).opacity = pickup.taken ? 0.14 : 0.65
       pad.scale.setScalar(pickup.taken ? 1 : 1 + Math.sin(now / 260) * 0.07)
       beam.visible = !pickup.taken

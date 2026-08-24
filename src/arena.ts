@@ -90,6 +90,7 @@ export const LAYOUTS: LayoutSpec[] = [
     pads: (w, h) => [
       { x: w / 2, y: 210 },
       { x: 420, y: h / 2 },
+      { x: 540, y: 360 },
     ],
   },
   {
@@ -107,6 +108,7 @@ export const LAYOUTS: LayoutSpec[] = [
     pads: (w, h) => [
       { x: w / 2, y: h / 2 - 230 },
       { x: 560, y: 580 },
+      { x: 600, y: 1120 },
     ],
   },
   {
@@ -123,9 +125,13 @@ export const LAYOUTS: LayoutSpec[] = [
       { x: 885, y: 470, w: 104, h: 104 },
     ],
     spawns: corners,
+    // Not the exact centre: this board is 180-degree symmetric, so a pad on
+    // the centre point mirrors onto itself and the board quietly ships with two
+    // pads in the same hole.
     pads: (w, h) => [
-      { x: w / 2, y: h / 2 },
+      { x: w / 2, y: 200 },
       { x: 200, y: h / 2 },
+      { x: 540, y: 1020 },
     ],
   },
   {
@@ -144,9 +150,10 @@ export const LAYOUTS: LayoutSpec[] = [
       { x: w / 2, y: 170 },
       { x: w / 2, y: h - 170 },
     ],
-    pads: (w, h) => [
-      { x: w / 2, y: h / 2 - 300 },
+    pads: (w) => [
+      { x: w / 2, y: 300 },
       { x: 330, y: 330 },
+      { x: 640, y: 700 },
     ],
   },
 ]
@@ -172,7 +179,16 @@ export let layoutName = ''
 
 export const WALLS: Rect[] = []
 export const SPAWNS: Pt[] = []
-/** Pickup pads. Positions only — what spawns on them is decided in `pickups.ts`. */
+/**
+ * Pickup pads. Positions only — what spawns on them is decided in `pickups.ts`.
+ *
+ * Three mirrored pairs per board, six pads in total. The count is not
+ * decorative: the spawn schedule rotates a two-wide window through a
+ * permutation of these, so six pads means three windows in a cycle, which is
+ * what lets "never the same pad twice running" hold without the schedule ever
+ * looking backwards. Four pads would leave only two windows and the rotation
+ * would be a visible flip-flop.
+ */
 export const PADS: Pt[] = []
 
 const listeners: ((index: number) => void)[] = []

@@ -10,14 +10,24 @@ import { DEFAULT_RELAYS, Identity, Net } from './nostr'
 import { Renderer, type ViewMode } from './render'
 import type { ClockDirection } from './nostr'
 import { modifierForBlock } from './modifiers'
-import { type Buffs, PICKUPS, type PickupKind } from './pickups'
+import { type Buffs, PICKUPS, type PickupKind, iconSvg } from './pickups'
 import { type Profile, Profiles, shortNpub } from './profiles'
+import {
+  type LiveRoom,
+  type Role,
+  BEACON_EVERY_MS,
+  SEATS,
+  fetchLiveRooms,
+  publishPresence,
+  seatFor,
+} from './rooms'
 import {
   type BlockWall,
   type ScoreRow,
   type SeasonRow,
   EPOCH_BLOCKS,
   fetchBlockScores,
+  seasonOf,
   fetchBlockWall,
   fetchScores,
   fetchSeasons,
@@ -288,6 +298,179 @@ $('play-guest').addEventListener('click', () => {
   void begin(async () => Identity.guest())
 })
 
+// ------------------------------------------------------- the live-games board
+
+/**
+ * Open tables, the way a poker site shows them.
+ *
+ * A room here is just a string two people agreed on, which is why it needs no
+ * server and why nobody can find one. This is the notice board: every client in
+ * a room publishes a short-lived presence record, and this adds them up into
+ * "three of four seats taken on Pillars, block 912345".
+ *
+ * Nothing about it is enforced and the footnote says so. A room saying it has a
+ * seat free is four people's word, exactly like every number on the
+ * leaderboard. The cost of being wrong is that you drive into a busy room,
+ * which is a game rather than a crash.
+ */
+let lobbyNet: Net | null = null
+let liveTimer: ReturnType<typeof setInterval> | null = null
+let liveRooms: LiveRoom[] = []
+/** Set by the Watch button, read once by `begin`, and cleared straight after. */
+let watchMode = false
+
+/**
+ * A relay pool for the lobby only, built from whatever is in the textarea.
+ *
+ * Rebuilt when that list changes. Caching it on first use was the obvious
+ * thing and was wrong in a way nobody would have reported as a bug: edit your
+ * relays in the lobby, hit Refresh, and the pool built at page load keeps
+ * querying the relays you just replaced. The list is short and comparing it is
+ * free, so there is no reason to be clever about it.
+ */
+let lobbyRelays = ''
+function lobbyPool(): Net {
+  const want = readRelays()
+  const key = want.join('\n')
+  if (lobbyNet && key === lobbyRelays) return lobbyNet
+  lobbyNet?.close()
+  lobbyRelays = key
+  lobbyNet = new Net(want)
+  return lobbyNet
+}
+
+async function loadLiveRooms(): Promise<void> {
+  const rows = $('live-rows')
+  try {
+    liveRooms = await fetchLiveRooms(lobbyPool())
+  } catch {
+    rows.textContent = 'Could not reach the relays to look for games.'
+    return
+  }
+  for (const room of liveRooms) {
+    for (const o of [...room.players, ...room.queue]) profilePeek(o.pubkey)
+  }
+  paintLiveRooms()
+}
+
+/**
+ * Profiles for the lobby, before there is a `Profiles` instance.
+ *
+ * `Profiles` belongs to a running match and does not exist yet on this screen,
+ * so the lobby keeps its own tiny cache. Faces are a nice-to-have here and the
+ * list renders without waiting for one — the seat count is the thing people are
+ * reading.
+ */
+const lobbyFaces = new Map<string, Profile | null>()
+let facePending = false
+function profilePeek(pubkey: string): void {
+  if (lobbyFaces.has(pubkey)) return
+  lobbyFaces.set(pubkey, null)
+  if (facePending) return
+  facePending = true
+  // One batch a beat later, so twelve players in four rooms is one request.
+  setTimeout(() => {
+    facePending = false
+    const want = [...lobbyFaces].filter(([, v]) => v === null).map(([k]) => k)
+    if (!want.length) return
+    void lobbyPool()
+      .list({ kinds: [0], authors: want.slice(0, 40), limit: 40 })
+      .then((events) => {
+        let changed = false
+        for (const e of events) {
+          try {
+            const meta = JSON.parse(e.content) as Profile
+            lobbyFaces.set(e.pubkey, meta)
+            changed = true
+          } catch {
+            // A kind-0 with unparseable content is one broken profile, not a
+            // broken lobby.
+          }
+        }
+        if (changed) paintLiveRooms()
+      })
+      .catch(() => {})
+  }, 400)
+}
+
+function paintLiveRooms(): void {
+  const rows = $('live-rows')
+  if (!liveRooms.length) {
+    rows.innerHTML =
+      `<p class="fine">No open games right now. Type a room name and start one — ` +
+      `whoever you send the link to lands in it, and it will show up here for everyone else.</p>`
+    return
+  }
+  rows.innerHTML = liveRooms
+    .slice(0, 8)
+    .map((room) => {
+      const seats = Array.from({ length: SEATS }, (_, i) => {
+        const who = room.players[i]
+        if (!who) return `<span class="seat free" title="open seat"></span>`
+        const face = lobbyFaces.get(who.pubkey) ?? null
+        return `<span class="seat taken" title="${escapeHtml(who.name)}">${avatar(
+          face,
+          face?.name ?? who.name,
+          who.hue,
+          24,
+        )}</span>`
+      }).join('')
+      const bits: string[] = []
+      if (room.layout) bits.push(escapeHtml(room.layout))
+      if (room.block) bits.push(`block ${room.block}`)
+      if (room.queue.length) bits.push(`${room.queue.length} waiting`)
+      if (room.watchers.length) bits.push(`${room.watchers.length} watching`)
+      const full = room.open === 0
+      return (
+        `<div class="live-room">` +
+        `<div class="lr-top"><b class="lr-name">${escapeHtml(room.room)}</b>` +
+        `<span class="lr-seats ${full ? 'full' : 'open'}">${SEATS - room.open}/${SEATS}</span></div>` +
+        `<div class="lr-faces">${seats}</div>` +
+        `<div class="lr-fine">${bits.join(' · ') || 'warming up'}</div>` +
+        `<div class="lr-actions">` +
+        `<button class="tiny" data-join="${escapeHtml(room.room)}">${
+          full ? 'Join the queue' : 'Take a seat'
+        }</button>` +
+        `<button class="tiny ghost" data-watch="${escapeHtml(room.room)}">Watch</button>` +
+        `</div></div>`
+      )
+    })
+    .join('')
+}
+
+$('live-rows').addEventListener('click', (e) => {
+  const target = (e.target as HTMLElement).closest('button')
+  if (!target) return
+  const join = target.dataset.join
+  const watch = target.dataset.watch
+  if (!join && !watch) return
+  roomInput.value = join ?? watch ?? ''
+  watchMode = Boolean(watch)
+  // Guest, because a click on a room in the lobby should put you in it. Anyone
+  // who wants their npub on the board uses the button above; a spectator has
+  // nothing to sign anyway.
+  void begin(async () => Identity.guest())
+})
+
+$('live-refresh').addEventListener('click', () => {
+  $('live-rows').textContent = 'looking for open tables…'
+  void loadLiveRooms()
+})
+
+/** Poll while the lobby is on screen, and stop the moment it is not. */
+function watchLobby(on: boolean): void {
+  if (liveTimer) clearInterval(liveTimer)
+  liveTimer = null
+  if (!on) return
+  void loadLiveRooms()
+  // Slow on purpose. A lobby refresh is a REQ to every relay in the pool, the
+  // beacons it reads only change every thirty seconds, and this game has spent
+  // real debugging time on being a noisy client.
+  liveTimer = setInterval(() => void loadLiveRooms(), 15_000)
+}
+
+watchLobby(true)
+
 
 /**
  * Kills and deaths, as two facts rather than as a fraction.
@@ -364,6 +547,53 @@ function nip05Badge(profile: Profile | null): string {
   return `<span class="${cls}${bad}" title="${escapeHtml(title)}">${escapeHtml(profile.nip05)}${mark}</span>`
 }
 
+/**
+ * Keep saying we are here, so the lobby can show this room to somebody else.
+ *
+ * The role is decided *once*, at join, against the lobby list we already had —
+ * not recomputed each beacon. Recomputing would mean a player's own seat
+ * flickering between `seat` and `queue` as beacons expire and land, and the
+ * lobby would show a table whose size changes every thirty seconds.
+ *
+ * The one exception is a queued player: they are watching for a seat, and when
+ * one frees up they take it. That is the waiting list, and it is honest about
+ * being advisory — two queued players can both see the same seat open and both
+ * take it, which makes a five-tank room for one round rather than a crash.
+ */
+function startBeacon(game: Game, clock: BlockClock, role: Role): void {
+  let current = role
+  const send = () => {
+    // A queued player takes the seat the moment the room has room for it.
+    // `peers` is the live roster off the tick stream, which is a better witness
+    // than the lobby's thirty-second beacons — it is literally the set of tanks
+    // on screen. Two queued players can both see the same seat open and both
+    // take it; that makes a five-tank room for one round, not a crash, and
+    // there is no server here to arbitrate it.
+    if (current === 'queue' && game.peers.size < SEATS) {
+      current = 'seat'
+      // `takeSeat` puts its own line in the feed, which is where a player is
+      // already looking for "who took what" during a round.
+      game.takeSeat()
+    }
+    void publishPresence(
+      game.identity,
+      game.net,
+      game.room,
+      game.name,
+      game.displayColor,
+      current,
+      clock.tip?.height,
+      layoutName,
+    ).catch(() => {
+      // A refused beacon costs this room a line in somebody's lobby for thirty
+      // seconds. It is not worth a message on top of a game.
+    })
+  }
+  send()
+  const timer = setInterval(send, BEACON_EVERY_MS)
+  window.addEventListener('pagehide', () => clearInterval(timer))
+}
+
 async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
   lobbyError.hidden = true
   const buttons = [...document.querySelectorAll<HTMLButtonElement>('.row button')]
@@ -394,12 +624,26 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     // this line.
     const clock = new BlockClock(params.get('blocks'))
 
-    const twoPlayer = playersInput.value === '2'
+    // Read once and cleared, so a Watch click does not stick to the next join.
+    const wantWatch = watchMode
+    watchMode = false
+    // The seat decision has to happen *before* the game is built, because a
+    // queued player is constructed as a spectator and promoted later. Deciding
+    // it afterwards would put a fifth tank on a four-seat board and then try to
+    // take it away again.
+    const role = seatFor(
+      liveRooms.find((r) => r.room === room),
+      wantWatch,
+    )
+    const watching = role !== 'seat'
+    // Nobody watches on two screens at once, and a spectator has no tank for a
+    // second player to share a keyboard with.
+    const twoPlayer = playersInput.value === '2' && !watching
     store('tank.players', twoPlayer ? '2' : '1')
 
     const net = new Net(relays)
     const profiles = new Profiles(net)
-    const game = new Game(identity, net, room, name, color)
+    const game = new Game(identity, net, room, name, color, watching)
     // Only player one has an ear. Two local players share one set of speakers,
     // and every event player two publishes is already heard here as a peer —
     // positioned, through the same code a remote player's shot goes through. A
@@ -541,6 +785,15 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     const url = new URL(location.href)
     url.searchParams.set('room', room)
     history.replaceState(null, '', url)
+
+    // The lobby's own relay pool and its poll are for the lobby. Leaving them
+    // running would mean a second socket per relay for the whole match, and a
+    // REQ every fifteen seconds behind a game that is already the noisiest
+    // thing this client does.
+    watchLobby(false)
+    lobbyNet?.close()
+    lobbyNet = null
+    startBeacon(game, clock, role)
 
     lobby.hidden = true
     hud.hidden = false
@@ -933,7 +1186,10 @@ function drawSecondPlayer(p2: Player | null, now: number): void {
       const left = (g.buffs[key] - now) / 1000
       if (left <= 0) return ''
       const spec = PICKUPS[kind as PickupKind]
-      return `<span class="buff" style="--buff-hue:${spec.hue}">${escapeHtml(spec.label)} <b>${left.toFixed(1)}s</b></span>`
+      return (
+        `<span class="buff" style="--buff-hue:${spec.hue}">${iconSvg(kind as PickupKind)}` +
+        `${escapeHtml(spec.label)} <b>${left.toFixed(1)}s</b></span>`
+      )
     })
     .filter(Boolean)
     .join('')
@@ -961,7 +1217,8 @@ function drawBuffs(game: Game, now: number): void {
     const left = (game.buffs[key] - now) / 1000
     if (left <= 0) continue
     live.push(
-      `<span class="buff" style="--buff-hue:${spec.hue}">${escapeHtml(spec.label)} <b>${left.toFixed(1)}s</b></span>`,
+      `<span class="buff" style="--buff-hue:${spec.hue}">${iconSvg(kind)}` +
+        `${escapeHtml(spec.label)} <b>${left.toFixed(1)}s</b></span>`,
     )
   }
   node.hidden = live.length === 0
@@ -1162,16 +1419,19 @@ function renderWall({ blocks, truncated }: BlockWall): string {
     const profile = running?.profiles.get(b.winner.pubkey) ?? null
     const hue = parseInt(b.winner.pubkey.slice(0, 4), 16) % 360
     tiles.push(
-      `<div class="blocktile"><div class="bt-height">#${b.height}</div>` +
+      `<button type="button" class="blocktile" data-block="${b.height}" ` +
+        `title="See how block ${b.height} was played">` +
+        `<div class="bt-height">#${b.height}</div>` +
         `<div class="bt-face">${avatar(profile, profile?.name ?? b.winner.npub.slice(4), hue, 40)}</div>` +
         `<div class="bt-name">${escapeHtml(profile?.name ?? shortNpub(b.winner.pubkey))}</div>` +
         `<div class="bt-kd">${ICONS.kills}${b.winner.kills}</div>` +
-        `<div class="bt-fine">${b.players} player${b.players === 1 ? '' : 's'}</div></div>`,
+        `<div class="bt-fine">${b.players} player${b.players === 1 ? '' : 's'}</div></button>`,
     )
   }
   return (
     `<div class="wall">${tiles.join('')}</div>` +
-    `<p class="fine wall-note">${blocks.length} block${blocks.length === 1 ? '' : 's'} played` +
+    `<p class="fine wall-note">Tap a block for that round. ` +
+    `${blocks.length} block${blocks.length === 1 ? '' : 's'} played` +
     (truncated ? ', most recent first — there are older ones the relays did not return.' : '.') +
     `</p>`
   )
@@ -1188,6 +1448,7 @@ function renderWall({ blocks, truncated }: BlockWall): string {
  * which is what makes a repaint free.
  */
 let boardCache:
+  | { scope: 'detail'; height: number; rows: ScoreRow[] }
   | { scope: 'seasons'; seasons: SeasonRow[] }
   | { scope: 'wall'; wall: BlockWall }
   | { scope: 'block' | 'all'; scores: ScoreRow[]; height?: number }
@@ -1196,6 +1457,10 @@ let boardCache:
 function paintBoard(): void {
   const rows = $('board-rows')
   if (!boardCache) return
+  if (boardCache.scope === 'detail') {
+    rows.innerHTML = renderBlockDetail(boardCache.height, boardCache.rows)
+    return
+  }
   if (boardCache.scope === 'seasons') {
     rows.innerHTML = renderSeasons(boardCache.seasons)
     return
@@ -1279,6 +1544,128 @@ function renderSeasons(seasons: SeasonRow[]): string {
     `nobody awards them, so anybody can check one.</p>`
   )
 }
+
+/**
+ * One block's round, in full.
+ *
+ * The wall answers "who won block 912345"; this answers "what happened in it".
+ * Same signed records, no new event kind and nothing extra published — the
+ * per-block records already carried a streak and a board name, and until now
+ * the leaderboard threw both away.
+ *
+ * `k/d` is shown as two numbers and a ratio, because they say different things:
+ * four and one is a good round, four and eleven is a busy one, and a single
+ * fraction cannot tell you which you are looking at.
+ */
+function renderBlockDetail(height: number, rows: ScoreRow[]): string {
+  const back =
+    `<button type="button" class="ghost tiny" id="detail-back">&larr; All blocks</button>`
+  if (!rows.length) {
+    return (
+      `<div class="detail-head">${back}<h3>Block ${height}</h3></div>` +
+      `<p class="fine">Nobody published a result for this block.</p>`
+    )
+  }
+  // The board is whatever most players' clients called it. They should all
+  // agree — the map is a pure function of the block hash — so a disagreement
+  // means somebody was on a different build, and the majority is the useful
+  // answer rather than the first one the relay happened to return.
+  const votes = new Map<string, number>()
+  for (const r of rows) if (r.layout) votes.set(r.layout, (votes.get(r.layout) ?? 0) + 1)
+  const layout = [...votes].sort((a, b) => b[1] - a[1])[0]?.[0]
+  const rooms = new Set(rows.map((r) => r.room).filter(Boolean))
+  const played = Math.max(...rows.map((r) => r.at))
+  const kills = rows.reduce((n, r) => n + r.kills, 0)
+  const deaths = rows.reduce((n, r) => n + r.deaths, 0)
+
+  const facts = [
+    layout ? `<span>${escapeHtml(layout)}</span>` : '',
+    `<span>${rows.length} player${rows.length === 1 ? '' : 's'}</span>`,
+    rooms.size === 1
+      ? `<span>room ${escapeHtml([...rooms][0] as string)}</span>`
+      : rooms.size > 1
+        ? `<span>${rooms.size} rooms</span>`
+        : '',
+    `<span>${ago(played)}</span>`,
+    `<span>season ${seasonOf(height)}</span>`,
+  ]
+    .filter(Boolean)
+    .join('')
+
+  const table = rows
+    .map((r, i) => {
+      const profile = running?.profiles.get(r.pubkey) ?? null
+      const hue = parseInt(r.pubkey.slice(0, 4), 16) % 360
+      // Deaths of zero is a perfect round, not a division by zero. Showing the
+      // kill count itself is the honest reading of "never died".
+      const ratio = r.deaths ? (r.kills / r.deaths).toFixed(2) : r.kills ? `${r.kills}.00` : '—'
+      return (
+        `<div class="detail-row">` +
+        `<span class="rank">${i + 1}</span>` +
+        avatar(profile, profile?.name ?? r.npub.slice(4), hue, 28) +
+        `<span class="dr-who"><span class="name">${escapeHtml(
+          profile?.name ?? shortNpub(r.pubkey),
+        )}</span>${nip05Badge(profile)}</span>` +
+        `<span class="dr-num" title="kills">${ICONS.kills}${r.kills}</span>` +
+        `<span class="dr-num" title="deaths">${ICONS.deaths}${r.deaths}</span>` +
+        `<span class="dr-ratio" title="kills per death">${ratio}</span>` +
+        `<span class="dr-streak" title="best kill streak">${
+          r.streak ? `${r.streak}&times;` : '<span class="dim">—</span>'
+        }</span></div>`
+      )
+    })
+    .join('')
+
+  return (
+    `<div class="detail-head">${back}<h3>Block ${height}</h3></div>` +
+    `<div class="detail-facts">${facts}</div>` +
+    `<div class="detail-legend"><span class="rank"></span><span></span><span class="dr-who"></span>` +
+    `<span class="dr-num">K</span><span class="dr-num">D</span>` +
+    `<span class="dr-ratio">K/D</span><span class="dr-streak">best</span></div>` +
+    `<div class="detail-table">${table}</div>` +
+    `<p class="fine">${kills} kill${kills === 1 ? '' : 's'} and ${deaths} death${
+      deaths === 1 ? '' : 's'
+    } claimed across the round. ` +
+    `Every line is signed by the player it describes — ` +
+    `<a href="https://mempool.space/block/${height}" target="_blank" rel="noreferrer">` +
+    `check the block itself</a>, but nobody can check these.</p>`
+  )
+}
+
+/** "four minutes ago", for a unix-seconds timestamp. */
+function ago(seconds: number): string {
+  const delta = Math.max(0, Math.floor(Date.now() / 1000 - seconds))
+  if (delta < 90) return 'just now'
+  const minutes = Math.round(delta / 60)
+  if (minutes < 60) return `${minutes} minutes ago`
+  const hours = Math.round(minutes / 60)
+  if (hours < 36) return `${hours} hour${hours === 1 ? '' : 's'} ago`
+  return `${Math.round(hours / 24)} days ago`
+}
+
+async function loadBlockDetail(height: number): Promise<void> {
+  const rows = $('board-rows')
+  rows.textContent = `loading block ${height}…`
+  if (!running) return
+  try {
+    const scores = await fetchBlockScores(running.players[0].game.net, height, 64)
+    for (const r of scores) running?.profiles.want(r.pubkey)
+    boardCache = { scope: 'detail', height, rows: scores }
+    paintBoard()
+  } catch {
+    rows.textContent = 'Could not reach the relays.'
+  }
+}
+
+$('board-rows').addEventListener('click', (e) => {
+  const target = e.target as HTMLElement
+  if (target.closest('#detail-back')) {
+    void loadBoard('wall')
+    return
+  }
+  const tile = target.closest<HTMLElement>('.blocktile')
+  if (tile?.dataset.block) void loadBlockDetail(Number(tile.dataset.block))
+})
 
 async function loadBoard(scope: 'block' | 'all' | 'wall' | 'seasons'): Promise<void> {
   const rows = $('board-rows')

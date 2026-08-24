@@ -386,12 +386,33 @@ export class Game {
   private helloAt = 0
   private disposed = false
 
+  /**
+   * A spectator: in the room, on the wire, with no tank.
+   *
+   * Watching is the honest answer to a full table. The alternative was refusing
+   * the join, and a game you cannot look at is a game nobody waits for — a
+   * fifth player who can see the round in progress is a fifth player who is
+   * still there when a seat frees up.
+   *
+   * It is a flag rather than a subclass because a spectator is exactly an
+   * ordinary client with three things switched off: it does not drive, it does
+   * not publish state, and it does not attest a session — so nobody else's
+   * scoreboard, roster or spawn logic learns it exists. Everything a spectator
+   * *does* do, it does through the same code a player does.
+   */
   constructor(
     readonly identity: Identity,
     readonly net: Net,
     readonly room: string,
     readonly name: string,
     readonly color: number,
+    /**
+     * Mutable, because the waiting list is exactly this flag being turned off.
+     * A queued player is a spectator holding a place; when a seat frees they
+     * become an ordinary client mid-round, which is the whole point of letting
+     * them wait rather than bouncing them.
+     */
+    public watching = false,
   ) {
     this.displayColor = color
     const spawn = SPAWNS[Math.floor(Math.random() * SPAWNS.length)]
@@ -458,6 +479,11 @@ export class Game {
   }
 
   private async broadcastSession(): Promise<void> {
+    // A spectator has no tank to attest, and a session attestation is what puts
+    // a name on the scoreboard. Gated here rather than only at the call sites,
+    // because `start()` sends one too and a spectator appearing in the roster
+    // as a tank nobody can see is worse than not appearing at all.
+    if (this.watching) return
     const payload: SessionPayload = {
       s: this.identity.sessionPubkey,
       name: this.name,
@@ -855,7 +881,11 @@ export class Game {
   update(dt: number, controls: Controls): void {
     const now = performance.now()
 
-    if (this.tank.dead) {
+    if (this.watching) {
+      // No tank to step, no pad to sweep, nothing to say. The rest of `update`
+      // still runs: shells, interpolation, the roster and the pickup schedule
+      // are what a spectator came to see.
+    } else if (this.tank.dead) {
       if (now >= this.tank.respawnAt) this.respawn()
     } else {
       const boost = (hasBuff(this.buffs, 'speedUntil', now) ? 1.45 : 1) * this.modifier.speed
@@ -899,6 +929,10 @@ export class Game {
     // newcomer sits looking at an anonymous tank until the twelve-second timer
     // comes round. The one who needs to be re-announced to is the one who cannot
     // tell they are missing anything.
+    if (this.watching) {
+      while (this.feed.length && now - this.feed[0].at > 6000) this.feed.shift()
+      return
+    }
     if (this.helloAt && now >= this.helloAt && now - this.lastSessionBroadcast >= SESSION_HELLO_MS) {
       this.helloAt = 0
       void this.broadcastSession()
@@ -994,6 +1028,25 @@ export class Game {
   }
 
   /** Spawn as far from live opponents as possible, preferring no line of sight. */
+  /**
+   * Stop watching and drive.
+   *
+   * The tank has existed the whole time — it was constructed, it just never
+   * published or moved — so this is a respawn rather than a birth. Respawning
+   * matters: the spectator's tank has been parked on whatever spawn it drew at
+   * construction for however long the wait lasted, and dropping into the round
+   * on top of somebody is a worse welcome than the wait was.
+   */
+  takeSeat(): void {
+    if (!this.watching) return
+    this.watching = false
+    this.respawn()
+    this.pushFeed('you are in — take a seat')
+    // Say hello immediately rather than on the twelve-second timer: until the
+    // attestation lands, everyone else sees an unnamed tank appear from nowhere.
+    void this.broadcastSession()
+  }
+
   private respawn(): void {
     const live = [...this.peers.values()].filter((p) => !p.view.dead)
     let best = SPAWNS[0]
@@ -1117,6 +1170,7 @@ export class Game {
   }
 
   private publishState(now: number): void {
+    if (this.watching) return
     const payload: StatePayload = {
       t: now,
       x: Math.round(this.tank.x * 10) / 10,
@@ -1212,7 +1266,7 @@ export class Game {
     const elapsed = waveClock(anchor.seconds)
     const want = scheduleFor(this.roundHash, elapsed, {
       waveSeconds: this.modifier.waveSeconds,
-      emptyPads: this.modifier.emptyPads,
+      padsPerWave: this.modifier.padsPerWave,
     })
     const wanted = new Set(want.map((p) => p.id))
 

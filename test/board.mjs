@@ -398,6 +398,67 @@ try {
   })
   check('and upgrades itself to the face when the profile lands', upgraded === 'Cinder', String(upgraded))
 
+  // --- one block's round ---------------------------------------------------
+  //
+  // The wall says who won a block. This is the screen that says what happened
+  // in it, and every number on it comes out of records this file signed — which
+  // is the only reason "brick went 5 and 1" is a checkable claim at all.
+
+  await page.evaluate((h) => {
+    document.querySelector(`.blocktile[data-block="${h}"]`).click()
+  }, BLOCKS.first)
+  const detail = await until(async () => {
+    const rows = await page.evaluate(() => document.querySelectorAll('.detail-row').length)
+    return rows > 0 ? rows : null
+  })
+  check('tapping a block opens that round', detail === 3, `${detail} rows for 3 players`)
+
+  const round = await page.evaluate(() => ({
+    title: document.querySelector('.detail-head h3')?.textContent ?? null,
+    facts: [...document.querySelectorAll('.detail-facts span')].map((n) => n.textContent),
+    rows: [...document.querySelectorAll('.detail-row')].map((n) => ({
+      name: n.querySelector('.name')?.textContent ?? null,
+      // Both are `.dr-num` spans; `:nth-of-type` counts spans among spans and
+      // matches the rank, so index the class list instead.
+      k: n.querySelectorAll('.dr-num')[0]?.textContent?.trim() ?? null,
+      d: n.querySelectorAll('.dr-num')[1]?.textContent?.trim() ?? null,
+      ratio: n.querySelector('.dr-ratio')?.textContent?.trim() ?? null,
+    })),
+  }))
+  check('it names the block it is showing', round.title === `Block ${BLOCKS.first}`, String(round.title))
+  check(
+    'the round is ordered by kills, like the block it came from',
+    round.rows.map((r) => r.k).join(',') === '5,2,1',
+    JSON.stringify(round.rows.map((r) => r.k)),
+  )
+  check(
+    "and it shows each player's deaths, not just their kills",
+    round.rows.map((r) => r.d).join(',') === '1,4,6',
+    JSON.stringify(round.rows.map((r) => r.d)),
+  )
+  check(
+    'k/d is worked out per player',
+    round.rows[0].ratio === '5.00' && round.rows[1].ratio === '0.50',
+    JSON.stringify(round.rows.map((r) => r.ratio)),
+  )
+  check(
+    'the round carries the map and the room the records named',
+    round.facts.some((f) => f === 'Crossroads') && round.facts.some((f) => f === 'room lobby'),
+    JSON.stringify(round.facts),
+  )
+  check(
+    'and how many played it',
+    round.facts.some((f) => f === '3 players'),
+    JSON.stringify(round.facts),
+  )
+
+  await page.click('#detail-back')
+  const backOnWall = await until(async () => {
+    const n = await page.evaluate(() => document.querySelectorAll('.blocktile').length)
+    return n > 0 ? n : null
+  })
+  check('and there is a way back to the chain', backOnWall === 3, `${backOnWall} tiles`)
+
   // --- the other tabs still work ------------------------------------------
   await page.click('#board-tab-all')
   const allRows = await until(async () => {
