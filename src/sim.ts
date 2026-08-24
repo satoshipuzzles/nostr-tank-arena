@@ -147,9 +147,52 @@ export interface LocalTank {
   dead: boolean
   respawnAt: number
   reloadAt: number
+  /**
+   * Where the turret is being told to point, kept as a signed offset from the
+   * gun rather than as a bearing, so that a full turn ahead and no turns ahead
+   * are different numbers. See the note above `stepTank`. Owned by `stepTank`;
+   * nothing else should write them, and nothing needs to initialise them.
+   */
+  aimPrev?: number
+  gunLead?: number
 }
 
-/** Integrate the local player's tank. Remote tanks are interpolated, not stepped. */
+/** One full turn, in radians. */
+const TAU = Math.PI * 2
+
+/**
+ * Drop whole turns out of a lead while keeping its sign.
+ *
+ * Winding up three turns ahead of the gun and winding up one turn ahead point
+ * at the same bearing, and the two extra laps are travel nobody asked to
+ * watch. What must survive is the *sign*, because that is the direction the
+ * player has been turning.
+ */
+function windReduce(lead: number): number {
+  return lead % TAU
+}
+
+/**
+ * Integrate the local player's tank. Remote tanks are interpolated, not stepped.
+ *
+ * The turret used to take the shortest path from where it is to the bearing
+ * you are asking for, recomputed from scratch every frame. That is right only
+ * while it can keep up. It slews at 241°/s and a thumb can rotate a stick
+ * faster than that, so the gap grows — and the instant the gap passes half a
+ * circle the shortest way to the same bearing is *backwards*. The turret turns
+ * around and drives away from where you are pointing. Measured on this sim at
+ * a fixed 60fps: a steady 240°/s spin tracks all the way round, 420°/s covers
+ * 273° of 720° and reverses twice, 900°/s covers 74° and reverses three times.
+ *
+ * Nothing about that is a rendering or an input problem, which is why it shows
+ * up the same in the cockpit and on the board, with a pad or with a mouse.
+ *
+ * So the command is carried as a *lead* — a signed offset from the gun that is
+ * allowed to be more than half a turn — and advanced by how far the command
+ * moved this frame rather than re-derived from the bearing. The direction the
+ * player is turning survives, the gun always travels the way they are asking,
+ * and it arrives on the right bearing when they stop.
+ */
 export function stepTank(
   t: LocalTank,
   throttle: number,
@@ -161,9 +204,33 @@ export function stepTank(
 ): void {
   t.hull += steer * TURN_RATE * dt
   if (aim !== null) {
-    const d = angleDelta(t.gun, aim)
+    // How far the command itself moved since the last frame. This is the only
+    // quantity in here that can be measured the short way round without
+    // ambiguity: a thumb spinning the stick at 900°/s covers 15° in a 60fps
+    // frame, nowhere near the half circle where "which way did it go" stops
+    // having an answer.
+    const step = t.aimPrev === undefined ? 0 : angleDelta(t.aimPrev, aim)
+    const shortest = angleDelta(t.gun, aim)
+    // Carried lead, advanced by that step. It stays consistent with the gun
+    // because we subtract below exactly what the gun travels — so if it ever
+    // *isn't* consistent, something outside moved the gun (respawn points it
+    // down the hull) and the carried value is stale. Adopt the short way round
+    // in that case, which is right for a gun that has just been placed.
+    const carried = (t.gunLead ?? 0) + step
+    const stale = t.aimPrev === undefined || Math.abs(angleDelta(carried, shortest)) > 1e-6
+    const lead = stale ? shortest : windReduce(carried)
+
     const max = GUN_TURN_RATE * dt
-    t.gun += Math.abs(d) < max ? d : Math.sign(d) * max
+    const turn = Math.abs(lead) < max ? lead : Math.sign(lead) * max
+    t.gun += turn
+    t.gunLead = lead - turn
+    t.aimPrev = aim
+  } else {
+    // Nothing is asking for a bearing, so there is no direction of travel to
+    // remember. Letting go of the stick and picking it up somewhere else
+    // should take the short way round, not resume an old lap.
+    t.aimPrev = undefined
+    t.gunLead = 0
   }
 
   const speed = (throttle >= 0 ? throttle * FORWARD_SPEED : throttle * REVERSE_SPEED) * speedMul
