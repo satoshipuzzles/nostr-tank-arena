@@ -22,7 +22,9 @@
 
 import * as THREE from 'three'
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js'
-import { ARENA_H, ARENA_W, WALLS, onLayoutChange, pointInWall } from './arena'
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
+import { ARENA_H, ARENA_W, WALLS, onLayoutChange, pointInTallWall } from './arena'
+import type { CoverKind, Rect } from './arena'
 import type { Game, Peer } from './game'
 import { MAX_HP, RELOAD, TANK_RADIUS } from './sim'
 import { ICON_POLYS, PICKUPS, hasBuff } from './pickups'
@@ -93,16 +95,24 @@ const toy = (color: THREE.ColorRepresentation, extra: THREE.MeshStandardMaterial
  */
 const INK = new THREE.MeshBasicMaterial({ color: 0x141a26, side: THREE.BackSide })
 
-/** A vertical gradient, used as the sky. */
+/**
+ * A vertical gradient, used as the sky.
+ *
+ * Was three steps of swimming-pool cyan, which is a lovely colour and is not a
+ * colour the sky is. This is the real thing: a deep blue overhead that thins
+ * out and goes warm at the horizon, where the air you are looking through is
+ * thickest. The bottom stop is also the fog colour, so the far end of a
+ * 2000-unit board dissolves into the haze instead of stopping against it.
+ */
 function skyTexture(): THREE.Texture {
   const canvas = document.createElement('canvas')
   canvas.width = 4
   canvas.height = 256
   const ctx = canvas.getContext('2d')!
   const grad = ctx.createLinearGradient(0, 0, 0, 256)
-  grad.addColorStop(0, '#4fb8e8')
-  grad.addColorStop(0.55, '#9fdcf5')
-  grad.addColorStop(1, '#e8f6ef')
+  grad.addColorStop(0, '#5b8ec4')
+  grad.addColorStop(0.5, '#9dbdd6')
+  grad.addColorStop(1, '#e2dccc')
   ctx.fillStyle = grad
   ctx.fillRect(0, 0, 4, 256)
   const texture = new THREE.CanvasTexture(canvas)
@@ -155,9 +165,13 @@ function feltTexture(): THREE.Texture {
   const ctx = canvas.getContext('2d')!
   const rnd = noise(0x7a4b19)
 
-  ctx.fillStyle = '#8ed57a'
+  // Grass, not felt. The two greens were #8ed57a and #7cc767 — a mini-golf
+  // mat, several steps more saturated than any lawn, and close enough in hue
+  // to the green player tank that the two competed. Real turf is darker, much
+  // less saturated, and slightly yellow.
+  ctx.fillStyle = '#6f9455'
   ctx.fillRect(0, 0, 256, 256)
-  ctx.fillStyle = '#7cc767'
+  ctx.fillStyle = '#65894c'
   ctx.fillRect(0, 0, 128, 128)
   ctx.fillRect(128, 128, 128, 128)
 
@@ -180,12 +194,31 @@ function feltTexture(): THREE.Texture {
   for (let i = 0; i < 5200; i++) {
     const x = rnd() * 256
     const y = rnd() * 256
-    ctx.strokeStyle = rnd() > 0.5 ? '#ffffff' : '#3f7a37'
+    // Highlight is a pale yellow-green rather than white: white blades on
+    // green read as frost, and the sun on this board is warm.
+    ctx.strokeStyle = rnd() > 0.5 ? '#c9d99a' : '#3f5c30'
     ctx.lineWidth = 1
     ctx.beginPath()
     ctx.moveTo(x, y)
     ctx.lineTo(x + (rnd() - 0.5) * 3, y - 1 - rnd() * 3)
     ctx.stroke()
+  }
+
+  // Worn patches. A pitch that four tanks have been driving over is not
+  // uniform, and a handful of bare-earth scuffs is the cheapest thing that
+  // stops a tiling texture from reading as a tile.
+  for (let i = 0; i < 22; i++) {
+    const x = rnd() * 256
+    const y = rnd() * 256
+    const r = 5 + rnd() * 16
+    const patch = ctx.createRadialGradient(x, y, 0, x, y, r)
+    patch.addColorStop(0, 'rgba(146,122,86,0.34)')
+    patch.addColorStop(1, 'rgba(146,122,86,0)')
+    ctx.globalAlpha = 1
+    ctx.fillStyle = patch
+    ctx.beginPath()
+    ctx.arc(x, y, r, 0, TAU)
+    ctx.fill()
   }
   ctx.globalAlpha = 1
 
@@ -217,7 +250,10 @@ function chalkTexture(): THREE.Texture {
   const sx = W / ARENA_W
   const inset = 70 * sx
 
-  ctx.strokeStyle = 'rgba(255,255,255,0.42)'
+  // Warm white at lower alpha. Pure white at 0.42 was the brightest thing on
+  // the old board after the fence, and on natural turf it looked like tape
+  // rather than chalk.
+  ctx.strokeStyle = 'rgba(246,241,228,0.34)'
   ctx.lineWidth = Math.max(2, 5 * sx)
   ctx.strokeRect(inset, inset, W - inset * 2, H - inset * 2)
 
@@ -230,7 +266,7 @@ function chalkTexture(): THREE.Texture {
   ctx.arc(W / 2, H / 2, 230 * sx, 0, Math.PI * 2)
   ctx.stroke()
 
-  ctx.fillStyle = 'rgba(255,255,255,0.42)'
+  ctx.fillStyle = 'rgba(246,241,228,0.34)'
   ctx.beginPath()
   ctx.arc(W / 2, H / 2, 9 * sx, 0, Math.PI * 2)
   ctx.fill()
@@ -290,6 +326,377 @@ function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: numbe
   ctx.arcTo(x, y + h, x, y, r)
   ctx.arcTo(x, y, x + w, y, r)
   ctx.closePath()
+}
+
+// ------------------------------------------------------------------ scenery
+
+/**
+ * How tall a barricade stands. Well under `WALL_H`, and under `EYE_Y` too.
+ *
+ * A sandbag line has to *look* like something you can shoot over from every
+ * camera this game has, because that is what it does. From the board it reads
+ * as low because everything next to it is twice the height; from the cockpit
+ * the eye is at 50 and the top of the bags is at 27, so you are plainly
+ * looking down at it. If someone later raises this past `EYE_Y` the geometry
+ * will start telling a lie the simulation does not agree with.
+ */
+const LOW_H = 27
+
+/** One masonry block of the perimeter wall, near enough. */
+const FENCE_BLOCK = 74
+
+/**
+ * A per-rect seed.
+ *
+ * Every scatter below — which way a boulder is turned, which crates are
+ * doubled, where the worn patches fall — comes out of this, so a board looks
+ * identical on every load and in every screenshot. `Math.random` here would
+ * mean "did that change?" is a question nobody can answer from an image, and
+ * an image is how this pass gets checked.
+ *
+ * It is emphatically *not* on the wire: scenery is decoration, two clients
+ * disagreeing about the tilt of a rock costs nothing. Which rects are low is
+ * the part that matters and that comes from the layout.
+ */
+function rectSeed(r: Rect): number {
+  return (
+    (Math.imul(r.x | 0, 0x9e3779b1) ^
+      Math.imul(r.y | 0, 0x85ebca6b) ^
+      Math.imul(r.w | 0, 0xc2b2ae35) ^
+      Math.imul(r.h | 0, 0x27d4eb2f)) >>>
+    0
+  )
+}
+
+/** A small painted canvas, tiled per face. */
+function paint(draw: (ctx: CanvasRenderingContext2D, rnd: () => number) => void, seed: number): THREE.Texture {
+  const canvas = document.createElement('canvas')
+  canvas.width = canvas.height = 128
+  draw(canvas.getContext('2d')!, noise(seed))
+  const texture = new THREE.CanvasTexture(canvas)
+  texture.wrapS = texture.wrapT = THREE.RepeatWrapping
+  texture.colorSpace = THREE.SRGBColorSpace
+  texture.anisotropy = 4
+  return texture
+}
+
+/** Sawn timber: planks across, grain along them. */
+const woodTexture = () =>
+  paint((ctx, rnd) => {
+    ctx.fillStyle = '#9d7846'
+    ctx.fillRect(0, 0, 128, 128)
+    for (let y = 0; y < 128; y += 32) {
+      ctx.fillStyle = `rgba(0,0,0,${0.05 + rnd() * 0.06})`
+      ctx.fillRect(0, y, 128, 32)
+      ctx.fillStyle = 'rgba(40,26,12,0.45)'
+      ctx.fillRect(0, y, 128, 2)
+    }
+    for (let i = 0; i < 420; i++) {
+      const y = rnd() * 128
+      ctx.strokeStyle = rnd() > 0.5 ? 'rgba(60,40,18,0.20)' : 'rgba(214,182,132,0.20)'
+      ctx.beginPath()
+      ctx.moveTo(rnd() * 128, y)
+      ctx.lineTo(rnd() * 128, y)
+      ctx.stroke()
+    }
+  }, 0x51a3)
+
+/** Weathered granite: mottled, not noisy. Blobs read as stone, dots read as sand. */
+const stoneTexture = () =>
+  paint((ctx, rnd) => {
+    ctx.fillStyle = '#8b877e'
+    ctx.fillRect(0, 0, 128, 128)
+    for (let i = 0; i < 160; i++) {
+      const x = rnd() * 128
+      const y = rnd() * 128
+      const r = 3 + rnd() * 14
+      ctx.fillStyle = rnd() > 0.5 ? 'rgba(160,155,145,0.30)' : 'rgba(96,92,84,0.32)'
+      ctx.beginPath()
+      ctx.arc(x, y, r, 0, TAU)
+      ctx.fill()
+    }
+    for (let i = 0; i < 900; i++) {
+      ctx.fillStyle = rnd() > 0.5 ? 'rgba(220,216,206,0.16)' : 'rgba(48,46,42,0.16)'
+      ctx.fillRect(rnd() * 128, rnd() * 128, 1, 1)
+    }
+  }, 0x9c14)
+
+/** Leaves. Short strokes in four greens, for the same reason the turf uses them. */
+const foliageTexture = () =>
+  paint((ctx, rnd) => {
+    ctx.fillStyle = '#47632f'
+    ctx.fillRect(0, 0, 128, 128)
+    const greens = ['#5c7d3c', '#3a5227', '#6d9047', '#4f6c33']
+    for (let i = 0; i < 2600; i++) {
+      const x = rnd() * 128
+      const y = rnd() * 128
+      ctx.fillStyle = greens[(rnd() * greens.length) | 0]
+      ctx.beginPath()
+      ctx.ellipse(x, y, 1.6 + rnd() * 2.4, 1 + rnd() * 1.4, rnd() * TAU, 0, TAU)
+      ctx.fill()
+    }
+  }, 0x3ea7)
+
+/** Hessian: a visible weave, because a smooth sandbag is a pillow. */
+const canvasTexture = () =>
+  paint((ctx, rnd) => {
+    ctx.fillStyle = '#a8a173'
+    ctx.fillRect(0, 0, 128, 128)
+    for (let i = 0; i < 128; i += 4) {
+      ctx.fillStyle = 'rgba(88,72,44,0.16)'
+      ctx.fillRect(i, 0, 2, 128)
+      ctx.fillStyle = 'rgba(226,208,166,0.14)'
+      ctx.fillRect(0, i, 128, 2)
+    }
+    for (let i = 0; i < 700; i++) {
+      ctx.fillStyle = rnd() > 0.5 ? 'rgba(70,56,32,0.20)' : 'rgba(232,216,178,0.16)'
+      ctx.fillRect(rnd() * 128, rnd() * 128, 2, 1)
+    }
+  }, 0x77b2)
+
+/** Painted steel that has been outside a while. */
+const drumTexture = () =>
+  paint((ctx, rnd) => {
+    ctx.fillStyle = '#6b6455'
+    ctx.fillRect(0, 0, 128, 128)
+    ctx.fillStyle = 'rgba(150,84,42,0.55)'
+    ctx.fillRect(0, 46, 128, 22)
+    for (let i = 0; i < 260; i++) {
+      const x = rnd() * 128
+      const y = rnd() * 128
+      ctx.fillStyle = 'rgba(122,64,30,0.34)'
+      ctx.beginPath()
+      ctx.ellipse(x, y, 1 + rnd() * 5, 2 + rnd() * 11, 0, 0, TAU)
+      ctx.fill()
+    }
+  }, 0x2d61)
+
+/**
+ * One material per kind, built fresh with the board.
+ *
+ * Fresh rather than module-level because `buildBoard` runs again on every
+ * block that changes the layout, and a texture whose owner has been disposed
+ * is a black mesh. Cheap enough: five canvases of 128px, once a block.
+ */
+function coverMaterials(): Record<CoverKind, THREE.MeshStandardMaterial> {
+  const stone = stoneTexture()
+  return {
+    // Desaturated on purpose, and this is the same argument the pastels were
+    // making, just made properly. The six player hues are the most saturated
+    // things in the scene; scenery has to stay out of their way. Earth
+    // pigments do that far better than pastels, because a pastel is a
+    // saturated hue with white in it and still competes for the same corner
+    // of the wheel.
+    rock: new THREE.MeshStandardMaterial({ map: stone, bumpMap: stone, bumpScale: 1.6, color: 0x9e988e, roughness: 0.94 }),
+    fence: new THREE.MeshStandardMaterial({ map: stone, color: 0x8d8479, roughness: 0.96 }),
+    crate: new THREE.MeshStandardMaterial({ map: woodTexture(), color: 0xb08a55, roughness: 0.82 }),
+    barrel: new THREE.MeshStandardMaterial({ map: drumTexture(), color: 0x847c6b, roughness: 0.52, metalness: 0.3 }),
+    sandbag: new THREE.MeshStandardMaterial({ map: canvasTexture(), color: 0xbdb583, roughness: 0.98 }),
+    hedge: new THREE.MeshStandardMaterial({ map: foliageTexture(), color: 0x7a9455, roughness: 0.95 }),
+  }
+}
+
+/**
+ * Build scenery with the rect's long axis along +x, then turn it if it is not.
+ *
+ * Every builder below would otherwise need to know which way round its rect
+ * is and swap width for depth in about six places each. Doing it once at the
+ * end is the whole reason a row of sandbags can be written as a row.
+ */
+function longAxis(r: Rect) {
+  const horizontal = r.w >= r.h
+  return { horizontal, long: horizontal ? r.w : r.h, short: horizontal ? r.h : r.w }
+}
+
+/** Collects parts, all non-indexed so `mergeGeometries` will take them together. */
+function partBag() {
+  const parts: THREE.BufferGeometry[] = []
+  return {
+    parts,
+    put(g: THREE.BufferGeometry) {
+      if (g.index) {
+        const flat = g.toNonIndexed()
+        g.dispose()
+        parts.push(flat)
+      } else parts.push(g)
+    },
+  }
+}
+
+/**
+ * A weathered outcrop: faceted boulders, packed dense enough along the rect
+ * that there is no gap a player could think a shell might fit through. The
+ * shell bounces off the whole rectangle, so the silhouette has to fill it.
+ */
+function rockParts(r: Rect, rnd: () => number, bag: ReturnType<typeof partBag>): void {
+  const { long, short } = longAxis(r)
+  const n = Math.min(9, Math.max(2, Math.round(long / (short * 0.78))))
+  for (let i = 0; i < n; i++) {
+    const t = n === 1 ? 0 : i / (n - 1) - 0.5
+    const hgt = WALL_H * (0.74 + rnd() * 0.36)
+    const rad = short * 0.62
+    const g = new THREE.IcosahedronGeometry(1, 0)
+    g.scale(rad * (0.86 + rnd() * 0.3), hgt * 0.56, rad * (0.86 + rnd() * 0.3))
+    g.rotateY(rnd() * TAU)
+    g.rotateX((rnd() - 0.5) * 0.34)
+    g.translate(t * (long - short) * 0.98, hgt * 0.4, (rnd() - 0.5) * short * 0.3)
+    bag.put(g)
+  }
+  // Scree. Three chips at the base is what stops an outcrop from looking like
+  // it was dropped on the grass a second ago.
+  for (let i = 0; i < 3; i++) {
+    const rad = short * (0.1 + rnd() * 0.12)
+    const g = new THREE.IcosahedronGeometry(rad, 0)
+    g.scale(1, 0.6, 1)
+    g.rotateY(rnd() * TAU)
+    g.translate((rnd() - 0.5) * long * 0.9, rad * 0.3, (rnd() - 0.5) * short * 0.85)
+    bag.put(g)
+  }
+}
+
+/**
+ * Stacked timber. The bottom course fills the footprint and the top course
+ * does not, which is what makes it a stack rather than a wall with a texture.
+ */
+function crateParts(r: Rect, rnd: () => number, bag: ReturnType<typeof partBag>): void {
+  const { long, short } = longAxis(r)
+  const side = short * 0.97
+  const cH = WALL_H * 0.47
+  const cols = Math.max(1, Math.round(long / side))
+  for (let i = 0; i < cols; i++) {
+    const t = cols === 1 ? 0 : i / (cols - 1) - 0.5
+    const x = t * (long - side)
+    const base = new RoundedBoxGeometry(side, cH, side, 2, Math.min(3, side * 0.08))
+    base.rotateY((rnd() - 0.5) * 0.14)
+    base.translate(x, cH * 0.5 - 1, (rnd() - 0.5) * short * 0.04)
+    bag.put(base)
+    if (rnd() < 0.62) {
+      const s2 = side * (0.6 + rnd() * 0.22)
+      const top = new RoundedBoxGeometry(s2, cH * 0.94, s2, 2, Math.min(3, s2 * 0.08))
+      top.rotateY((rnd() - 0.5) * 0.8)
+      top.translate(x + (rnd() - 0.5) * side * 0.18, cH * 1.45, (rnd() - 0.5) * short * 0.14)
+      bag.put(top)
+    }
+  }
+}
+
+/**
+ * Oil drums, laid out on a grid so a square footprint gets a cluster and a
+ * long one gets a row without either case being special-cased.
+ */
+function barrelParts(r: Rect, rnd: () => number, bag: ReturnType<typeof partBag>): void {
+  const { long, short } = longAxis(r)
+  const rad = Math.min(short * 0.44, 22)
+  const hgt = WALL_H * 0.86
+  const cols = Math.max(1, Math.round(long / (rad * 2.05)))
+  const rows = Math.max(1, Math.round(short / (rad * 2.05)))
+  for (let i = 0; i < cols; i++) {
+    for (let j = 0; j < rows; j++) {
+      const x = (cols === 1 ? 0 : i / (cols - 1) - 0.5) * (long - rad * 2)
+      const z = (rows === 1 ? 0 : j / (rows - 1) - 0.5) * (short - rad * 2)
+      const jx = x + (rnd() - 0.5) * rad * 0.3
+      const jz = z + (rnd() - 0.5) * rad * 0.3
+      const body = new THREE.CylinderGeometry(rad * 0.94, rad * 0.94, hgt, 12, 1)
+      body.rotateY(rnd() * TAU)
+      body.translate(jx, hgt * 0.5, jz)
+      bag.put(body)
+      // Rolling hoops. Two thin wider rings are the entire read of "drum".
+      for (const at of [0.3, 0.72]) {
+        const hoop = new THREE.CylinderGeometry(rad, rad, hgt * 0.07, 12, 1)
+        hoop.translate(jx, hgt * at, jz)
+        bag.put(hoop)
+      }
+    }
+  }
+}
+
+/**
+ * Three staggered courses of bags. Short of `WALL_H` by design — see `LOW_H`.
+ */
+function sandbagParts(r: Rect, rnd: () => number, bag: ReturnType<typeof partBag>): void {
+  const { long, short } = longAxis(r)
+  const courses = 3
+  const bagH = LOW_H / courses
+  const bagLen = 26
+  const depth = short * 0.9
+  for (let c = 0; c < courses; c++) {
+    const offset = (c % 2) * bagLen * 0.5
+    const n = Math.max(1, Math.floor((long - offset) / bagLen))
+    for (let i = 0; i < n; i++) {
+      const x = -long / 2 + offset + bagLen * (i + 0.5)
+      const g = new RoundedBoxGeometry(bagLen * 0.98, bagH * 1.2, depth, 2, bagH * 0.46)
+      g.rotateY((rnd() - 0.5) * 0.14)
+      g.translate(x, bagH * (c + 0.5), (rnd() - 0.5) * short * 0.06)
+      bag.put(g)
+    }
+  }
+}
+
+/**
+ * A clipped hedge with a ragged top. The mass does the collision-shaped work
+ * and the blobs stop the silhouette from being a box, which on a 520-unit
+ * hedgerow is the difference between scenery and a green wall.
+ */
+function hedgeParts(r: Rect, rnd: () => number, bag: ReturnType<typeof partBag>): void {
+  const { long, short } = longAxis(r)
+  const hgt = WALL_H * 0.9
+  const mass = new RoundedBoxGeometry(long * 0.99, hgt, short * 0.99, 3, Math.min(13, short * 0.3))
+  mass.translate(0, hgt * 0.5 - 2, 0)
+  bag.put(mass)
+  const blobs = Math.min(30, Math.max(3, Math.round(long / 30)))
+  for (let i = 0; i < blobs; i++) {
+    const rad = short * (0.24 + rnd() * 0.24)
+    const g = new THREE.SphereGeometry(rad, 7, 5)
+    g.scale(1, 0.72, 1)
+    g.translate(
+      (rnd() - 0.5) * (long - rad),
+      hgt - rad * 0.3,
+      (rnd() - 0.5) * (short - rad * 1.2),
+    )
+    bag.put(g)
+  }
+}
+
+/** Dry-stone coursing plus a cap, rather than one very long stretched box. */
+function fenceParts(r: Rect, rnd: () => number, bag: ReturnType<typeof partBag>): void {
+  const { long, short } = longAxis(r)
+  const n = Math.max(1, Math.round(long / FENCE_BLOCK))
+  const len = long / n
+  for (let i = 0; i < n; i++) {
+    const h = FENCE_H * (0.93 + rnd() * 0.07)
+    const g = new RoundedBoxGeometry(len * 1.02, h, short, 2, 3)
+    g.translate(-long / 2 + len * (i + 0.5), h * 0.5, 0)
+    bag.put(g)
+  }
+  const cap = new RoundedBoxGeometry(long, 9, short + 7, 2, 3)
+  cap.translate(0, FENCE_H + 1, 0)
+  bag.put(cap)
+}
+
+const SCENERY: Record<CoverKind, (r: Rect, rnd: () => number, bag: ReturnType<typeof partBag>) => void> = {
+  rock: rockParts,
+  crate: crateParts,
+  barrel: barrelParts,
+  sandbag: sandbagParts,
+  hedge: hedgeParts,
+  fence: fenceParts,
+}
+
+/**
+ * One merged geometry per rect, so a board full of boulders is still one draw
+ * call per piece of cover.
+ *
+ * The Pillars board has fourteen pieces of cover and a rock outcrop is a dozen
+ * meshes; unmerged that is a couple of hundred draw calls with shadows on, on
+ * hardware that includes phones. Merging costs a few milliseconds once a block.
+ */
+function coverGeometry(r: Rect): THREE.BufferGeometry {
+  const bag = partBag()
+  SCENERY[r.kind ?? 'rock'](r, noise(rectSeed(r)), bag)
+  const merged = mergeGeometries(bag.parts, false)!
+  for (const g of bag.parts) g.dispose()
+  if (!longAxis(r).horizontal) merged.rotateY(Math.PI / 2)
+  return merged
 }
 
 // ------------------------------------------------------------------- tanks
@@ -739,6 +1146,8 @@ export class Renderer {
   private pickupMeshes = new Map<string, THREE.Group>()
   /** The bubble that shows a shield is up. One, reused. */
   private shield: THREE.Mesh
+  /** Shared across every mesh of a kind, so `buildBoard` disposes them itself. */
+  private coverMats: THREE.MeshStandardMaterial[] = []
 
   constructor(private canvas: HTMLCanvasElement) {
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' })
@@ -748,7 +1157,9 @@ export class Renderer {
     this.renderer.outputColorSpace = THREE.SRGBColorSpace
 
     this.scene.background = skyTexture()
-    this.scene.fog = new THREE.Fog(0xd4eefb, 4400, 9000)
+    // The same warm haze the sky gradient ends on, so the far edge of a
+    // 2000-unit board fades into the horizon instead of terminating against it.
+    this.scene.fog = new THREE.Fog(0xe2dccc, 4200, 9000)
 
     this.camera = new THREE.PerspectiveCamera(BOARD_FOV, 1, 60, 8000)
     this.scene.add(this.camera)
@@ -789,6 +1200,17 @@ export class Renderer {
   // ------------------------------------------------------------- the board
 
   private buildBoard(): void {
+    // Cover materials are shared between meshes, so the per-child dispose below
+    // cannot own them — it would dispose the crate material while three more
+    // crates still point at it, and it would never touch the canvas textures,
+    // which a material does not own either. A layout change every block adds up.
+    for (const m of this.coverMats) {
+      m.map?.dispose()
+      m.bumpMap?.dispose()
+      m.dispose()
+    }
+    this.coverMats = []
+
     for (const child of [...this.board.children]) {
       this.board.remove(child)
       const mesh = child as THREE.Mesh
@@ -802,7 +1224,9 @@ export class Renderer {
     // world rather than as a floor that happens to stop.
     const base = new THREE.Mesh(
       new RoundedBoxGeometry(ARENA_W + RIM * 2, BOARD_DROP, ARENA_H + RIM * 2, 4, 22),
-      toy(0xe8d3a6, { roughness: 0.9 }),
+      // Dry earth under the turf, not cream plastic. The slab still reads as a
+      // board sitting in the world; it just reads as a piece of ground now.
+      toy(0xa8916d, { roughness: 0.95 }),
     )
     base.position.set(ARENA_W / 2, -BOARD_DROP / 2 + 2, ARENA_H / 2)
     base.receiveShadow = true
@@ -834,45 +1258,34 @@ export class Renderer {
     chalk.position.set(ARENA_W / 2, GROUND_Y + DECAL_LIFT * 0.4, ARENA_H / 2)
     this.board.add(chalk)
 
-    // The outer ring is the board's fence and gets its own height and colour;
-    // the inner cover is what you actually hide behind.
-    const isFence = (w: (typeof WALLS)[number]) =>
-      w.x === 0 || w.y === 0 || w.x + w.w >= ARENA_W || w.y + w.h >= ARENA_H
-
-    // Cover is colour-coded by what it is for, which is a board-game habit and
-    // also a legibility one: "meet me at the red cross" is a thing four players
-    // can say to each other, "meet me at the blue block" is not.
-    const coverColour = (w: (typeof WALLS)[number]) => {
-      const cx = w.x + w.w / 2
-      const cy = w.y + w.h / 2
-      const middle = Math.abs(cx - ARENA_W / 2) < 200 && Math.abs(cy - ARENA_H / 2) < 200
-      // Pastel, deliberately. Tanks are saturated and the scenery is not, so a
-      // cyan tank never disappears against a cyan wall — the six player hues
-      // include one close to every colour worth painting a board with.
-      if (middle) return 0xf7a293 // the centre cross
-      if (w.w === w.h) return 0xffdf9b // the mid pillars
-      return 0xaed3f2 // the corner Ls
-    }
+    // Cover is what it is made of, and `arena.ts` says which. The board used to
+    // decide here, by measuring a rect: near the middle meant the pink cross,
+    // square meant a yellow pillar, anything else was a blue L. That worked
+    // right up until a layout wanted two different things the same shape, and
+    // it put a board's visual identity in the renderer where a level designer
+    // could not reach it.
+    const mats = coverMaterials()
+    this.coverMats = Object.values(mats)
 
     for (const w of WALLS) {
-      const fence = isFence(w)
-      const height = fence ? FENCE_H : WALL_H
-      const radius = Math.min(9, Math.min(w.w, w.h) * 0.35)
-      const mesh = new THREE.Mesh(
-        new RoundedBoxGeometry(w.w, height, w.h, 3, radius),
-        toy(fence ? 0xf4f8fb : coverColour(w), { roughness: fence ? 0.9 : 0.55 }),
-      )
-      mesh.position.set(w.x + w.w / 2, height / 2, w.y + w.h / 2)
-      mesh.castShadow = !fence
+      const kind = w.kind ?? 'rock'
+      const mesh = new THREE.Mesh(coverGeometry(w), mats[kind])
+      mesh.position.set(w.x + w.w / 2, 0, w.y + w.h / 2)
+      // The fence is the one thing a shadow buys nothing on: it rings the
+      // board, so its shadow falls outward onto the rim and off the world.
+      mesh.castShadow = kind !== 'fence'
       mesh.receiveShadow = true
       this.board.add(mesh)
     }
   }
 
   private buildLights(): void {
-    this.scene.add(new THREE.HemisphereLight(0xd6f0ff, 0x6f9a5c, 1.5))
+    // Sky above, grass below. The ground colour is what puts a green bounce on
+    // the underside of a tank and on the shaded face of every boulder, and it
+    // moved with the turf — a lawn does not bounce mini-golf green.
+    this.scene.add(new THREE.HemisphereLight(0xc6d9ea, 0x5f7742, 1.35))
 
-    const sun = new THREE.DirectionalLight(0xfff4dc, 2.1)
+    const sun = new THREE.DirectionalLight(0xfff0d2, 2.15)
     sun.position.set(ARENA_W / 2 + 700, 1500, ARENA_H / 2 - 900)
     sun.target.position.copy(this.target)
     sun.castShadow = true
@@ -1516,11 +1929,15 @@ export class Renderer {
     // problem than a bad frame rate. So walk it in until it is in the open.
     // Stepping rather than raycasting because the answer only has to be right
     // to within a few units and this runs every frame.
+    //
+    // Tall walls only. The eye is at EYE_Y and a barricade tops out at LOW_H,
+    // so backing into sandbags never puts the camera inside anything — pulling
+    // it in there would be the camera lurching forward at nothing.
     let back = EYE_BACK
     while (back > EYE_BACK_MIN) {
       const x = t.x - dirX * back
       const y = t.y - dirZ * back
-      if (!pointInWall(x, y) && x > 8 && y > 8 && x < ARENA_W - 8 && y < ARENA_H - 8) break
+      if (!pointInTallWall(x, y) && x > 8 && y > 8 && x < ARENA_W - 8 && y < ARENA_H - 8) break
       back -= 6
     }
 

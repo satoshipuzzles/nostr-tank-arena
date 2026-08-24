@@ -2,7 +2,7 @@
 // roughly 2.5x tank speed, so at 150-300ms of relay latency the correct play is
 // to lead your target. Latency becomes a skill instead of a stutter.
 
-import { ARENA_H, ARENA_W, WALLS, pointInWall, resolveCircle } from './arena'
+import { ARENA_H, ARENA_W, WALLS, pointInTallWall, resolveCircle } from './arena'
 
 export const TANK_RADIUS = 22
 export const MAX_HP = 3
@@ -88,6 +88,11 @@ const SHELL_STEP = 1 / 120
  * Advance a shell. Fixed sub-steps so that a client which receives the fire
  * event 200ms late can fast-forward it and land on the same trajectory as the
  * shooter — walls are static, so the path is a pure function of (x, y, angle, t).
+ *
+ * `pointInTallWall`, not `pointInWall`: sandbag barricades stop tanks and not
+ * shells. That keeps the trajectory a pure function of the same inputs, because
+ * which rects are low comes out of the layout and the layout comes out of the
+ * block hash — every client re-simulating this shell already agrees on it.
  */
 export function stepShell(s: Shell, dt: number): void {
   let remaining = dt
@@ -102,15 +107,15 @@ export function stepShell(s: Shell, dt: number): void {
 
     const nx = s.x + s.vx * step
     const ny = s.y + s.vy * step
-    if (!pointInWall(nx, ny)) {
+    if (!pointInTallWall(nx, ny)) {
       s.x = nx
       s.y = ny
       continue
     }
 
     // Bounce off whichever axis we actually crossed this step.
-    const hitX = pointInWall(nx, s.y) !== null
-    const hitY = pointInWall(s.x, ny) !== null
+    const hitX = pointInTallWall(nx, s.y) !== null
+    const hitY = pointInTallWall(s.x, ny) !== null
     if (hitX) s.vx = -s.vx
     if (hitY) s.vy = -s.vy
     if (!hitX && !hitY) {
