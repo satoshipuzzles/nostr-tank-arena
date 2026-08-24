@@ -102,6 +102,98 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
 .row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 20px; }
 .row button { flex: 1 1 auto; }
 
+/* ------------------------------------------------------- the relay editor */
+/* Phone first: rows are full width and the touch targets are 40px, because
+   this panel is where somebody fixes a broken game on the couch. */
+.relay-editor { margin-top: 14px; }
+.relay-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.relay-title { color: var(--dim); font-size: 13px; }
+.relay-title b { color: var(--text); font-variant-numeric: tabular-nums; }
+
+.relay-rows { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.relay-row {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: #0b0f18;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.relay-row .url {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+.relay-row .state {
+  grid-column: 2 / -1;
+  font-size: 11px;
+  color: var(--dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.relay-row button {
+  width: 40px;
+  min-height: 40px;
+  padding: 0;
+  font-size: 15px;
+  line-height: 1;
+  background: transparent;
+  color: var(--dim);
+  border-color: var(--line);
+}
+.relay-row button:hover:not(:disabled) { color: var(--text); border-color: var(--accent); }
+.relay-row button.del:hover:not(:disabled) { color: #ff7a7a; border-color: #ff7a7a; }
+
+/* The dot. Colours carry a word in `.state` underneath them every time — a
+   colour alone is not a message on a screen somebody is squinting at. */
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--line);
+  box-shadow: 0 0 0 1px #0007 inset;
+}
+.relay-row[data-status='ok'] .dot { background: #58d68d; }
+.relay-row[data-status='silent'] .dot { background: var(--accent); }
+.relay-row[data-status='refused'] .dot,
+.relay-row[data-status='blocked'] .dot,
+.relay-row[data-status='bad'] .dot { background: #ff6b6b; }
+.relay-row[data-status='checking'] .dot { background: var(--accent); animation: relay-pulse 1s ease-in-out infinite; }
+@keyframes relay-pulse { 50% { opacity: 0.25; } }
+
+.relay-add { display: flex; gap: 8px; margin-top: 8px; }
+.relay-add input { margin-top: 0; }
+.relay-add button { flex: 0 0 auto; min-height: 40px; }
+
+.relay-msg { margin: 8px 0 0; font-size: 12px; color: var(--dim); }
+.relay-msg.bad { color: #ff8f8f; }
+.relay-msg.good { color: #7fe0a6; }
+
+.relay-actions { display: flex; gap: 8px; margin-top: 10px; }
+.relay-actions button { flex: 1 1 auto; min-height: 40px; }
+/* Nothing to save reads as an outline, not a dimmed primary — a greyed-out
+   amber slab next to a live ghost button looks like the broken one. */
+#relay-save:disabled {
+  opacity: 1;
+  background: transparent;
+  color: var(--dim);
+  border-color: var(--line);
+}
+
+.relay-text { margin: 12px 0 0; }
+.relay-text summary { font-size: 12px; }
+
 /* ------------------------------------------------------------------ hud */
 
 #hud { position: fixed; inset: 0; pointer-events: none; z-index: 10; }

@@ -7,6 +7,7 @@ import { Input, PLAYER_TWO, SOLO, type Scheme } from './input'
 import { TouchSticks } from './touch'
 
 import { DEFAULT_RELAYS, Identity, Net, mergeRelays } from './nostr'
+import { type RelayProbe, checkRelay, parseRelayList } from './relays'
 import { Renderer, type ViewMode } from './render'
 import type { ClockDirection } from './nostr'
 import { modifierForBlock } from './modifiers'
@@ -272,12 +273,255 @@ window.addEventListener('keydown', (e) => {
 })
 
 function readRelays(): string[] {
-  const list = relayInput.value
-    .split(/\s+/)
-    .map((s) => s.trim())
-    .filter((s) => s.startsWith('ws://') || s.startsWith('wss://'))
+  const list = parseRelayList(relayInput.value)
   return list.length ? list : DEFAULT_RELAYS
 }
+
+// ------------------------------------------------------- the relay editor
+/**
+ * Add, remove, reorder, test, save.
+ *
+ * The textarea is still the model and every existing caller still reads it;
+ * the rows are a view of it and "Edit as text" hands it straight back for a
+ * paste. What is new is that saving is a button rather than a side effect of
+ * pressing Play — the old design meant a player could edit this box, close the
+ * tab, and lose the edit, and it meant the *only* moment the list was written
+ * was the moment it was also being used.
+ *
+ * Order is meaningful — `DEFAULT_RELAYS` is sorted by measured delivery
+ * latency and the game reads the list in order — so a row can move up. There
+ * is no "move down" because every list is short enough that moving the other
+ * one up is the same gesture with one less button on a phone.
+ */
+const relayRows = $('relay-rows')
+const relayAddUrl = $<HTMLInputElement>('relay-add-url')
+const relayMsg = $('relay-msg')
+const relaySave = $<HTMLButtonElement>('relay-save')
+const relayTest = $<HTMLButtonElement>('relay-test')
+
+/** Probe results by URL, so a repaint does not throw away what we learned. */
+const relayProbes = new Map<string, RelayProbe>()
+/**
+ * The list as it stood when it was last loaded or saved.
+ *
+ * Dirty is measured against this rather than against `localStorage`, because
+ * on load the list can legitimately differ from storage: `mergeRelays` folds
+ * in defaults this browser has never been offered. Comparing to storage would
+ * have every returning player open the panel to an "unsaved changes" badge for
+ * a change they did not make.
+ */
+let relaySnapshot: string[] = []
+
+function relayListNow(): string[] {
+  return parseRelayList(relayInput.value)
+}
+
+function setRelayList(list: string[]): void {
+  relayInput.value = list.join('\n')
+  paintRelays()
+}
+
+function say(text: string, tone: 'good' | 'bad' | 'plain' = 'plain'): void {
+  relayMsg.textContent = text
+  relayMsg.className = `relay-msg${tone === 'plain' ? '' : ` ${tone}`}`
+  relayMsg.hidden = !text
+}
+
+/** What the rows currently show, so a status update need not rebuild them. */
+let relayPainted: string[] = []
+
+function paintRelays(): void {
+  const list = relayListNow()
+  $('relay-count').textContent = String(list.length)
+  paintSaveButton(list)
+
+  // A probe finishing must not tear down the list. Rebuilding on every dot
+  // meant that during "Test all" — the exact moment a player is deciding which
+  // relay to delete — every row was replaced under their thumb, and a tap
+  // landed on a button that no longer existed. Only the statuses change here
+  // unless the list itself did.
+  if (list.join('\n') === relayPainted.join('\n')) {
+    for (const url of list) {
+      const row = relayRows.querySelector<HTMLElement>(`.relay-row[data-url="${cssEscape(url)}"]`)
+      if (!row) continue
+      const probe = relayProbes.get(url)
+      row.dataset.status = probe?.status ?? 'unknown'
+      const state = row.querySelector('.state')
+      if (state) state.textContent = probe ? probe.detail : 'not tested'
+    }
+    return
+  }
+  relayPainted = list
+  relayRows.replaceChildren()
+
+  for (const [i, url] of list.entries()) {
+    const probe = relayProbes.get(url)
+    const row = document.createElement('li')
+    row.className = 'relay-row'
+    row.dataset.status = probe?.status ?? 'unknown'
+    row.dataset.url = url
+
+    const dot = document.createElement('span')
+    dot.className = 'dot'
+    dot.setAttribute('aria-hidden', 'true')
+
+    const label = document.createElement('span')
+    label.className = 'url'
+    // textContent, never innerHTML: this string came from a paste box.
+    label.textContent = url.replace(/^wss:\/\//, '')
+    label.title = url
+
+    const up = document.createElement('button')
+    up.type = 'button'
+    up.className = 'up'
+    up.textContent = '\u2191'
+    up.title = 'Move up'
+    up.setAttribute('aria-label', `Move ${url} up`)
+    up.disabled = i === 0
+    up.addEventListener('click', () => {
+      const next = relayListNow()
+      ;[next[i - 1], next[i]] = [next[i], next[i - 1]]
+      setRelayList(next)
+      say('Order changed. Press Save to keep it.')
+    })
+
+    const del = document.createElement('button')
+    del.type = 'button'
+    del.className = 'del'
+    del.textContent = '\u00d7'
+    del.title = 'Remove'
+    del.setAttribute('aria-label', `Remove ${url}`)
+    del.addEventListener('click', () => {
+      setRelayList(relayListNow().filter((r) => r !== url))
+      say(`Removed ${url}. Press Save to keep it that way.`)
+    })
+
+    const state = document.createElement('span')
+    state.className = 'state'
+    state.textContent = probe ? probe.detail : 'not tested'
+
+    row.append(dot, label, up, del, state)
+    relayRows.append(row)
+  }
+}
+
+function paintSaveButton(list: string[]): void {
+  const dirty = list.join('\n') !== relaySnapshot.join('\n')
+  relaySave.disabled = !dirty
+  relaySave.textContent = dirty ? 'Save changes' : 'Saved'
+}
+
+/**
+ * Escape a relay URL for the quoted part of an attribute selector.
+ *
+ * URLs contain a quote or a backslash about as often as never, and "about as
+ * often as never" is how a thrown SyntaxError gets shipped.
+ */
+function cssEscape(value: string): string {
+  return value.replace(/["\\]/g, '\\$&')
+}
+
+async function probeRelay(url: string): Promise<void> {
+  relayProbes.set(url, { status: 'checking', detail: 'testing\u2026' })
+  paintRelays()
+  relayProbes.set(url, await checkRelay(url))
+  paintRelays()
+}
+
+async function testAllRelays(): Promise<void> {
+  const list = relayListNow()
+  if (!list.length) return
+  relayTest.disabled = true
+  relayTest.textContent = 'Testing\u2026'
+  try {
+    await Promise.all(list.map(probeRelay))
+    const ok = list.filter((r) => relayProbes.get(r)?.status === 'ok').length
+    say(
+      ok === list.length
+        ? `All ${ok} answered.`
+        : `${ok} of ${list.length} answered. A red dot is a relay this browser cannot reach.`,
+      ok === list.length ? 'good' : 'bad',
+    )
+  } finally {
+    relayTest.disabled = false
+    relayTest.textContent = 'Test all'
+  }
+}
+
+function addTypedRelay(): void {
+  const typed = relayAddUrl.value.trim()
+  if (!typed) return
+  const wanted = parseRelayList(typed)
+  if (!wanted.length) {
+    say(`"${typed}" is not a relay address. It wants to look like wss://relay.example.com.`, 'bad')
+    return
+  }
+  const have = relayListNow()
+  const fresh = wanted.filter((r) => !have.includes(r))
+  if (!fresh.length) {
+    say(wanted.length === 1 ? 'Already in the list.' : 'All of those are already in the list.', 'bad')
+    return
+  }
+  relayAddUrl.value = ''
+  setRelayList([...have, ...fresh])
+  say(`Added ${fresh.join(', ')}. Press Save to keep it.`)
+  // Test what was just added straight away: the commonest reason to add a
+  // relay by hand is a typo waiting to happen, and a dot two seconds later is
+  // a cheaper way to find it than an empty arena.
+  void Promise.all(fresh.map(probeRelay))
+}
+
+relayAddUrl.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return
+  e.preventDefault()
+  addTypedRelay()
+})
+$('relay-add-go').addEventListener('click', addTypedRelay)
+relayTest.addEventListener('click', () => void testAllRelays())
+// Hand editing through "Edit as text" keeps the rows in step.
+relayInput.addEventListener('input', () => paintRelays())
+
+relaySave.addEventListener('click', () => {
+  const list = relayListNow()
+  if (!list.length) {
+    say('You need at least one relay — an empty list would just fall back to the defaults.', 'bad')
+    return
+  }
+  saveRelays(list)
+  say(`Saved. ${list.length} relay${list.length === 1 ? '' : 's'}, in this order, from now on.`, 'good')
+})
+
+$('relay-reset').addEventListener('click', () => {
+  setRelayList([...DEFAULT_RELAYS])
+  say('Defaults restored. Press Save to keep them.')
+})
+
+/**
+ * Write the list, and record that these defaults have now been offered.
+ *
+ * Both keys move together or the merge rule breaks: `tank.relays.offered` is
+ * what stops a default the player deleted on purpose from coming back on the
+ * next load, and it is what lets a default added later reach them at all.
+ */
+function saveRelays(list: string[]): void {
+  store('tank.relays', list.join('\n'))
+  store('tank.relays.offered', DEFAULT_RELAYS.join('\n'))
+  relaySnapshot = list
+  paintRelays()
+}
+
+relaySnapshot = relayListNow()
+paintRelays()
+
+// Nothing is probed until the panel is open. Four sockets on every page load
+// would be four sockets per player per load asked of volunteer infrastructure
+// for a dot nobody is looking at.
+let relaysProbed = false
+$('advanced').addEventListener('toggle', () => {
+  if (relaysProbed || !($('advanced') as HTMLDetailsElement).open) return
+  relaysProbed = true
+  void testAllRelays()
+})
 
 function fail(message: string): void {
   lobbyError.textContent = message
@@ -607,11 +851,10 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
 
     store('tank.name', name)
     store('tank.room', room)
-    store('tank.relays', relays.join('\n'))
-    // What this browser has now been shown. Saved alongside the list itself so
-    // a default added after today reaches this player on their next load
-    // instead of being locked out by their own saved copy — see `mergeRelays`.
-    store('tank.relays.offered', DEFAULT_RELAYS.join('\n'))
+    // Pressing Play still saves the list — the Save button is an addition, not
+    // a replacement. Through `saveRelays` so the editor's "unsaved changes"
+    // badge clears instead of lying about a list that was just written.
+    saveRelays(relays)
 
     // Hue seeded from the real pubkey. Game.spreadColors() snaps it to a
     // palette slot and resolves clashes with whoever else is in the room.
