@@ -60,12 +60,30 @@ try {
   await new Promise((r) => setTimeout(r, 5000))
 
   await page.evaluate((suffix) => {
-    window.__clock.accept({ height: 999999, hash: 'ab'.repeat(30) + suffix })
+    // With a `time`, or the clock sits `chainPending` forever and the pickup
+    // schedule — which refuses to derive a wave it cannot anchor — never spawns
+    // anything. An injected tip has to carry the mined-at the poller would fetch.
+    window.__clock.accept({
+      height: 999999,
+      hash: 'ab'.repeat(30) + suffix,
+      time: Math.floor(Date.now() / 1000) - 30,
+    })
   }, SUFFIX)
   await new Promise((r) => setTimeout(r, 1200))
   // The podium covers the board for nine seconds after a block lands.
   await page.evaluate(() => { document.getElementById('podium').hidden = true })
   await new Promise((r) => setTimeout(r, 2500))
+
+  // Wait for a wave rather than assuming one. Pickups no longer land on a
+  // metronome — the spawn moment moves inside its frame and most of a frame is
+  // empty board on purpose — so a fixed sleep photographs an empty arena about
+  // half the time and the picture proves nothing about the icons on the pads.
+  const deadline = Date.now() + 90_000
+  while (Date.now() < deadline) {
+    const live = await page.evaluate(() => window.__game.pickups.size)
+    if (live > 0) break
+    await new Promise((r) => setTimeout(r, 500))
+  }
 
   console.log(await page.evaluate(() => ({
     map: document.getElementById('hud-map')?.textContent,

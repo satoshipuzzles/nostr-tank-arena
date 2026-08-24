@@ -28,6 +28,12 @@ export interface ScoreRow {
   at: number
   /** Which block's round this was, when the record says so. */
   block?: number
+  /** Best kill streak, when the record carries one. Older clients did not. */
+  streak?: number
+  /** The board it was played on, as the player's client named it. */
+  layout?: string
+  /** The room it was played in. */
+  room?: string
 }
 
 /**
@@ -107,6 +113,25 @@ export async function fetchScores(net: Net, limit = 25): Promise<ScoreRow[]> {
 }
 
 /**
+ * One signed record as a table row. Shared by every view on this screen so a
+ * player's streak or map does not appear on one board and go missing on the
+ * next.
+ */
+function rowOf(e: Event, p: ScorePayload): ScoreRow {
+  return {
+    pubkey: e.pubkey,
+    npub: nip19.npubEncode(e.pubkey),
+    kills: Math.max(0, Math.floor(p.kills)),
+    deaths: Math.max(0, Math.floor(p.deaths)),
+    at: e.created_at,
+    block: typeof p.block === 'number' ? p.block : undefined,
+    streak: typeof p.streak === 'number' ? Math.max(0, Math.floor(p.streak)) : undefined,
+    layout: typeof p.layout === 'string' ? p.layout.slice(0, 32) : undefined,
+    room: typeof p.room === 'string' ? p.room.slice(0, 32) : undefined,
+  }
+}
+
+/**
  * Turn signed records into a table.
  *
  * `mode` decides what to do when one pubkey appears more than once: the
@@ -120,14 +145,7 @@ function rank(events: Event[], limit: number, mode: 'latest' | 'best' = 'latest'
   for (const e of events) {
     const p = parsePayload<ScorePayload>(e.content)
     if (!p || typeof p.kills !== 'number' || typeof p.deaths !== 'number') continue
-    const row = {
-      pubkey: e.pubkey,
-      npub: nip19.npubEncode(e.pubkey),
-      kills: Math.max(0, Math.floor(p.kills)),
-      deaths: Math.max(0, Math.floor(p.deaths)),
-      at: e.created_at,
-      block: typeof p.block === 'number' ? p.block : undefined,
-    }
+    const row = rowOf(e, p)
     const existing = best.get(e.pubkey)
     if (existing) {
       const better = mode === 'best' ? row.kills > existing.kills : row.at > existing.at
@@ -221,14 +239,7 @@ function groupBlocks(events: Event[]): BlockResult[] {
     if (typeof p.deaths !== 'number') continue
     const height = Math.floor(p.block)
     if (!Number.isFinite(height) || height <= 0) continue
-    const row: ScoreRow = {
-      pubkey: e.pubkey,
-      npub: nip19.npubEncode(e.pubkey),
-      kills: Math.max(0, Math.floor(p.kills)),
-      deaths: Math.max(0, Math.floor(p.deaths)),
-      at: e.created_at,
-      block: height,
-    }
+    const row: ScoreRow = { ...rowOf(e, p), block: height }
     let players = byBlock.get(height)
     if (!players) byBlock.set(height, (players = new Map()))
     const seen = players.get(e.pubkey)

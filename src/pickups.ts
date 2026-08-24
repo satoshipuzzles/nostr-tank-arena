@@ -59,45 +59,93 @@ import type { Pt } from './arena'
 export type PickupKind = 'repair' | 'rapid' | 'shield' | 'speed' | 'scatter' | 'siege'
 
 /**
- * `shape` is the renderer's cue. Six pickups that were all the same octahedron
- * in six colours meant reading the pad from across the board was a colour-match
- * puzzle; six silhouettes are legible at arena zoom and stay legible to anyone
- * who cannot tell orange from red.
+ * The icon for each pickup, as polygons on a 32x32 grid with y pointing down.
+ *
+ * Geometry rather than an SVG string or a PNG, because the same six shapes have
+ * to appear in two completely different renderers: an `<svg>` in the HUD chip
+ * and an extruded mesh standing on the pad. A path string would mean drawing
+ * each icon twice and the two drifting the first time one of them is tweaked —
+ * the pad would show a bolt and the timer a lightning-free rectangle, and
+ * nothing would flag it. One table, two consumers, no way to disagree.
+ *
+ * Six colours were never enough on their own. A pad read from the far end of a
+ * 2000-unit board is a few dozen pixels of one hue, and telling orange from red
+ * at that size is a coin flip for anybody and impossible for a good share of
+ * players. A silhouette survives the distance and survives a screenshot.
  */
+export type IconPolys = number[][][]
+
+export const ICON_POLYS: Record<PickupKind, IconPolys> = {
+  // A first-aid cross.
+  repair: [
+    [
+      [12, 2], [20, 2], [20, 12], [30, 12], [30, 20], [20, 20],
+      [20, 30], [12, 30], [12, 20], [2, 20], [2, 12], [12, 12],
+    ],
+  ],
+  // A lightning bolt.
+  rapid: [[[18, 2], [6, 18], [13, 18], [10, 30], [26, 12], [18, 12]]],
+  // A heraldic shield.
+  shield: [[[16, 2], [29, 7], [29, 17], [16, 30], [3, 17], [3, 7]]],
+  // Two chevrons, the speedometer of icons.
+  speed: [
+    [[2, 5], [11, 5], [20, 16], [11, 27], [2, 27], [11, 16]],
+    [[13, 5], [22, 5], [31, 16], [22, 27], [13, 27], [22, 16]],
+  ],
+  // Three shells leaving the barrel at once.
+  scatter: [
+    [[16, 1], [21, 11], [16, 16], [11, 11]],
+    [[5, 11], [10, 20], [5, 29], [0, 20]],
+    [[27, 11], [32, 20], [27, 29], [22, 20]],
+  ],
+  // A heavy shell coming down on you.
+  siege: [[[11, 2], [21, 2], [21, 15], [29, 15], [16, 30], [3, 15], [11, 15]]],
+}
+
+/** The icon as inline SVG, for the HUD. Sized by CSS, coloured by `currentColor`. */
+export function iconSvg(kind: PickupKind, cls = 'pico'): string {
+  const polys = ICON_POLYS[kind]
+    .map((poly) => `<polygon points="${poly.map(([x, y]) => `${x},${y}`).join(' ')}" />`)
+    .join('')
+  return `<svg class="${cls}" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true">${polys}</svg>`
+}
+
 export const PICKUPS: Record<
   PickupKind,
-  { label: string; blurb: string; hue: number; seconds: number; shape: string }
+  { label: string; blurb: string; hue: number; seconds: number }
 > = {
-  repair: { label: 'Repair', blurb: 'full hull', hue: 130, seconds: 0, shape: 'cross' },
-  rapid: { label: 'Rapid fire', blurb: 'reload in a blink', hue: 20, seconds: 12, shape: 'bolt' },
-  shield: { label: 'Shield', blurb: 'one shot bounces off', hue: 200, seconds: 14, shape: 'dome' },
-  speed: { label: 'Overdrive', blurb: 'move like you stole it', hue: 285, seconds: 10, shape: 'ring' },
-  scatter: { label: 'Scattershot', blurb: 'three shells a shot', hue: 55, seconds: 14, shape: 'star' },
-  siege: { label: 'Siege shells', blurb: 'double damage', hue: 350, seconds: 10, shape: 'spike' },
+  repair: { label: 'Repair', blurb: 'full hull', hue: 130, seconds: 0 },
+  rapid: { label: 'Rapid fire', blurb: 'reload in a blink', hue: 20, seconds: 12 },
+  shield: { label: 'Shield', blurb: 'one shot bounces off', hue: 200, seconds: 14 },
+  speed: { label: 'Overdrive', blurb: 'move like you stole it', hue: 285, seconds: 10 },
+  scatter: { label: 'Scattershot', blurb: 'three shells a shot', hue: 55, seconds: 14 },
+  siege: { label: 'Siege shells', blurb: 'double damage', hue: 350, seconds: 10 },
 }
 
 const KINDS: PickupKind[] = ['repair', 'rapid', 'shield', 'speed', 'scatter', 'siege']
 
 /**
- * Seconds between spawn waves.
+ * Seconds in one spawn *frame*. Not the gap between spawns — see `spawnAt`.
  *
- * Raised from 22 because an item you can count on is not worth crossing the map
- * for. At half a minute the good pads are a decision — go for it and be exposed
- * on open ground, or hold the lane you already own — and that decision is the
- * whole reason pickups are in the game.
+ * Raised from 34 because an item you can count on is not worth crossing the map
+ * for, and lifted again to 52 when the board dropped from three pads a wave to
+ * one or two. Scarcity is the whole point: at roughly one item a minute on a
+ * four-player board, the spawn is an event that pulls everyone into the open
+ * rather than scenery you drive over on the way somewhere.
  */
-export const WAVE_SECONDS = 34
+export const WAVE_SECONDS = 52
+
 /** How the round's modifier bends the schedule. Both come from the block hash. */
 export interface WaveRules {
-  /** Seconds between waves. */
+  /** Length of one spawn frame, in seconds. */
   waveSeconds: number
-  /** How many pads stay empty each wave. */
-  emptyPads: number
+  /** How many pads are stocked when a wave lands. */
+  padsPerWave: number
 }
-export const DEFAULT_WAVES: WaveRules = { waveSeconds: WAVE_SECONDS, emptyPads: 1 }
+export const DEFAULT_WAVES: WaveRules = { waveSeconds: WAVE_SECONDS, padsPerWave: 0 }
 
-/** How long a pickup sits unclaimed before the board clears for the next wave. */
-export const PICKUP_LINGER = 20
+/** How long a pickup sits unclaimed before it goes away again. */
+export const PICKUP_LINGER = 18
 
 /**
  * The wave clock, in seconds, on a timeline every client agrees on.
@@ -110,6 +158,10 @@ export const PICKUP_LINGER = 20
  *
  * What it must never fall back to is a local `performance.now()` origin. That
  * is a timeline of one.
+ *
+ * Note what this rules out for everything below: `elapsed` may be ~1.7e9 on the
+ * fallback path, so nothing here may walk waves from zero to find the current
+ * one. Every derivation is O(1) in the wave index.
  */
 export function waveClock(sinceTip: number | null, nowMs = Date.now()): number {
   return sinceTip === null ? nowMs / 1000 : sinceTip
@@ -145,11 +197,106 @@ function mix(seed: string, a: number, b: number): number {
 }
 
 /**
+ * How many pads a wave stocks, when the modifier does not say.
+ *
+ * One most of the time and two now and then. A board where every pad lights up
+ * on a metronome is a board where nobody contests anything — you take the one
+ * nearest you and so does everyone else. One item means somebody does not get
+ * it, and that is the whole fight.
+ */
+function padCount(hash: string, wave: number, rules: WaveRules): number {
+  const fixed = Math.floor(rules.padsPerWave)
+  if (fixed > 0) return Math.min(fixed, WINDOW)
+  return mix(hash, wave, 4242) % 3 === 0 ? 2 : 1
+}
+
+/**
+ * Where in its frame a wave actually lands.
+ *
+ * The frame is fixed so the wave index stays O(1) from `elapsed`; the spawn
+ * *moment* moves inside it. That is what removes the metronome — consecutive
+ * spawns sit anywhere from about 26 to about 78 seconds apart on a 52-second
+ * frame, so you cannot count to the next one.
+ */
+function spawnOffset(hash: string, wave: number, period: number): number {
+  const room = Math.max(0, period - PICKUP_LINGER - 4)
+  if (room <= 0) return 0
+  return 4 + (mix(hash, wave, 77) % room)
+}
+
+/**
+ * How many pads one wave may light at most. Also the width of the rotating
+ * window below, which is what makes "never the same pad twice running" a
+ * property of the construction rather than a filter applied afterwards.
+ */
+const WINDOW = 2
+
+/**
+ * A permutation of the pads for one *cycle* of waves.
+ *
+ * ## Why a cycle, and why a permutation
+ *
+ * The requirement is that consecutive waves never share a pad, on a schedule
+ * every client derives independently with no messages. The obvious version —
+ * shuffle per wave, then drop anything the previous wave used — cannot be
+ * written: asking what the previous wave used means asking what the wave before
+ * *that* used, and on the unix-seconds fallback clock (`waveClock`) the wave
+ * index is around fifty million. Nothing here may walk backwards.
+ *
+ * So the disjointness is structural. Waves come in cycles of `floor(n / WINDOW)`
+ * and wave `w` takes window `w % windows` of this permutation: windows within a
+ * cycle are disjoint slices of the same permutation, so no pad can appear in
+ * two consecutive waves inside a cycle, for free.
+ *
+ * That leaves exactly one seam — the last wave of one cycle against the first
+ * wave of the next — and it is closed by `avoid`: the incoming permutation
+ * moves any pad from the outgoing cycle's *final* window out of its own first
+ * window. The swap only ever touches positions before the final window, which
+ * is what keeps this O(1): the final window of any cycle is the raw shuffle,
+ * untouched by that cycle's own seam fix, so the next cycle can reconstruct it
+ * without knowing anything about the cycle before it.
+ */
+function permutation(hash: string, cycle: number, windows: number, rules: WaveRules): number[] {
+  const perm = PADS.map((_, pad) => pad).sort(
+    (a, b) => mix(hash, cycle, a) - mix(hash, cycle, b) || a - b,
+  )
+  if (cycle <= 0 || windows < 3) return perm
+  const previous = rawTail(hash, cycle - 1, windows, rules)
+  const last = (windows - 1) * WINDOW
+  for (let i = 0; i < WINDOW; i++) {
+    if (!previous.has(perm[i])) continue
+    // Somewhere before the final window there is a pad the outgoing wave did
+    // not use — there are only WINDOW pads to avoid and more than WINDOW slots
+    // to look in — so this always finds a partner.
+    for (let j = WINDOW; j < last; j++) {
+      if (previous.has(perm[j])) continue
+      ;[perm[i], perm[j]] = [perm[j], perm[i]]
+      break
+    }
+  }
+  return perm
+}
+
+/**
+ * The pads the final wave of a cycle lit. Deliberately reads the *raw* shuffle:
+ * the seam fix never touches the final window, so this is exact, and it does
+ * not recurse.
+ */
+function rawTail(hash: string, cycle: number, windows: number, rules: WaveRules): Set<number> {
+  const perm = PADS.map((_, pad) => pad).sort(
+    (a, b) => mix(hash, cycle, a) - mix(hash, cycle, b) || a - b,
+  )
+  const start = (windows - 1) * WINDOW
+  const wave = cycle * windows + windows - 1
+  return new Set(perm.slice(start, start + padCount(hash, wave, rules)))
+}
+
+/**
  * The pickups that should exist right now.
  *
- * `elapsed` is seconds since the round started. Pure: given the same block hash
- * and the same elapsed time, every client in the room builds the same list, in
- * the same order, with the same ids.
+ * `elapsed` is seconds on the shared round clock. Pure: given the same block
+ * hash and the same elapsed time, every client in the room builds the same
+ * list, in the same order, with the same ids.
  */
 export function scheduleFor(
   blockHash: string,
@@ -157,28 +304,34 @@ export function scheduleFor(
   rules: WaveRules = DEFAULT_WAVES,
 ): Pickup[] {
   if (!PADS.length) return []
-  const period = Math.max(2, rules.waveSeconds)
+  const period = Math.max(8, rules.waveSeconds)
   const wave = Math.floor(elapsed / period)
-  const born = wave * period
-  // An untouched pickup clears well before the next wave, so there is always a
-  // stretch of empty board rather than one item silently becoming another. With
-  // a 34-second period that is 20 seconds of contest and 14 of nothing, which
-  // is what makes the spawn an event instead of scenery.
-  if (elapsed - born > Math.min(PICKUP_LINGER, period - 2)) return []
+  const born = wave * period + spawnOffset(blockHash, wave, period)
+  const age = elapsed - born
+  // Before the spawn moment there is nothing, and an untouched pickup clears
+  // after PICKUP_LINGER — so most of a frame is empty board, which is what
+  // makes a spawn an event instead of scenery.
+  if (age < 0 || age > PICKUP_LINGER) return []
 
-  // Normally one pad per wave stays empty, so the board is never fully stocked
-  // and there is a reason to contest the ones that are. Supply Run stocks the
-  // lot.
-  const skip = rules.emptyPads > 0 ? mix(blockHash, wave, 999) % PADS.length : -1
+  const windows = Math.max(1, Math.floor(PADS.length / WINDOW))
+  const perm = permutation(blockHash, Math.floor(wave / windows), windows, rules)
+  const slot = ((wave % windows) + windows) % windows
+  const count = Math.min(padCount(blockHash, wave, rules), PADS.length)
+  const pads = perm.slice(slot * WINDOW, slot * WINDOW + count)
+
   const out: Pickup[] = []
-  for (let pad = 0; pad < PADS.length; pad++) {
-    if (pad === skip) continue
-    const kind = KINDS[mix(blockHash, wave, pad) % KINDS.length]
+  let previousKind = -1
+  for (const pad of pads) {
+    // Two pads in the same wave never hand out the same thing: a wave that is
+    // two shields is one choice with two locations, not two choices.
+    let k = mix(blockHash, wave * 131 + pad, 13) % KINDS.length
+    if (k === previousKind) k = (k + 1) % KINDS.length
+    previousKind = k
     out.push({
       id: `${blockHash.slice(-8)}:${wave}:${pad}`,
       pad,
       at: PADS[pad],
-      kind,
+      kind: KINDS[k],
       born,
       taken: false,
     })

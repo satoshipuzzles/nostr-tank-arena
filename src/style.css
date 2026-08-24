@@ -354,13 +354,28 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
 }
 .buff {
   font-size: 12px;
-  padding: 5px 11px;
+  padding: 5px 11px 5px 8px;
   border-radius: 999px;
   background: var(--panel);
   border: 1px solid hsl(var(--buff-hue) 60% 45%);
   color: hsl(var(--buff-hue) 80% 72%);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 .buff b { color: #fff; }
+
+/*
+ * The pickup icon, in the chip and anywhere else a pickup is named. It is the
+ * same polygon set the pad extrudes, so a player learns one silhouette and
+ * reads it in both places.
+ */
+.pico {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  display: block;
+}
 
 /* ------------------------------------------------------------- podium */
 
@@ -850,3 +865,210 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
 }
 #crosshair i::before { top: -13px; }
 #crosshair i::after { bottom: -13px; }
+
+/* ---------------------------------------------------------- live games */
+
+/*
+ * The lobby's notice board. A room in this game is a string two people agreed
+ * on, which needs no server and is completely undiscoverable — this is where
+ * "is anybody playing" gets an answer.
+ *
+ * Laid out as cards rather than rows because the thing being read is the seat
+ * strip: four circles, some of them faces, some of them empty. A poker lobby
+ * works for the same reason — you can see an open seat without reading a word.
+ */
+.live {
+  margin-top: 18px;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+.live-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.live-title {
+  font-size: 12px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+button.tiny {
+  font-size: 11px;
+  padding: 5px 10px;
+  border-radius: 8px;
+}
+.live-rows {
+  display: grid;
+  gap: 10px;
+  max-height: 260px;
+  overflow-y: auto;
+  font-size: 13px;
+}
+.live-room {
+  display: grid;
+  gap: 7px;
+  padding: 11px 12px;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #1b2536 0%, #131b29 100%);
+  border: 1px solid var(--line);
+}
+.lr-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+.lr-name {
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lr-seats {
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  flex: none;
+}
+.lr-seats.open {
+  color: #8ce8a6;
+  background: rgba(140, 232, 166, 0.12);
+}
+.lr-seats.full {
+  color: var(--dim);
+  background: rgba(255, 255, 255, 0.06);
+}
+.lr-faces {
+  display: flex;
+  gap: 6px;
+}
+/* An empty chair, drawn as one: a dashed ring the same size as a face, so the
+   strip stays four circles wide however many people are in the room. */
+.seat.free {
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  border: 1px dashed var(--line);
+  display: block;
+}
+.seat.taken {
+  display: block;
+  line-height: 0;
+}
+.lr-fine {
+  font-size: 11px;
+  color: var(--dim);
+}
+.lr-actions {
+  display: flex;
+  gap: 8px;
+}
+.lr-actions button {
+  flex: 1;
+}
+
+/* ------------------------------------------------------ one block's round */
+
+.detail-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+.detail-head h3 {
+  margin: 0;
+  font-size: 16px;
+}
+.detail-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.detail-facts span {
+  font-size: 11px;
+  color: var(--dim);
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 999px;
+  padding: 3px 9px;
+}
+/*
+ * One grid for the legend and every row, so the K, D, K/D and best columns line
+ * up as columns instead of drifting apart the moment a name is long. `1fr` on
+ * the name is what absorbs the difference.
+ */
+.detail-legend,
+.detail-row {
+  display: grid;
+  grid-template-columns: 22px 28px 1fr 46px 46px 52px 44px;
+  align-items: center;
+  gap: 8px;
+}
+.detail-legend {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--dim);
+  padding: 0 6px 6px;
+  border-bottom: 1px solid var(--line);
+}
+.detail-row {
+  padding: 8px 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+.dr-who {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.dr-who .name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dr-num,
+.dr-ratio,
+.dr-streak {
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.dr-ratio {
+  font-weight: 700;
+}
+.dr-streak {
+  color: var(--accent);
+}
+.dr-streak .dim {
+  color: var(--dim);
+}
+
+/* A block tile is a button now. It has to keep looking like a tile. */
+button.blocktile {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-align: center;
+  transition: transform 0.12s ease, border-color 0.12s ease;
+}
+button.blocktile:hover,
+button.blocktile:focus-visible {
+  transform: translateY(-2px);
+  border-color: var(--accent);
+}
+
+@media (max-width: 560px) {
+  /* The ratio is the first thing to go: K and D are the numbers, and K/D is
+     arithmetic anybody can do on the two of them. */
+  .detail-legend,
+  .detail-row {
+    grid-template-columns: 20px 26px 1fr 42px 42px 40px;
+  }
+  .dr-ratio { display: none; }
+}

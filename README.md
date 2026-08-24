@@ -211,6 +211,63 @@ everybody bounced off; you spend your first minute pointing the wrong way instea
 of shooting anybody. The hull still physically rotates at `TURN_RATE` either way,
 so a tank still feels heavy — only the input changes.
 
+## Finding a game
+
+A room in this game is a string two people agreed on. That is wonderfully simple
+— no server, no registry, no permission — and it means nobody can find one. So
+there is a lobby, built the same way everything else here is: each client says
+where it is, and everyone else adds it up.
+
+Every client in a room publishes a **presence beacon** every thirty seconds. It
+carries the room, a callsign, a colour, the block and board being played, and a
+role. The lobby groups them into open tables:
+
+* **seat** — playing. Four seats to a room, because there are four spawns.
+* **queue** — the table was full when you arrived, so you are in the room
+  watching, and you drop into the next seat that frees up.
+* **watch** — a spectator by choice, with no tank at all.
+
+A spectator is not a special client. It is an ordinary one with three things
+switched off: it does not drive, it does not publish state, and it does not
+attest a session — so nobody else's roster, scoreboard or spawn logic learns it
+exists. Everything a spectator *does* do goes through the same code a player's
+does, which is the only version of this that stays correct as the game changes.
+
+### Why the beacon is stored and not ephemeral
+
+The room already broadcasts a session attestation on an ephemeral kind, and that
+is exactly the wrong shape for a lobby: relays forward ephemeral events only to
+clients connected at that instant and cannot be asked for them afterwards. A
+player sitting on the lobby screen would see a room only when somebody happened
+to re-announce, and a game that had been running for an hour would be invisible.
+
+So presence is an addressable record with a NIP-40 `expiration`. One slot per
+player, queryable by a client that just opened the page, and dropped by the relay
+on schedule rather than leaving the lobby full of ghosts.
+
+The TTL is 120 seconds against a 30-second republish — four intervals of
+headroom, on purpose. NIP-40 is evaluated against the **relay's** clock, so the
+expiry is protection against skew rather than a tidy-up interval, and a beacon
+that expires early takes a live room off everybody's screen. The cost of the
+other direction is that somebody who closes their tab lingers for a couple of
+minutes, which is a wasted click rather than a lost game.
+
+The lobby query carries no `since`, also on purpose. A `since` is our clock,
+matched by the relay against `created_at` values other people wrote — a client
+running a minute fast would receive an empty lobby and have no way to tell that
+from a quiet night. It is bounded with `limit` instead, NIP-40 does the expiring,
+and obvious ghosts are dropped client-side with a wide margin.
+
+### None of it is enforced
+
+There is no server, so there is nothing to enforce with. Nobody can stop a fifth
+player driving into a four-seat room; a client can claim to be somewhere it is
+not; two queued players can both see the same seat open and both take it. That
+last one makes a five-tank round, not a crash.
+
+This is a notice board, not a matchmaker. Every count on it is what people said
+about themselves — exactly like the leaderboard, and it says so on screen.
+
 ## Protocol
 
 Everything travels as Nostr events. High-frequency data uses **ephemeral kinds**
@@ -226,6 +283,7 @@ subscribes you to an entire match.
 | `21002` | death report | ephemeral | session key | `{ t, k, x, y }` |
 | `30078` | score record | addressable (NIP-78) | **real npub** | `{ kills, deaths, room, at }` |
 | `30078` | pickup claim | addressable (NIP-78) + NIP-40 | session key | `{ id, kind, at }` |
+| `30078` | room presence | addressable (NIP-78) + NIP-40 | **real npub** | `{ room, name, hue, role, block?, layout?, at }` |
 
 Field key: `s` session pubkey, `t`/`t0` sender clock in ms, `h` hull heading,
 `g` gun heading, `d` dead flag, `k` kills in a row, `a` shell angle, `b` the
@@ -233,8 +291,14 @@ shell's bounce budget, `k` on a death report is the killer's session pubkey
 (`null` for a self-destruct). Angles are radians, positions are arena pixels — the
 board size is per-layout and lives in `ARENA_W`/`ARENA_H`. Score records use `d`
 tag `nostr-tank-arena/score`; the per-block record uses
-`nostr-tank-arena/score/<height>`, and a pickup claim uses
-`nostr-tank-arena/claim/<blockhash-prefix>:<wave>:<pad>:<claimant>`.
+`nostr-tank-arena/score/<height>`, a pickup claim uses
+`nostr-tank-arena/claim/<blockhash-prefix>:<wave>:<pad>:<claimant>`, and a room
+presence beacon uses the constant `nostr-tank-arena/here` — one slot per player,
+so moving rooms replaces rather than stacks. Presence is additionally indexed
+under `["t", "tankarena-live"]`, which is what makes the whole lobby one `#t`
+query, and carries a NIP-40 `expiration` 120 seconds out.
+
+`role` is `seat`, `queue` or `watch`. See [Finding a game](#finding-a-game).
 
 Two of those fields are new and both are riders on events that were already
 going out, which is the cheapest place to put anything.
@@ -512,7 +576,7 @@ more than one box the first time yours reboots.
 
 ## Pickups
 
-Six of them, on a 34-second wave, and one pad each wave stays empty.
+Six of them, on six pads, and most of the round the board is empty.
 
 | Pickup | What it does |
 |--------|--------------|
@@ -523,11 +587,52 @@ Six of them, on a 34-second wave, and one pad each wave stays empty.
 | Scattershot | Three shells a shot, 14s. |
 | Siege shells | Double damage, 10s. |
 
-The wave used to be 22 seconds and that was too generous: an item you can count
-on is not worth crossing the map for. At 34 seconds a stocked pad is a decision
-— go for it and be exposed on open ground, or hold the lane you already own —
-and that decision is the entire reason pickups are in the game. Supply Run turns
-it back down to 10 and stocks every pad, deliberately.
+### The schedule, and why "random" is hard here
+
+An item you can count on is not worth crossing the map for. Three earlier
+versions of this got steadily less generous — 22 seconds, then 34, then this —
+and the current one is built around a different question: not *how often*, but
+*how predictable*.
+
+What it does now:
+
+* **One pad a wave, sometimes two.** It used to stock every pad but one, which
+  meant nobody contested anything: you took the nearest and so did everyone
+  else. One item means somebody does not get it.
+* **The gap between waves runs 26 to 78 seconds**, averaging 52. The frame is
+  fixed at 52 seconds so the wave index stays cheap to compute, but the spawn
+  *moment* moves inside it — so you cannot count to the next one.
+* **A pad never lights twice running**, and across each cycle every pad is used,
+  so no corner of the board is quietly dead.
+* **Six pads per board**, up from four.
+
+The hard part is that all of that has to be *derived*, identically, on every
+client, with nothing on the wire — the wave index goes inside the pickup id, so
+two clients that disagree about it compute different ids for the same pad and
+silently discard each other's claims.
+
+That rules out the obvious implementation. "Shuffle the pads, then drop whatever
+the previous wave used" needs to know the previous wave, which needs the wave
+before it, all the way back to wave zero — and on the fallback clock (see below)
+the wave index is around fifty million. Nothing may walk backwards.
+
+So the no-repeat rule is structural rather than a filter. Waves come in cycles;
+each cycle gets a permutation of the pads derived from the block hash; wave *n*
+takes a two-wide window of it. Windows inside a cycle are disjoint slices of one
+permutation, so they cannot collide. That leaves exactly one seam — the last
+wave of a cycle against the first of the next — and the incoming permutation
+closes it by moving any pad the outgoing wave used out of its own first window.
+The seam fix only ever touches slots *before* the final window, which is what
+keeps the whole thing O(1): the final window is always the raw shuffle, so the
+next cycle can reconstruct it without knowing anything about the cycle before.
+
+Supply Run halves the frame and stocks two pads every time, deliberately.
+
+`test/pads.mjs` checks all of this as arithmetic over forty block hashes and
+forty minutes of round clock each, with no browser and no relay: no consecutive
+repeats, no starved pad, no metronome, and the fallback clock answered in
+microseconds. Each of those assertions has been watched to fail against a
+deliberately broken schedule.
 
 ### Which clock the wave runs on, and why it is not obvious
 
