@@ -912,7 +912,7 @@ function makeTank(): TankRig {
  * the one object on the board whose entire job is to be identified from across
  * the arena.
  */
-function pickupGeometry(kind: PickupKind): THREE.BufferGeometry {
+export function pickupGeometry(kind: PickupKind): THREE.BufferGeometry {
   // Sized so the silhouette survives the board camera. At 2.1 the shield read
   // as a coloured blob from the far end of The Lanes, which is the exact
   // failure the icons were added to fix.
@@ -1136,7 +1136,7 @@ export class Renderer {
    * Everything the board is made of, in one group.
    *
    * The layout changes every Bitcoin block now, so the scenery has to be
-   * throwable-away. Geometries are disposed on the way out — four boards an
+   * throwable-away. Geometries are disposed on the way out — six boards an
    * hour for as long as a tab stays open is exactly the shape of leak that
    * looks fine in a five-minute test.
    */
@@ -1555,6 +1555,16 @@ export class Renderer {
       this.you.ring.visible = false
       for (const part of this.you.domeParts) part.visible = false
       for (const pip of this.you.pips) pip.visible = false
+      // The reload bar belongs on this list and was missing from it, which is
+      // the "yellow box when I shoot" Puzz reported. It is an unlit `#ffc44d`
+      // box at the tank's own position with `depthTest: false`, so from inside
+      // the tank it is a few units from the near plane and painted over every
+      // other pixel — a flat orange square stuck to the screen for the whole
+      // 1.05s reload. Correct and useful from the board camera, meaningless
+      // from the hatch. `reload()` has already run this frame and turned it on,
+      // so this has to come after it. The cockpit says the same thing on the
+      // crosshair instead — see `paintCrosshair` in main.ts.
+      this.reloadBar.visible = false
     }
     // No `else`: `applyTank` runs before this every frame and has already put
     // every one of them back the way board view wants them.

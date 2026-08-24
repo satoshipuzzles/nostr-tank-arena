@@ -863,8 +863,23 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
   background: rgba(255, 255, 255, 0.82);
   box-shadow: 0 0 0 1px rgba(20, 26, 38, 0.72);
 }
-#crosshair i::before { top: -13px; }
-#crosshair i::after { bottom: -13px; }
+#crosshair i::before { top: calc(-13px - var(--bloom, 0px)); }
+#crosshair i::after { bottom: calc(-13px - var(--bloom, 0px)); }
+
+/* Reloading, from inside the tank.
+   The board camera answers "am I loaded" with a bar on the ground under the
+   health pips. From the hatch that bar is a flat orange square painted over
+   the whole view, so the cockpit answers the same question on the reticle: the
+   ring goes amber and the ticks bloom outward, closing back to rest as the gun
+   comes back. It is the one piece of HUD a shooter cannot afford to make you
+   look away for. */
+#crosshair.loading i {
+  border-color: rgba(255, 196, 77, 0.9);
+}
+#crosshair.loading i::before,
+#crosshair.loading i::after {
+  background: rgba(255, 196, 77, 0.9);
+}
 
 /* ---------------------------------------------------------- live games */
 

@@ -6,10 +6,11 @@ import { Game } from './game'
 import { Input, PLAYER_TWO, SOLO, type Scheme } from './input'
 import { TouchSticks } from './touch'
 
-import { DEFAULT_RELAYS, Identity, Net } from './nostr'
+import { DEFAULT_RELAYS, Identity, Net, mergeRelays } from './nostr'
 import { Renderer, type ViewMode } from './render'
 import type { ClockDirection } from './nostr'
 import { modifierForBlock } from './modifiers'
+import { RELOAD } from './sim'
 import { type Buffs, PICKUPS, type PickupKind, iconSvg } from './pickups'
 import { type Profile, Profiles, shortNpub } from './profiles'
 import {
@@ -166,7 +167,7 @@ const store = (k: string, v: string) => {
 
 nameInput.value = stored('tank.name') ?? ''
 roomInput.value = params.get('room') ?? stored('tank.room') ?? 'lobby'
-relayInput.value = (stored('tank.relays') ?? DEFAULT_RELAYS.join('\n')).trim()
+relayInput.value = mergeRelays(stored('tank.relays'), stored('tank.relays.offered')).join('\n')
 schemeInput.value = stored('tank.scheme') === 'tank' ? 'tank' : 'direct'
 playersInput.value = stored('tank.players') === '2' ? '2' : '1'
 
@@ -607,6 +608,10 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     store('tank.name', name)
     store('tank.room', room)
     store('tank.relays', relays.join('\n'))
+    // What this browser has now been shown. Saved alongside the list itself so
+    // a default added after today reaches this player on their next load
+    // instead of being locked out by their own saved copy — see `mergeRelays`.
+    store('tank.relays.offered', DEFAULT_RELAYS.join('\n'))
 
     // Hue seeded from the real pubkey. Game.spreadColors() snaps it to a
     // palette slot and resolves clashes with whoever else is in the room.
@@ -854,8 +859,42 @@ function loop(now = performance.now()): void {
   for (const p of players) p.game.update(dt, p.input.read(p.game.tank))
   const local = new Set(players.map((p) => p.game.identity.sessionPubkey))
   renderer.draw(players[0].game, local)
+  paintCrosshair(players[0].game, renderer.viewMode)
   drawHud(players[0].game)
   drawSecondPlayer(players[1] ?? null, now)
+}
+
+/**
+ * The cockpit's reload readout, on the reticle itself.
+ *
+ * Board view puts a bar on the ground under the health pips. That bar draws
+ * with `depthTest: false` at the tank's own position, so from inside the tank
+ * it is a flat orange square stuck over the middle of the screen — the bug
+ * Puzz reported as "a yellow box when shooting". The renderer hides it in
+ * cockpit now, and this replaces the information rather than dropping it.
+ *
+ * The ticks bloom outward and close back as the gun loads, which is the oldest
+ * reticle idiom there is and needs no legend. Painted from `loop` rather than
+ * `drawHud`, because the HUD repaints on a 120ms throttle and a reload is
+ * 1.05s — nine steps would read as a ratchet.
+ */
+const RELOAD_BLOOM = 9
+function paintCrosshair(game: Game, view: ViewMode): void {
+  const el = $('crosshair')
+  if (view !== 'cockpit') {
+    if (el.classList.contains('loading')) {
+      el.classList.remove('loading')
+      el.style.removeProperty('--bloom')
+    }
+    return
+  }
+  const remaining = game.tank.reloadAt - performance.now()
+  const loading = remaining > 0 && !game.tank.dead
+  el.classList.toggle('loading', loading)
+  // `frac` is how much of the reload is left, so the bloom is widest at the
+  // shot and zero at the moment the gun is ready.
+  const frac = loading ? Math.min(1, remaining / (RELOAD * 1000)) : 0
+  el.style.setProperty('--bloom', `${(frac * RELOAD_BLOOM).toFixed(1)}px`)
 }
 
 let hudAt = 0
