@@ -147,6 +147,42 @@ export const DEFAULT_RELAYS = [
   'wss://purplerelay.com',
 ]
 
+/**
+ * The relay list to put in the box, given what this browser last saved.
+ *
+ * A saved list has to win over the defaults — a player who deletes a relay
+ * means it. But it cannot win over a default they have never been shown, and
+ * that is exactly what shipped: `main.ts` writes the list on every start, so
+ * every returning player was pinned to whatever the defaults were the first
+ * time they pressed the button. coolfeed went out as the *first* default and
+ * three separate deploys later Puzz still could not see it, because his
+ * browser had the old three burned in and no code path could ever reach him.
+ *
+ * So the browser also remembers which defaults it has already offered. A
+ * default missing from `offered` is new since this browser last played and is
+ * merged in, ahead of the saved list because the defaults are ordered by
+ * measured delivery latency and a new one is only ever added for a reason. A
+ * default the player has seen and removed stays removed.
+ *
+ * With no `offered` at all — every browser that has played until now — nothing
+ * has been offered, so the whole default list merges in. That is the migration.
+ */
+export function mergeRelays(saved: string | null, offered: string | null): string[] {
+  const list = (saved ?? '')
+    .split(/\s+/)
+    .map((r) => r.trim())
+    .filter(Boolean)
+  if (!list.length) return [...DEFAULT_RELAYS]
+  const seen = new Set(
+    (offered ?? '')
+      .split(/\s+/)
+      .map((r) => r.trim())
+      .filter(Boolean),
+  )
+  const fresh = DEFAULT_RELAYS.filter((r) => !seen.has(r) && !list.includes(r))
+  return [...fresh, ...list]
+}
+
 declare global {
   interface Window {
     nostr?: {

@@ -18,9 +18,13 @@ When the tip moves:
 
 1. the round ends and a podium shows the standings,
 2. scores reset to zero,
-3. **the map changes** — the board is `blockHash % 4`, so every client
+3. **the map changes** — the board is `blockHash % 8`, so every client
    generates the same arena from the same number with no message passing at
-   all. Four boards ship: Crossroads, The Lanes, Pillars, The Ring.
+   all. Eight boards ship, and the size range is part of the variety:
+   Crossroads (1600x1200), The Lanes (2000x1400), Pillars (1950x1450),
+   The Ring (1900x1400), The Yard (1500x1100), The Quarry (2100x1550),
+   The Hedges (1800x1350) and The Depot (1700x1250). Every board is
+   180-degree rotationally symmetric, so no spawn is better than another.
 
 Publishing a result writes an addressable record whose `d` tag carries the
 block height, so there is one signed record per player per round, and a `t` tag
@@ -515,6 +519,27 @@ socket carrying the tick stream.
 (This line said `relay.damus.io`, `nos.lol`, `relay.primal.net` and
 `relay.nostr.band` long after the code had stopped agreeing — three of those
 four are measured below as unusable for a tick stream.)
+
+### A new default has to reach a browser that has already played
+
+The lobby saves your relay list to `localStorage` on every start and reads the
+saved list in preference to the defaults, because a relay you deleted should
+stay deleted. The consequence went unnoticed for a while and it is severe: the
+first match a browser ever plays pins its relay list *forever*. `coolfeed`
+shipped as the first default and the person who asked for it could not see it
+across three deploys, because his browser had the old three burned in and no
+code path could reach him. "It's in the bundle" was true and useless.
+
+So the browser also stores `tank.relays.offered` — the defaults it has already
+been shown. On load, `mergeRelays` puts any default missing from that record at
+the *front* of the saved list, because the defaults are ordered by measured
+delivery latency and a new one is only ever added for a reason. A default that
+has been offered and removed stays removed. A browser with no `offered` record
+at all has been offered nothing, so the whole default list merges in — that is
+the one-time migration for everyone who played before this shipped.
+
+`test/relay-list.mjs` drives a real browser with a stale list in storage. It
+fails against the previous code, which is the only reason to believe it.
 
 ### The axis nobody was measuring
 
