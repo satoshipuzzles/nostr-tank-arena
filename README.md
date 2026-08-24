@@ -508,13 +508,41 @@ and confirmed per action.
 
 ## Relays
 
-Defaults are `relay.primal.net`, `purplerelay.com`, `relay.mostr.pub` and
-`coolfeed.feeds.relay.tools`. Override them in the lobby under **Relays**.
+Defaults, fastest first, are `coolfeed.feeds.relay.tools`, `relay.mostr.pub`,
+`relay.primal.net` and `purplerelay.com`. Override them in the lobby under
+**Relays**. The order matters: `Net` walks the list in order, so first is the
+socket carrying the tick stream.
 (This line said `relay.damus.io`, `nos.lol`, `relay.primal.net` and
 `relay.nostr.band` long after the code had stopped agreeing — three of those
 four are measured below as unusable for a tick stream.)
 
-The fourth is deliberately a **different implementation**: the first three are
+### The axis nobody was measuring
+
+Everything below measures relays by *what they accept*. That is the question
+that gets you thrown off a relay and it is not the question a player feels.
+Sixty kind-21000 events at 10Hz, timing each publish from send to its `OK`:
+
+| relay | accepted | p50 | p95 |
+|-------|----------|-----|-----|
+| `coolfeed.feeds.relay.tools` | 60/60 | **64ms** | **69ms** |
+| `relay.mostr.pub` | 60/60 | 150ms | 224ms |
+| `relay.primal.net` | 60/60 | 189ms | 202ms |
+| `purplerelay.com` | 60/60 | 276ms | 1331ms |
+
+Every one accepted every event, which is exactly why the acceptance probes
+never found this: on the only axis being measured they are identical, and on
+the axis a player is looking at there is a factor of twenty between best and
+worst. A shell travels 430px/s, so purplerelay's tail is over half a board —
+the difference between leading a target and shooting where he used to be. It
+stays in the list because redundancy beats a tail on the fourth of four
+sockets, and it stays last for the same reason it is not worth more than that.
+
+With a control, before any of it was believed: five events per relay with a
+corrupted signature, and all four refused all five by name (`invalid: bad
+signature`). A latency table from a probe that cannot see a failure is a table
+of how fast something said nothing.
+
+The first entry is deliberately a **different implementation**: the first three are
 stock strfry, and `coolfeed.feeds.relay.tools` runs newlay 0.3.16. With a
 monoculture in front of the game, one vendor's behaviour quietly becomes the
 protocol as far as this client is concerned, and no test suite can tell you

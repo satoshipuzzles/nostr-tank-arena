@@ -110,15 +110,41 @@ import {
  * not a fault worth telling a player about while three other relays store it;
  * see `troubleSummary`.
  */
+/**
+ * Ordered by measured round-trip, fastest first, because `Net` walks this list
+ * in order and first is the socket carrying the tick stream.
+ *
+ * Everything in this file until now measured relays by *what they accept*.
+ * That is the question that gets you thrown off a relay, and it turns out not
+ * to be the question a player feels. Sixty kind-21000 events at 10Hz — six
+ * seconds of one tank's stream — timing each publish from send to its `OK`:
+ *
+ *   coolfeed.feeds.relay.tools   60/60   p50   64ms   p95    69ms
+ *   relay.mostr.pub              60/60   p50  150ms   p95   224ms
+ *   relay.primal.net             60/60   p50  189ms   p95   202ms
+ *   purplerelay.com              60/60   p50  276ms   p95  1331ms
+ *
+ * Every one of them accepted every event, which is why the acceptance probes
+ * never found this: on the only axis that was being measured they are
+ * identical, and on the axis a player is actually looking at there is a factor
+ * of twenty between the best and the worst. A shell travels 430px/s, so
+ * purplerelay's tail is over half a second of a board — the difference between
+ * leading a target and shooting where he used to be.
+ *
+ * purplerelay stays in the list rather than being cut, because redundancy is
+ * worth more than a tail on the fourth of four sockets, and it stays *last*
+ * for the same reason it is not worth more than that.
+ *
+ * The harness that produced these had a control before any of it was believed:
+ * five events per relay with a corrupted signature, which every relay refused
+ * by name. A latency table from a probe that cannot see a failure is a table
+ * of how fast something said nothing.
+ */
 export const DEFAULT_RELAYS = [
-  // First, on Puzz's instruction, and the ordering is not cosmetic: `Net`
-  // walks this list in order when it opens sockets and when it picks who to
-  // read from, so the relay with the highest published cap and an operator in
-  // the room should be the one carrying the tick stream.
   'wss://coolfeed.feeds.relay.tools',
+  'wss://relay.mostr.pub',
   'wss://relay.primal.net',
   'wss://purplerelay.com',
-  'wss://relay.mostr.pub',
 ]
 
 declare global {
