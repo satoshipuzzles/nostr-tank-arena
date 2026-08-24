@@ -53,6 +53,17 @@ const check = (name, ok, detail = '') => {
   if (!ok) failures.push(name)
 }
 const wait = (ms) => new Promise((r) => setTimeout(r, ms))
+/**
+ * Half a second of a 60fps match.
+ *
+ * Deliberately short. The old `wait(2600)` asked for 2.6 seconds and, starved
+ * of frames, delivered about 44px of travel — which is what the >40px
+ * thresholds below were tuned against. Ask for the 2.6 seconds in *frames* and
+ * the tank crosses 450px, which on a small board is a wall, and the reading
+ * becomes a measurement of the arena. 30 frames is 87px: comfortably over the
+ * threshold, close enough to the old distance that nothing downstream moves.
+ */
+const HOLD_FRAMES = 30
 const norm = (d) => ((d + 540) % 360) - 180
 
 const browser = await puppeteer.launch({ executablePath, headless: 'new', args: FLAGS })
@@ -114,11 +125,78 @@ try {
       180) /
     Math.PI
 
+  /**
+   * Run n animation frames in the page.
+   *
+   * Frames, never milliseconds. Under swiftshader on a loaded machine this page
+   * runs a long way under 60fps, so a fixed `wait(2600)` buys a handful of
+   * frames and every reading below becomes a measurement of the renderer rather
+   * than of the controls. It made this suite fail six of its own checks on an
+   * unmodified main — the tank really had only travelled 20px, because it had
+   * only been stepped a dozen times.
+   */
+  const frames = (n) =>
+    page.evaluate(
+      (k) =>
+        new Promise((res) => {
+          let i = 0
+          const tick = () => {
+            i += 1
+            if (i >= k) return res()
+            requestAnimationFrame(tick)
+          }
+          requestAnimationFrame(tick)
+        }),
+      n,
+    )
+
+  /** Wait until the gun has not moved across four consecutive frames. */
+  const gunSettled = (cap = 240) =>
+    page.evaluate(
+      (max) =>
+        new Promise((res) => {
+          let last = null
+          let still = 0
+          let seen = 0
+          const tick = () => {
+            const g = window.__game.tank.gun
+            if (last !== null && Math.abs(g - last) < 1e-4) still += 1
+            else still = 0
+            last = g
+            seen += 1
+            if (still >= 4 || seen >= max) return res(g)
+            requestAnimationFrame(tick)
+          }
+          requestAnimationFrame(tick)
+        }),
+      cap,
+    )
+
+  // Pin the board before anything is measured.
+  //
+  // The map is `blockHash % LAYOUTS.length` off the live chain tip, so without
+  // this every reading below is taken on whichever of eight arenas the last
+  // block happened to pick — and the parking spot stops being an open lane.
+  // While the holds were starved of frames the tank only crawled 44px and it
+  // never mattered; asking for real travel made it matter immediately, with
+  // "S drives down the screen" reading 54px against W's 254px. That is a wall,
+  // not a control. `05` is Straight Deathmatch, the trailing `05` is The
+  // Quarry — the emptiest board, chosen for exactly this.
+  await page.evaluate((t) => {
+    window.__clock.accept({ height: 999999, hash: 'ab'.repeat(30) + '0505', time: t })
+  }, Math.floor(Date.now() / 1000))
+  await frames(30)
+  const boardName = await page.evaluate(() => document.getElementById('hud-map')?.textContent)
+  check('the board is pinned to a known map', boardName === 'The Quarry', String(boardName))
+
+  // The middle of The Quarry, which has 300px of clear ground in all four
+  // directions — checked against the layout's cover list and its 180° mirror,
+  // not eyeballed.
   const park = (hull) =>
     page.evaluate((h) => {
       const g = window.__game
-      g.tank.x = 1400
-      g.tank.y = 1100
+      g.tank.x = 1050
+      g.tank.y = 775
       g.tank.hull = h
       g.tank.gun = h
       g.tank.dead = false
@@ -141,12 +219,12 @@ try {
   /** Hold a key for a beat and report how far and which way the tank went. */
   const holdKey = async (key, hull) => {
     await park(hull)
-    await wait(350)
+    await frames(12)
     const a = await page.evaluate(() => ({ ...window.__game.tank }))
     await page.keyboard.down(key)
-    await wait(2600)
+    await frames(HOLD_FRAMES)
     await page.keyboard.up(key)
-    await wait(150)
+    await frames(10)
     const b = await page.evaluate(() => ({ ...window.__game.tank }))
     const dx = b.x - a.x
     const dy = b.y - a.y
@@ -157,9 +235,9 @@ try {
   const holdPad = async (axes, hull, buttons) => {
     await park(hull)
     await setPad(axes, buttons)
-    await wait(350)
+    await frames(12)
     const a = await page.evaluate(() => ({ ...window.__game.tank }))
-    await wait(2600)
+    await frames(HOLD_FRAMES)
     const b = await page.evaluate(() => ({ ...window.__game.tank }))
     const dx = b.x - a.x
     const dy = b.y - a.y
@@ -231,7 +309,7 @@ try {
   // obvious way to overshoot it.
 
   await setPad([0, 0, 0, 0], undefined, newPad())
-  await wait(300)
+  await frames(20)
   const padDrive = await holdPad([0, -0.9, 0, 0], -Math.PI / 2)
   check(
     'a pushed left stick drives the tank',
@@ -242,7 +320,7 @@ try {
   // ...and it must still work on a pad that drifts, which is the whole point of
   // calibrating rather than just raising the threshold.
   await setPad([0.25, 0, 0, 0], undefined, newPad())
-  await wait(300)
+  await frames(20)
   const driftyDrive = await holdPad([0.25, -0.9, 0, 0], -Math.PI / 2)
   check(
     'a pushed stick works on a pad that also drifts',
@@ -252,7 +330,7 @@ try {
 
   await park(0)
   await setPad([0, 0, 0, 0], undefined, newPad())
-  await wait(300)
+  await frames(20)
   await setPad([0, 0, 0, 0], [1, 0, 0, 0, 0, 0, 0, 0]) // A button
   const padFire = await page.evaluate(async () => {
     const g = window.__game
@@ -266,7 +344,7 @@ try {
   // seen calibrates as its rest position, same as a stick, and needs one
   // release. That is the honest sequence.
   await setPad([0, 0, 0, 0], undefined, newPad())
-  await wait(300)
+  await frames(20)
   await setPad([0, 0, 0, 0], [0, 0, 0, 0, 0, 0, 0, 0.9]) // trigger, pushed
   const triggerFire = await page.evaluate(async () => {
     const g = window.__game
@@ -278,10 +356,9 @@ try {
   // The right stick aims. Push it and the gun should come round to match.
   await park(0)
   await setPad([0, 0, 0, 0], undefined, newPad())
-  await wait(300)
+  await frames(20)
   await setPad([0, 0, 0, 0.9], [0, 0, 0, 0, 0, 0, 0, 0])
-  await wait(2600)
-  const gun = await page.evaluate(() => window.__game.tank.gun)
+  const gun = await gunSettled()
   check(
     'the right stick aims the gun',
     Math.abs(norm((gun * 180) / Math.PI - 90)) < 25,
@@ -313,10 +390,10 @@ try {
       { h: (hullDeg * Math.PI) / 180, g: (gunDeg * Math.PI) / 180 },
     )
     await setPad([0, 0, 0, 0], undefined, newPad())
-    await wait(300)
+    await frames(20)
     // Straight up the glass.
     await setPad([0, 0, 0, -0.9], [0, 0, 0, 0, 0, 0, 0, 0])
-    await wait(2600)
+    await gunSettled()
     return page.evaluate(() => (window.__game.tank.gun * 180) / Math.PI)
   }
 
