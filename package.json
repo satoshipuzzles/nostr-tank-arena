@@ -17,7 +17,8 @@
     "test:mobile": "node test/mobile.mjs",
     "test:board": "node test/board.mjs",
     "test:lobby": "node test/lobby.mjs",
-    "test:pads": "node test/pads.mjs"
+    "test:pads": "node test/pads.mjs",
+    "test:aim": "node test/aim.mjs"
   },
   "dependencies": {
     "nostr-tools": "^2.10.4",
