@@ -74,10 +74,47 @@ import {
  * it is no evidence at all, and it was enough to acquit three relays that had
  * read the timestamp and named the same fault.
  */
+/**
+ * The fourth one is a different implementation, and that is the whole reason.
+ *
+ * The three above are stock strfry. cowboy's argument for adding a second
+ * implementation is the one that changed my mind, and it is not about capacity:
+ * with a monoculture in front of the game, one vendor's behaviour silently
+ * becomes the protocol as far as this client is concerned, and nothing in the
+ * test suite can tell you which of your assumptions those are. The first time
+ * anybody checked a second implementation, a premise the newest fix rested on
+ * broke — newlay flushes a subscription's live buffer *before* `EOSE`, so a
+ * shell fired at you while you were joining arrives on the stored side of the
+ * boundary, where `onEvent` drops it as history.
+ *
+ * `wss://coolfeed.feeds.relay.tools` runs newlay 0.3.16. Measured today with
+ * the usual two sockets — one publishing, one reading — plus twenty events with
+ * a corrupted signature as a control, because a probe that cannot see a
+ * rejection makes every clean number meaningless:
+ *
+ *   control: corrupt signature   sent 20  ok  0  refused 20   invalid: bad signature
+ *   21000 tick, no auth          sent 20  ok 20  refused  0   received 20
+ *   30078 score, no auth         sent 20  ok  0  refused 20   restricted: web of trust
+ *   21000 into the store pass    sent 20  ok 20  refused  0   received 20, 0 pre-EOSE
+ *
+ * Two things worth carrying forward from that. The relay advertised
+ * `auth_required: true` on the 22nd and does not today, so read access is open
+ * — do not take either state on faith, the operator is actively tuning it.
+ * And 0 of 20 pre-EOSE is *not* a refutation of the flush above: ephemeral
+ * kinds skip newlay's store entirely, so the scan behind a live filter returns
+ * instantly and the window is a thread hop wide. It is a race that was not won,
+ * not a race that is not there, which is exactly what `storedFresh` is for.
+ *
+ * The score kind stays refused here and always will — the gate is a follow
+ * graph and a guest's session key is followed by nobody. That is fine and it is
+ * not a fault worth telling a player about while three other relays store it;
+ * see `troubleSummary`.
+ */
 export const DEFAULT_RELAYS = [
   'wss://relay.primal.net',
   'wss://purplerelay.com',
   'wss://relay.mostr.pub',
+  'wss://coolfeed.feeds.relay.tools',
 ]
 
 declare global {

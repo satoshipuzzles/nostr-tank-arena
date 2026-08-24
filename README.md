@@ -508,8 +508,28 @@ and confirmed per action.
 
 ## Relays
 
-Defaults are `relay.damus.io`, `nos.lol`, `relay.primal.net`, `relay.nostr.band`.
-Override them in the lobby under **Relays**.
+Defaults are `relay.primal.net`, `purplerelay.com`, `relay.mostr.pub` and
+`coolfeed.feeds.relay.tools`. Override them in the lobby under **Relays**.
+(This line said `relay.damus.io`, `nos.lol`, `relay.primal.net` and
+`relay.nostr.band` long after the code had stopped agreeing — three of those
+four are measured below as unusable for a tick stream.)
+
+The fourth is deliberately a **different implementation**: the first three are
+stock strfry, and `coolfeed.feeds.relay.tools` runs newlay 0.3.16. With a
+monoculture in front of the game, one vendor's behaviour quietly becomes the
+protocol as far as this client is concerned, and no test suite can tell you
+which of your assumptions those are. The first time anybody checked a second
+implementation, a premise the newest fix rested on broke — newlay flushes a
+subscription's live buffer *before* `EOSE`.
+
+Verified unauthenticated in both directions before it went in the list, with
+two sockets, because an `OK` is only worth what a separate subscriber can see:
+one socket subscribed to a fresh room tag, a second published a kind 21000 into
+it, and the first received it. Its NIP-11 reports `publishing_rate_limit: 1200`
+per minute, which is twenty a second against a tick stream of ten. Kind 30078
+score records are refused there — the gate is a follow graph and a guest's
+session key is followed by nobody — which costs nothing while three other
+relays store them, and the HUD deliberately stays quiet about it.
 
 Honest warning: public relays rate-limit, and a busy one will drop tick events
 and make tanks stutter. A relay you control on a machine near your players will
