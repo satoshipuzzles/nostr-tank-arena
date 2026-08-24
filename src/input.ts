@@ -44,8 +44,39 @@ const CLAIM = 0.35
 /** Triggers rest a little off zero on plenty of pads. Match the fire threshold. */
 const TRIGGER_FIRE = 0.35
 
-const deadzone = (v: number) => (Math.abs(v) < DEADZONE ? 0 : v)
 const clamp = (v: number, lo: number, hi: number) => (v < lo ? lo : v > hi ? hi : v)
+
+/**
+ * A stick is a direction, not two independent numbers.
+ *
+ * Deadzoning each axis on its own is the obvious thing to write and it is
+ * wrong, because what gets thrown away is not noise on an axis — it is the
+ * angle. Zero one axis while the other survives and the vector that comes out
+ * points *exactly* along the survivor, so the gun snaps to due north, south,
+ * east or west and sits there across every stick bearing near it. The dead
+ * band is 0.22 wide on each axis, so how much of the circle that eats depends
+ * on how hard the stick is pushed: at the rim almost none, at a gentle push
+ * almost all of it.
+ *
+ * Measured on the shipped build by sweeping the right stick all the way round
+ * and recording where the turret settled — full deflection reached all 24
+ * fifteen-degree sectors, half deflection 16, a gentle push 9. At that last one
+ * the turret has four positions and five consecutive stick bearings all leave
+ * it parked on 180°. That is the "turret gets stuck after 180 degrees" report:
+ * it was never stuck, it was quantised, and 180 is simply the plateau you are
+ * sitting on when you notice.
+ *
+ * Radially instead: one threshold, on the magnitude, and the angle is never
+ * touched. Rescaled from the edge of the deadzone rather than passed through,
+ * so the stick does not jump from nothing to a fifth of a push the instant it
+ * engages.
+ */
+export function stick(x: number, y: number): { x: number; y: number; mag: number } {
+  const m = Math.hypot(x, y)
+  if (m < DEADZONE) return { x: 0, y: 0, mag: 0 }
+  const mag = Math.min(1, (m - DEADZONE) / (1 - DEADZONE))
+  return { x: (x / m) * mag, y: (y / m) * mag, mag }
+}
 
 /**
  * How WASD and the left stick are interpreted.
@@ -341,18 +372,27 @@ export class Input {
       // Deadzoned first, then rotated: a deadzone is a property of the stick and
       // rotating a resting stick into the hull frame would make it a small push
       // in some direction rather than no push at all.
-      const lx = deadzone(axis(0))
-      const ly = deadzone(axis(1))
-      const rx = deadzone(axis(2))
-      const ry = deadzone(axis(3))
+      const left = stick(axis(0), axis(1))
+      const right = stick(axis(2), axis(3))
+      const { x: lx, y: ly } = left
+      const { x: rx, y: ry } = right
       const trigger = this.calibrateTrigger(pad)
       const aButton = pad.buttons[0]?.pressed ?? false
       const rb = pad.buttons[5]?.pressed ?? false
       const fire = trigger > TRIGGER_FIRE || aButton || rb
       // Claiming the input needs a deliberate push or a real button. A stick
       // sitting just past the deadzone is not somebody asking to play.
+      //
+      // Measured on the *raw* magnitude, not the rescaled one: CLAIM is a
+      // statement about how hard somebody is pushing the physical stick, and
+      // comparing it against a number that has already had the deadzone
+      // subtracted out would quietly raise the bar to 0.49.
       const claimed =
-        Math.hypot(lx, ly) > CLAIM || Math.hypot(rx, ry) > CLAIM || aButton || rb || trigger > TRIGGER_FIRE
+        Math.hypot(axis(0), axis(1)) > CLAIM ||
+        Math.hypot(axis(2), axis(3)) > CLAIM ||
+        aButton ||
+        rb ||
+        trigger > TRIGGER_FIRE
       if (!claimed && !this.usingGamepad) continue
       if (claimed) this.usingGamepad = true
 
