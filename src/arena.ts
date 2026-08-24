@@ -14,12 +14,52 @@
 // anything being passed around. `WALLS`, `SPAWNS` and `PADS` are mutated in
 // place for the same reason.
 
+/**
+ * What a piece of cover is made of.
+ *
+ * Not decoration, and not colour-coding wearing a costume. Four players
+ * shouting at one television need to be able to *name* a place, and the
+ * material is the name: "behind the crates", "the far hedge", "the boulder in
+ * the middle". The board used to do this job with pastel paint — a pink cross,
+ * yellow pillars, blue corner Ls — which named things by a property the eye
+ * has to compare against the tanks, and the tanks are the six most saturated
+ * things on the board. A stack of timber crates is legible next to a cyan
+ * tank in a way that a yellow block is not.
+ *
+ * `fence` is the board's outer ring and is generated, never authored.
+ */
+export type CoverKind = 'rock' | 'crate' | 'barrel' | 'sandbag' | 'hedge' | 'fence'
+
 export interface Rect {
   x: number
   y: number
   w: number
   h: number
+  /** Absent on the generated fence pieces until `ring` stamps them. */
+  kind?: CoverKind
 }
+
+/**
+ * Barricades: a tank is stopped, a shell goes over.
+ *
+ * The one piece of this pass that is a rules change rather than a paint job,
+ * and it is deliberately a single kind rather than a height field. Sandbags
+ * channel where tanks can drive without creating anywhere to hide, which turns
+ * the middle of Crossroads from a wall you circle into a line you duel across.
+ *
+ * It is safe on the wire for the same reason the map is: cover comes from the
+ * layout, the layout comes from the block hash, and two clients that agree on
+ * the tip agree on which rects are low. Nothing about it is derived locally.
+ *
+ * The flip side, and it is in the README too: standing behind sandbags does
+ * nothing for you. They are a movement obstacle, not cover, and a player who
+ * expects otherwise learns it the hard way. Naming them after the one thing
+ * on a battlefield you actually can shoot over is the best signpost available.
+ */
+const LOW_KINDS: ReadonlySet<CoverKind> = new Set<CoverKind>(['sandbag'])
+
+/** True if shells pass over this rect. Tanks are stopped by it regardless. */
+export const isLow = (r: Rect): boolean => r.kind !== undefined && LOW_KINDS.has(r.kind)
 
 export interface Pt {
   x: number
@@ -30,10 +70,10 @@ const BORDER = 24
 
 /** The outer fence, sized to the board. */
 const ring = (w: number, h: number): Rect[] => [
-  { x: 0, y: 0, w, h: BORDER },
-  { x: 0, y: h - BORDER, w, h: BORDER },
-  { x: 0, y: 0, w: BORDER, h },
-  { x: w - BORDER, y: 0, w: BORDER, h },
+  { x: 0, y: 0, w, h: BORDER, kind: 'fence' },
+  { x: 0, y: h - BORDER, w, h: BORDER, kind: 'fence' },
+  { x: 0, y: 0, w: BORDER, h, kind: 'fence' },
+  { x: w - BORDER, y: 0, w: BORDER, h, kind: 'fence' },
 ]
 
 /** Mirror through the centre, which is what makes a board fair. */
@@ -42,6 +82,10 @@ const flip = (r: Rect, w: number, h: number): Rect => ({
   y: h - r.y - r.h,
   w: r.w,
   h: r.h,
+  // Carried, not dropped. Symmetry is what makes a board fair, and a mirrored
+  // rect that came back a different material would be a rect shells treat
+  // differently on one half of the board than the other.
+  kind: r.kind,
 })
 
 const flipPt = (p: Pt, w: number, h: number): Pt => ({ x: w - p.x, y: h - p.y })
@@ -77,14 +121,18 @@ export const LAYOUTS: LayoutSpec[] = [
     name: 'Crossroads',
     w: 1600,
     h: 1200,
+    // The cross in the middle is sandbags, which is the biggest single change
+    // to how this board plays: it used to be the wall everybody circled, and
+    // now it is a line four tanks can shoot across and none of them can drive
+    // through. The corner cover stays solid so there is still somewhere to go.
     cover: (w, h) => [
-      { x: w / 2 - 150, y: h / 2 - 24, w: 150, h: 48 },
-      { x: w / 2 - 24, y: h / 2 - 150, w: 48, h: 150 },
-      { x: 300, y: 240, w: 220, h: 48 },
-      { x: 300, y: 240, w: 48, h: 220 },
-      { x: 1080, y: 240, w: 220, h: 48 },
-      { x: 1252, y: 240, w: 48, h: 220 },
-      { x: 760, y: 300, w: 80, h: 80 },
+      { x: w / 2 - 150, y: h / 2 - 24, w: 150, h: 48, kind: 'sandbag' },
+      { x: w / 2 - 24, y: h / 2 - 150, w: 48, h: 150, kind: 'sandbag' },
+      { x: 300, y: 240, w: 220, h: 48, kind: 'crate' },
+      { x: 300, y: 240, w: 48, h: 220, kind: 'crate' },
+      { x: 1080, y: 240, w: 220, h: 48, kind: 'hedge' },
+      { x: 1252, y: 240, w: 48, h: 220, kind: 'hedge' },
+      { x: 760, y: 300, w: 80, h: 80, kind: 'rock' },
     ],
     spawns: corners,
     pads: (w, h) => [
@@ -97,12 +145,15 @@ export const LAYOUTS: LayoutSpec[] = [
     name: 'The Lanes',
     w: 2000,
     h: 1400,
+    // Long hedgerows make the lanes read as lanes from the board camera, where
+    // two 520-unit walls of the same grey are just a corridor you can get lost
+    // in. The boulder at 880 is the one landmark on the way through.
     cover: (w, h) => [
-      { x: 300, y: 430, w: 520, h: 48 },
-      { x: 300, y: 730, w: 520, h: 48 },
-      { x: 880, y: 160, w: 48, h: 380 },
-      { x: w / 2 - 110, y: h / 2 - 24, w: 110, h: 48 },
-      { x: 1180, y: 430, w: 220, h: 48 },
+      { x: 300, y: 430, w: 520, h: 48, kind: 'hedge' },
+      { x: 300, y: 730, w: 520, h: 48, kind: 'hedge' },
+      { x: 880, y: 160, w: 48, h: 380, kind: 'rock' },
+      { x: w / 2 - 110, y: h / 2 - 24, w: 110, h: 48, kind: 'sandbag' },
+      { x: 1180, y: 430, w: 220, h: 48, kind: 'crate' },
     ],
     spawns: corners,
     pads: (w, h) => [
@@ -115,14 +166,18 @@ export const LAYOUTS: LayoutSpec[] = [
     name: 'Pillars',
     w: 1950,
     h: 1450,
+    // Seven identical squares was the board that needed this most: from the
+    // board camera it was a grid of blocks with nothing to call any of them.
+    // Same seven footprints, three different things standing on them, and the
+    // fight over the middle now happens at "the barrels".
     cover: () => [
-      { x: 330, y: 300, w: 104, h: 104 },
-      { x: 700, y: 300, w: 104, h: 104 },
-      { x: 330, y: 640, w: 104, h: 104 },
-      { x: 700, y: 640, w: 104, h: 104 },
-      { x: 1070, y: 300, w: 104, h: 104 },
-      { x: 515, y: 470, w: 104, h: 104 },
-      { x: 885, y: 470, w: 104, h: 104 },
+      { x: 330, y: 300, w: 104, h: 104, kind: 'rock' },
+      { x: 700, y: 300, w: 104, h: 104, kind: 'crate' },
+      { x: 330, y: 640, w: 104, h: 104, kind: 'rock' },
+      { x: 700, y: 640, w: 104, h: 104, kind: 'barrel' },
+      { x: 1070, y: 300, w: 104, h: 104, kind: 'rock' },
+      { x: 515, y: 470, w: 104, h: 104, kind: 'barrel' },
+      { x: 885, y: 470, w: 104, h: 104, kind: 'crate' },
     ],
     spawns: corners,
     // Not the exact centre: this board is 180-degree symmetric, so a pad on
@@ -138,11 +193,15 @@ export const LAYOUTS: LayoutSpec[] = [
     name: 'The Ring',
     w: 1900,
     h: 1400,
+    // The long arm is the barricade here rather than the middle, because this
+    // board spawns two players on the short edges facing each other down the
+    // centre line and a wall across it made that opening thirty seconds of
+    // driving. Now it is a shot.
     cover: (w, h) => [
-      { x: 520, y: 380, w: 420, h: 48 },
-      { x: 520, y: 380, w: 48, h: 260 },
-      { x: w - 568, y: 380, w: 48, h: 260 },
-      { x: w / 2 - 70, y: h / 2 - 70, w: 140, h: 140 },
+      { x: 520, y: 380, w: 420, h: 48, kind: 'sandbag' },
+      { x: 520, y: 380, w: 48, h: 260, kind: 'hedge' },
+      { x: w - 568, y: 380, w: 48, h: 260, kind: 'crate' },
+      { x: w / 2 - 70, y: h / 2 - 70, w: 140, h: 140, kind: 'rock' },
     ],
     spawns: (w, h) => [
       { x: 190, y: h / 2 },
@@ -266,6 +325,12 @@ export function resolveCircle(pos: { x: number; y: number }, radius: number): vo
   }
 }
 
+/**
+ * What stops a *tank* here, if anything. Every rect does, barricades included.
+ *
+ * Still the predicate `resolveCircle` is built on, and still the one a test
+ * asking "is this pad inside the scenery" wants.
+ */
 export function pointInWall(x: number, y: number): Rect | null {
   for (const w of WALLS) {
     if (x >= w.x && x <= w.x + w.w && y >= w.y && y <= w.y + w.h) return w
@@ -273,12 +338,35 @@ export function pointInWall(x: number, y: number): Rect | null {
   return null
 }
 
-/** True if a straight line between two points is unobstructed. Used for spawn picking. */
+/**
+ * What stops a *shell*. The same rects minus the barricades.
+ *
+ * Two predicates rather than a height on the rect because there are exactly
+ * two questions anything in this game asks, and a number invites a third that
+ * nobody has designed. Whoever adds a genuinely half-height wall later should
+ * pay for the height field then.
+ */
+export function pointInTallWall(x: number, y: number): Rect | null {
+  for (const w of WALLS) {
+    if (isLow(w)) continue
+    if (x >= w.x && x <= w.x + w.w && y >= w.y && y <= w.y + w.h) return w
+  }
+  return null
+}
+
+/**
+ * True if a straight line between two points is unobstructed. Used for spawn picking.
+ *
+ * Deliberately the tall predicate: the question this answers is "can that
+ * player shoot me the instant I appear", and a sandbag line does not stop a
+ * shell. Spawning behind a barricade in someone's sights is exactly the spawn
+ * this function exists to avoid picking.
+ */
 export function hasLineOfSight(ax: number, ay: number, bx: number, by: number): boolean {
   const steps = Math.ceil(Math.hypot(bx - ax, by - ay) / 16)
   for (let i = 1; i < steps; i++) {
     const t = i / steps
-    if (pointInWall(ax + (bx - ax) * t, ay + (by - ay) * t)) return false
+    if (pointInTallWall(ax + (bx - ax) * t, ay + (by - ay) * t)) return false
   }
   return true
 }

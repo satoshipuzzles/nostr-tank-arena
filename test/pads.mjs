@@ -40,7 +40,10 @@ const check = (ok, label, detail = '') => {
   }
 }
 
-const { LAYOUTS, PADS, setLayout, pointInWall, scheduleFor, DEFAULT_WAVES, PICKUP_LINGER } = arena
+const {
+  LAYOUTS, PADS, WALLS, setLayout, pointInWall, pointInTallWall, isLow,
+  hasLineOfSight, spawnShell, stepShell, scheduleFor, DEFAULT_WAVES, PICKUP_LINGER,
+} = arena
 
 // Deterministic block hashes. Real ones, in shape: 64 lowercase hex digits.
 const hashes = []
@@ -52,6 +55,91 @@ for (let i = 0; i < 40; i++) {
     h += x.toString(16).padStart(8, '0')
   }
   hashes.push(h.slice(0, 64))
+}
+
+// --------------------------------------------------------------- barricades
+//
+// Sandbags stop a tank and not a shell, which is the one thing in this pass
+// that changes what happens rather than what it looks like. Three separate
+// claims, and each is checked against a board that actually has barricades on
+// it rather than against a hand-built rect, because the interesting failure is
+// a layout that forgot to say `kind` at all.
+
+console.log('\nbarricades')
+{
+  // Crossroads. Its centre cross is the barricade this exists for.
+  setLayout(0)
+  const low = WALLS.filter(isLow)
+  const tall = WALLS.filter((w) => !isLow(w))
+  check(low.length >= 2, 'a board with barricades on it exists to test', `${low.length} low rects`)
+  check(tall.length > low.length, 'and most cover is still solid', `${tall.length} tall`)
+  check(
+    WALLS.every((w) => typeof w.kind === 'string'),
+    'every rect on the board says what it is made of',
+    JSON.stringify(WALLS.filter((w) => !w.kind)),
+  )
+
+  const bar = low[0]
+  const cx = bar.x + bar.w / 2
+  const cy = bar.y + bar.h / 2
+
+  // The two predicates have to disagree about this point, or nothing below
+  // means anything — a green run against `pointInTallWall === pointInWall`
+  // would be green for the wrong reason.
+  check(pointInWall(cx, cy) !== null, 'a tank is stopped by the middle of a barricade')
+  check(pointInTallWall(cx, cy) === null, 'a shell is not')
+
+  // Drive the real shell integrator through it, rather than asserting on the
+  // predicate that the integrator happens to call. Fired from one side, far
+  // enough back that it is travelling at speed when it arrives.
+  const across = bar.w >= bar.h ? Math.PI / 2 : 0
+  const startX = bar.w >= bar.h ? cx : bar.x - 90
+  const startY = bar.w >= bar.h ? bar.y - 90 : cy
+  const shell = spawnShell('t', 'test', startX, startY, across)
+  for (let i = 0; i < 60 && !shell.dead; i++) stepShell(shell, 1 / 60)
+  const past = bar.w >= bar.h ? shell.y > bar.y + bar.h : shell.x > bar.x + bar.w
+  check(!shell.dead && shell.bounces === 0, 'a shell crosses a barricade without bouncing', `bounces ${shell.bounces}, dead ${shell.dead}`)
+  check(past, 'and comes out the far side', `at ${Math.round(shell.x)},${Math.round(shell.y)}`)
+
+  // The control. The same shot at a solid piece of cover has to bounce, or the
+  // test above is only proving that this shell never hits anything.
+  const solid = tall.find((w) => w.kind !== 'fence' && Math.min(w.w, w.h) >= 40)
+  const sx = solid.x + solid.w / 2
+  const sy = solid.y + solid.h / 2
+  const dir = solid.w >= solid.h ? Math.PI / 2 : 0
+  const from = solid.w >= solid.h ? [sx, solid.y - 90] : [solid.x - 90, sy]
+  const control = spawnShell('c', 'test', from[0], from[1], dir)
+  for (let i = 0; i < 60 && !control.dead; i++) stepShell(control, 1 / 60)
+  check(control.bounces > 0 || control.dead, 'the same shot at solid cover does not', `bounces ${control.bounces}, dead ${control.dead}`)
+
+  // Spawn safety reads the same way a shell does. A sight line that only
+  // crosses barricades is not blocked.
+  const a = bar.w >= bar.h ? [cx, bar.y - 120] : [bar.x - 120, cy]
+  const c = bar.w >= bar.h ? [cx, bar.y + bar.h + 120] : [bar.x + bar.w + 120, cy]
+  check(hasLineOfSight(a[0], a[1], c[0], c[1]), 'spawn picking can see through a barricade')
+  const s2 = solid.w >= solid.h ? [sx, solid.y - 120] : [solid.x - 120, sy]
+  const e2 = solid.w >= solid.h ? [sx, solid.y + solid.h + 120] : [solid.x + solid.w + 120, sy]
+  check(!hasLineOfSight(s2[0], s2[1], e2[0], e2[1]), '...and cannot see through solid cover')
+
+  // Mirroring carries the material through. A board where one half of a
+  // symmetric pair is low and the other is not is unfair in the worst way:
+  // invisibly, and only to whoever spawned on the wrong side.
+  for (let li = 0; li < LAYOUTS.length; li++) {
+    setLayout(li)
+    const name = LAYOUTS[li].name
+    // Live bindings: `setLayout` reassigns these, so read them each time.
+    const w = arena.ARENA_W
+    const h = arena.ARENA_H
+    const kindAt = new Map()
+    for (const r of WALLS) kindAt.set(`${r.x},${r.y},${r.w},${r.h}`, r.kind)
+    let mismatch = null
+    for (const r of WALLS) {
+      const key = `${w - r.x - r.w},${h - r.y - r.h},${r.w},${r.h}`
+      const other = kindAt.get(key)
+      if (other !== undefined && other !== r.kind) mismatch = `${r.kind} vs ${other}`
+    }
+    check(!mismatch, `${name}: mirrored cover is made of the same thing`, mismatch ?? '')
+  }
 }
 
 console.log('\nboard geometry')

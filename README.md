@@ -4,7 +4,8 @@ Four-player tank deathmatch on a board, with **no game server**. Your npub is
 your identity, Nostr relays are the netcode, and your score is an event you
 signed yourself.
 
-Slow shells, 3 hits to kill, cover you can hide behind, instant respawn.
+Slow shells, 3 hits to kill, cover you can hide behind, sandbags you can
+shoot over but not drive through, instant respawn.
 
 ## Rounds are Bitcoin blocks
 
@@ -76,6 +77,58 @@ Two things worth knowing:
 
 WebGL is now required. A browser that cannot open a context says so in words
 rather than failing into a black screen.
+
+### Cover is made of something
+
+Every piece of cover has a `kind` in `arena.ts` — `rock`, `crate`, `barrel`,
+`sandbag`, `hedge` — and the renderer builds the matching object: a faceted
+outcrop with scree round the base, a stack of timber crates, a cluster of oil
+drums with rolling hoops, a clipped hedgerow with a ragged top.
+
+It replaced a scheme where the renderer *measured* each rectangle and painted
+it: near the middle meant a pink cross, square meant a yellow pillar, anything
+else was a blue L. That was a legibility feature and it worked — four people
+shouting at one television need to be able to name a place. Naming it by
+material works better, because "behind the crates" survives a player who is
+colour-blind, a phone with the brightness down, and a green tank parked in
+front of a green wall. It also puts a board's identity in the layout, where a
+level designer can reach it, instead of in a chain of `if` statements about
+rectangle dimensions.
+
+The palette went with it. The old board was pastel — mini-golf green turf, a
+swimming-pool sky, a cream plastic slab — on the argument that saturated tanks
+need desaturated scenery. The argument is right and pastels are a poor way to
+act on it, because a pastel is a saturated hue with white mixed in and still
+competes for the same corner of the wheel. Earth pigments do not: real turf
+greens with worn patches, dry earth under the board, granite, timber, hessian,
+and a sky that goes warm at the horizon into fog of the same colour, so the far
+end of a 2000-unit board dissolves instead of stopping.
+
+### Sandbags: shells go over, tanks do not
+
+One kind is a rules change rather than a paint job. `pointInWall` is what stops
+a *tank* and every rect answers to it; `pointInTallWall` is what stops a
+*shell*, and barricades are excluded from it. The centre cross on Crossroads
+and the long arm on The Ring are sandbags, which turns the middle of both
+boards from a wall you circle into a line four tanks can duel across.
+
+Two consequences worth stating plainly:
+
+- **Standing behind sandbags does nothing for you.** They are a movement
+  obstacle, not cover. Naming them after the one thing on a battlefield you
+  actually can shoot over is the best signpost the game has.
+- **Spawn picking treats them as open ground.** `hasLineOfSight` uses the tall
+  predicate, because the question it answers is "can that player shoot me the
+  instant I appear", and a sandbag line does not stop a shell.
+
+It is safe on the wire for the same reason the map is. Which rects are low
+comes from the layout, the layout comes from the block hash, and two clients
+that agree on the tip agree on the geometry — a shell being re-simulated on
+four machines is still a pure function of `(x, y, angle, t)`. Nothing about it
+is derived from a local clock or a local guess. Two predicates rather than a
+height field on the rect, because there are exactly two questions anything in
+this game asks; whoever wants a genuinely half-height wall can pay for the
+third then.
 
 ## Why tanks and not an arena FPS
 
