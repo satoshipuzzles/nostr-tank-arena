@@ -352,6 +352,22 @@ try {
   // player two keeps the id in `claimed` and re-marks the pad on every rebuild.
   // The pad ends up dead for both people, in two different ways, on the one
   // screen where you can see both.
+  // Wait for a wave rather than hoping one is up. Pickups land inside a 52s
+  // frame and the board is empty most of it, so this check failed as "no free
+  // pad to test with" on whichever runs happened to land in the gap — a window
+  // that cannot contain the behaviour cannot report on it, and a harness that
+  // reports a real bug and an unlucky moment with the same red line is worse
+  // than one that waits.
+  const padDeadline = Date.now() + 120_000
+  while (Date.now() < padDeadline) {
+    const ready = await page.evaluate(() => {
+      const g = window.__players[0].game
+      return [...g.pickups.values()].some((p) => !p.taken && !g.spent.has(p.id))
+    })
+    if (ready) break
+    await new Promise((r) => setTimeout(r, 1000))
+  }
+
   const rollback = await page.evaluate(async () => {
     const [one, two] = window.__players
     const g = one.game
