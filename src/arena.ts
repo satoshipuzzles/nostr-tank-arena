@@ -109,12 +109,17 @@ const corners = (w: number, h: number): Pt[] => [
 ]
 
 /**
- * Four boards, three of them bigger than the original.
+ * Eight boards, and the size range is as much of the variety as the shapes are.
  *
- * Size is part of the variety: 1600x1200 is a knife fight with four players in
- * it, and 2000x1500 gives you somewhere to go. Every board is 180-degree
- * rotationally symmetric, because with a round that lasts a whole block an
- * unfair spawn is not something anyone can play around.
+ * 1500x1100 is a knife fight with four players in it; 2100x1550 gives you
+ * somewhere to go and three seconds to watch somebody come and get you. Every
+ * board is 180-degree rotationally symmetric, because with a round that lasts a
+ * whole block an unfair spawn is not something anyone can play around.
+ *
+ * Eight rather than four because the map comes off the block hash and nothing
+ * else: at four, a given board turns up every other block or so and an evening
+ * is mostly two arenas. `layoutForBlock` takes the count from this array's
+ * length, so adding a board here is the whole change.
  */
 export const LAYOUTS: LayoutSpec[] = [
   {
@@ -213,6 +218,102 @@ export const LAYOUTS: LayoutSpec[] = [
       { x: w / 2, y: 300 },
       { x: 330, y: 330 },
       { x: 640, y: 700 },
+    ],
+  },
+  {
+    name: 'The Yard',
+    w: 1500,
+    h: 1100,
+    // The small one. Four tanks on 1500x1100 is a knife fight, and the cover is
+    // stacked close enough that most exchanges start inside one reload — which
+    // is the point, because the four boards above it all reward driving and
+    // none of them reward standing still. The sandbag line through the middle
+    // is the only long shot on the board and everybody can take it at once.
+    cover: () => [
+      { x: 250, y: 250, w: 180, h: 48, kind: 'crate' },
+      { x: 250, y: 250, w: 48, h: 180, kind: 'crate' },
+      { x: 620, y: 170, w: 48, h: 230, kind: 'crate' },
+      { x: 380, y: 500, w: 260, h: 48, kind: 'sandbag' },
+      { x: 880, y: 430, w: 130, h: 48, kind: 'barrel' },
+      { x: 1120, y: 620, w: 110, h: 110, kind: 'rock' },
+    ],
+    spawns: corners,
+    pads: (w, h) => [
+      { x: w / 2, y: 150 },
+      { x: 170, y: h / 2 },
+      { x: 760, y: 720 },
+    ],
+  },
+  {
+    name: 'The Quarry',
+    w: 2100,
+    h: 1550,
+    // The big one, and deliberately the emptiest. Two boulders, a spine of
+    // rock, and a great deal of nothing — a board where you can see somebody
+    // coming for three seconds before they arrive, which is a completely
+    // different game from The Yard and worth having in the rotation for that
+    // alone. The sandbag runs are the only way to break a sight line without
+    // going all the way around a boulder.
+    cover: () => [
+      { x: 380, y: 300, w: 190, h: 190, kind: 'rock' },
+      { x: 780, y: 620, w: 150, h: 150, kind: 'rock' },
+      { x: 240, y: 820, w: 48, h: 260, kind: 'sandbag' },
+      { x: 1150, y: 260, w: 48, h: 300, kind: 'rock' },
+      { x: 1400, y: 700, w: 240, h: 48, kind: 'sandbag' },
+      { x: 620, y: 180, w: 190, h: 48, kind: 'crate' },
+    ],
+    spawns: corners,
+    pads: (w) => [
+      { x: w / 2, y: 240 },
+      { x: 300, y: 560 },
+      { x: 700, y: 1180 },
+    ],
+  },
+  {
+    name: 'The Hedges',
+    w: 1800,
+    h: 1350,
+    // Hedgerows in a broken spiral, with one gate through the middle about
+    // eighty units wide — a tank is forty-four across, so going through it is a
+    // decision rather than a corridor. The two sandbag stubs are the release
+    // valve: you cannot drive them, and if somebody has parked on the gate you
+    // can still make them regret it from the wrong side of a hedge.
+    cover: () => [
+      { x: 300, y: 300, w: 420, h: 48, kind: 'hedge' },
+      { x: 300, y: 300, w: 48, h: 300, kind: 'hedge' },
+      { x: 720, y: 300, w: 48, h: 180, kind: 'sandbag' },
+      { x: 560, y: 620, w: 300, h: 48, kind: 'hedge' },
+      { x: 1080, y: 180, w: 48, h: 340, kind: 'hedge' },
+      { x: 1240, y: 520, w: 220, h: 48, kind: 'sandbag' },
+    ],
+    spawns: corners,
+    pads: (w, h) => [
+      { x: w / 2, y: 200 },
+      { x: 180, y: h / 2 },
+      { x: 960, y: 420 },
+    ],
+  },
+  {
+    name: 'The Depot',
+    w: 1700,
+    h: 1250,
+    // Oil drums and crate walls. The two sandbag runs across the middle are
+    // staggered rather than aligned, so the centre is a pair of overlapping
+    // firing lines with no way to drive straight through — the fight over the
+    // middle pad happens at range and from behind something, every time.
+    cover: () => [
+      { x: 250, y: 200, w: 200, h: 48, kind: 'crate' },
+      { x: 250, y: 430, w: 48, h: 200, kind: 'crate' },
+      { x: 640, y: 240, w: 110, h: 110, kind: 'barrel' },
+      { x: 560, y: 560, w: 260, h: 48, kind: 'sandbag' },
+      { x: 1000, y: 330, w: 110, h: 110, kind: 'barrel' },
+      { x: 1150, y: 700, w: 48, h: 200, kind: 'rock' },
+    ],
+    spawns: corners,
+    pads: (w) => [
+      { x: w / 2, y: 180 },
+      { x: 170, y: 800 },
+      { x: 430, y: 900 },
     ],
   },
 ]

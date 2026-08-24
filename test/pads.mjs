@@ -163,6 +163,39 @@ for (let li = 0; li < LAYOUTS.length; li++) {
   }
   check(!dup, `${name}: no two pads in the same spot`, dup && `two pads at ${dup}`)
   check(!inWall, `${name}: every pad is on open ground`, inWall && `pad at ${inWall} is in cover`)
+
+  // The same question for spawns, which had no check at all and needed one the
+  // moment four new boards were authored by hand. A spawn inside cover is a
+  // player who begins the round unable to move, and nothing else in the suite
+  // would have said a word about it.
+  let stuck = ''
+  for (const p of arena.SPAWNS) {
+    for (const dx of [-22, 0, 22]) {
+      for (const dy of [-22, 0, 22]) {
+        if (pointInWall(p.x + dx, p.y + dy)) stuck = `${Math.round(p.x)},${Math.round(p.y)}`
+      }
+    }
+  }
+  check(!stuck, `${name}: every spawn is on open ground`, stuck && `spawn at ${stuck} is in cover`)
+
+  // Cover that *partly* overlaps its own mirror image is the shape that
+  // quietly becomes a solid slab across the centre when the author meant two
+  // staggered pieces — the boards below lean on staggered sandbag runs and
+  // that is exactly the mistake they invite.
+  //
+  // A piece sitting dead on the centre point maps onto itself exactly, which is
+  // a deliberate thing to do (The Ring's boulder) and not what this is looking
+  // for. Only the partial case fails.
+  let selfOverlap = ''
+  const w = arena.ARENA_W
+  const h = arena.ARENA_H
+  for (const r of LAYOUTS[li].cover(w, h)) {
+    const m = { x: w - r.x - r.w, y: h - r.y - r.h, w: r.w, h: r.h }
+    const same = m.x === r.x && m.y === r.y
+    const hits = r.x < m.x + m.w && m.x < r.x + r.w && r.y < m.y + m.h && m.y < r.y + r.h
+    if (hits && !same) selfOverlap = `${r.x},${r.y} ${r.w}x${r.h}`
+  }
+  check(!selfOverlap, `${name}: no piece of cover part-overlaps its own mirror`, selfOverlap)
 }
 
 console.log('\nschedule')
