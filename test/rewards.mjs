@@ -281,11 +281,19 @@ try {
 
   // And the bar tracks it. It divided by a hardcoded 10, so at twenty seconds
   // it clamped to full for the whole first half of the reward.
-  await wait(600)
-  const bar = await page.evaluate(() => {
-    const el = document.getElementById('chopper')
-    return { hidden: el.hidden, left: el.style.getPropertyValue('--left') }
-  })
+  // Poll for the HUD to paint rather than waiting a fixed 600ms. `paintChopper`
+  // runs from the render loop, and against a deployed origin that loop competes
+  // with everything else the page is doing on first load — this read `hidden:
+  // true` once against production while the game itself said `flying`.
+  let bar = { hidden: true, left: '' }
+  for (let i = 0; i < 40; i++) {
+    bar = await page.evaluate(() => {
+      const el = document.getElementById('chopper')
+      return { hidden: el.hidden, left: el.style.getPropertyValue('--left') }
+    })
+    if (!bar.hidden && bar.left) break
+    await wait(100)
+  }
   check('and the countdown bar is not pinned full at the start',
     bar.hidden === false && Number(bar.left) < 0.999 && Number(bar.left) > 0.9,
     JSON.stringify(bar))
