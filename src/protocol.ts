@@ -155,6 +155,28 @@ export interface StatePayload {
    */
   tm?: number
   /**
+   * The flag this tank says it is carrying, 1..5, or absent.
+   *
+   * A flag is only ever at a base or on a tank — see `src/flags.ts` — so this
+   * one number is the whole of the world state that moves. There is no
+   * "dropped at" for two clients to disagree about, no pickup radius for
+   * anybody to lie about, and nothing for a late joiner to have missed.
+   *
+   * Self-declared and resolved identically everywhere: two players claiming one
+   * flag is settled on the lower session key, so a disagreement lasts exactly
+   * as long as it takes both ticks to arrive and never becomes state.
+   */
+  f?: number
+  /**
+   * Captures this round, which is the only score a flag game keeps.
+   *
+   * Sits beside `ks`/`ds` and is exactly as trustworthy: self-reported by the
+   * one client that cannot be missing its own captures, believed by everybody
+   * else, and stamped with the same round `r` so last round's does not leak
+   * into this one's.
+   */
+  cap?: number
+  /**
    * Shells left in the sender's magazine, 0 while reloading.
    *
    * On the wire for a gameplay reason rather than a bookkeeping one: an empty

@@ -25,6 +25,7 @@ import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeom
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { ARENA_H, ARENA_W, WALLS, coverGeneration, onLayoutChange, pointInTallWall } from './arena'
 import { CHOPPER_ALT, CHOPPER_SPREAD } from './chopper'
+import { FLAG_REACH, FLAG_TEAMS, baseFor } from './flags'
 import type { CoverKind, Rect } from './arena'
 import type { Game, Peer } from './game'
 import { LOB_APEX, LOB_BLAST, MAX_HP, RELOAD, TANK_RADIUS, shellHeight } from './sim'
@@ -421,6 +422,105 @@ function makeChopper(hue: number): ChopperRig {
 
 /** Only the per-rig materials; the geometry above is shared and stays. */
 function disposeChopper(rig: ChopperRig): void {
+  rig.root.traverse((o) => {
+    const mesh = o as THREE.Mesh
+    if (!mesh.isMesh) return
+    const m = mesh.material
+    if (Array.isArray(m)) m.forEach((x) => x.dispose())
+    else m.dispose()
+  })
+}
+
+/**
+ * A flag base: a pole, its cloth, and a ring on the felt.
+ *
+ * The ring is the load-bearing part rather than the pole. What a defender needs
+ * to read from across the arena is "our base is empty", and a missing rectangle
+ * of cloth on a 300-unit-tall pole seen from two thousand units back is not a
+ * signal — a pulsing 90-unit ring on the grass is.
+ */
+interface FlagRig {
+  root: THREE.Group
+  cloth: THREE.Mesh
+  ring: THREE.Mesh
+}
+
+/**
+ * Side colours, shared with the HUD.
+ *
+ * The same five hues `TEAM_HUES` uses in main.ts, and index 0 is unused for the
+ * same reason teams are 1-indexed everywhere else — zero is nobody's side, and
+ * a palette that quietly gave it a colour would draw a base for it.
+ */
+const TEAM_HUE = [0, 356, 210, 132, 44, 285]
+
+const FLAG_GEO = {
+  pole: new THREE.CylinderGeometry(3.5, 3.5, 120, 8),
+  cloth: new THREE.BoxGeometry(46, 30, 3),
+  ring: new THREE.RingGeometry(FLAG_REACH - 10, FLAG_REACH, 40),
+  knob: new THREE.SphereGeometry(6, 10, 8),
+}
+
+function makeFlag(hue: number): FlagRig {
+  const root = new THREE.Group()
+  const metal = new THREE.MeshStandardMaterial({ color: 0xd8dee9, roughness: 0.5, metalness: 0.2 })
+  const cloth = new THREE.Mesh(
+    FLAG_GEO.cloth,
+    new THREE.MeshStandardMaterial({
+      color: new THREE.Color().setHSL((hue % 360) / 360, 0.74, 0.55),
+      roughness: 0.7,
+      side: THREE.DoubleSide,
+    }),
+  )
+  const pole = new THREE.Mesh(FLAG_GEO.pole, metal)
+  pole.position.y = 60
+  pole.castShadow = true
+  const knob = new THREE.Mesh(FLAG_GEO.knob, metal)
+  knob.position.y = 122
+  cloth.position.set(25, 102, 0)
+  cloth.castShadow = true
+
+  const ring = new THREE.Mesh(
+    FLAG_GEO.ring,
+    new THREE.MeshBasicMaterial({
+      color: new THREE.Color().setHSL((hue % 360) / 360, 0.8, 0.6),
+      transparent: true,
+      opacity: 0.28,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    }),
+  )
+  ring.rotation.x = -Math.PI / 2
+  ring.position.y = GROUND_Y + DECAL_LIFT
+
+  root.add(pole, knob, cloth, ring)
+  return { root, cloth, ring }
+}
+
+/** A flag flying off a tank that is carrying one. */
+function makeCarried(): THREE.Group {
+  const g = new THREE.Group()
+  const pole = new THREE.Mesh(
+    FLAG_GEO.pole,
+    new THREE.MeshStandardMaterial({ color: 0xd8dee9, roughness: 0.5 }),
+  )
+  pole.scale.set(0.7, 0.5, 0.7)
+  pole.position.y = 46
+  const cloth = new THREE.Mesh(
+    FLAG_GEO.cloth,
+    new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.7, side: THREE.DoubleSide }),
+  )
+  cloth.scale.setScalar(0.72)
+  cloth.position.set(18, 72, 0)
+  g.add(pole, cloth)
+  // Behind the turret so it does not sit over the driver's head, and clear of
+  // the name plate stack, which runs from y=7 to y=133.
+  g.position.set(-8, 0, 0)
+  return g
+}
+
+/** Per-rig materials only; the geometry above is shared and stays. */
+function disposeFlag(rig: FlagRig): void {
   rig.root.traverse((o) => {
     const mesh = o as THREE.Mesh
     if (!mesh.isMesh) return
@@ -870,6 +970,14 @@ function coverGeometry(r: Rect): THREE.BufferGeometry {
 /** Everything about one tank that the renderer owns. */
 interface TankRig {
   root: THREE.Group
+  /**
+   * The flag this tank is carrying, built the first time it picks one up.
+   *
+   * Optional and lazy because most tanks in most rounds never touch one, and a
+   * pole plus a cloth on eight rigs that will never show them is geometry
+   * allocated for nothing.
+   */
+  flag?: THREE.Group
   /** Bounces and squashes. Purely cosmetic, sits between root and the body. */
   bob: THREE.Group
   hull: THREE.Group
@@ -2138,6 +2246,7 @@ export class Renderer {
 
     this.syncCover(game, now)
     this.syncChoppers(game, now)
+    this.syncFlags(game, now)
 
     if (cockpit) this.placeEye(game)
 
@@ -2411,6 +2520,84 @@ export class Renderer {
   /** Timestamp of the last barrel blast drawn, so each one is claimed once. */
   private lastCoverBlast = 0
 
+  /** One pole per side that has somebody on it, by team index. */
+  private flagPoles = new Map<number, FlagRig>()
+
+  /**
+   * Bases on the felt, and the flag on whoever is running with it.
+   *
+   * Drawn from exactly what the rules read — `baseFor` for the position and
+   * `flagCarriers` for who has it — rather than from a second copy. A base with
+   * its flag home shows the cloth on the pole; a base whose flag is out shows a
+   * bare pole and a ring, which is the thing a defender is looking for.
+   */
+  private syncFlags(game: Game, now: number): void {
+    // Only sides that have a base. A fifth side plays deathmatch — see
+    // `FLAG_TEAMS` — and drawing a pole for it would promise a flag that
+    // `canTake` will never hand over.
+    const teams = new Set<number>()
+    if (game.team && game.team <= FLAG_TEAMS) teams.add(game.team)
+    for (const peer of game.peers.values()) {
+      if (peer.view.team && peer.view.team <= FLAG_TEAMS) teams.add(peer.view.team)
+    }
+
+    for (const [team, rig] of this.flagPoles) {
+      if (teams.has(team)) continue
+      this.scene.remove(rig.root)
+      disposeFlag(rig)
+      this.flagPoles.delete(team)
+    }
+
+    const held = game.flagCarriers(now)
+    for (const team of teams) {
+      const base = baseFor(team)
+      if (!base) continue
+      let rig = this.flagPoles.get(team)
+      if (!rig) {
+        rig = makeFlag(TEAM_HUE[team] ?? 0)
+        this.scene.add(rig.root)
+        this.flagPoles.set(team, rig)
+      }
+      rig.root.position.set(base.x, 0, base.y)
+      const out = held.has(team)
+      rig.cloth.visible = !out
+      // The ring is the "this flag is out" mark, and it pulses so it reads from
+      // across the arena — a defender needs to know their base is empty without
+      // driving to it.
+      const ringMat = rig.ring.material as THREE.MeshBasicMaterial
+      ringMat.opacity = out ? 0.5 + Math.abs(Math.sin(now / 260)) * 0.35 : 0.28
+      rig.ring.scale.setScalar(out ? 1 + Math.sin(now / 300) * 0.05 : 1)
+      rig.cloth.rotation.y = Math.sin(now / 420) * 0.25
+    }
+
+    // And the flag on the tank carrying it. Parented to the rig so it inherits
+    // the bob and the sink rather than needing its own copy of either.
+    const carried = new Map<string, number>()
+    for (const [flag, who] of held) carried.set(who, flag)
+    const own = carried.get(game.identity.sessionPubkey)
+    this.carriedOn(this.you, own ?? 0, now)
+    for (const peer of game.peers.values()) {
+      const rig = this.rigs.get(peer.session)
+      if (rig) this.carriedOn(rig, carried.get(peer.session) ?? 0, now)
+    }
+  }
+
+  /** Put a flag on a tank, or take it off. */
+  private carriedOn(rig: TankRig, flag: number, now: number): void {
+    if (!flag) {
+      if (rig.flag) rig.flag.visible = false
+      return
+    }
+    if (!rig.flag) {
+      rig.flag = makeCarried()
+      rig.bob.add(rig.flag)
+    }
+    rig.flag.visible = true
+    const mat = (rig.flag.children[1] as THREE.Mesh).material as THREE.MeshStandardMaterial
+    mat.color.setHSL(((TEAM_HUE[flag] ?? 0) % 360) / 360, 0.74, 0.55)
+    rig.flag.rotation.y = Math.sin(now / 300) * 0.3
+  }
+
   /**
    * One rig per chopper in the air, by owner.
    *
@@ -2558,6 +2745,16 @@ export class Renderer {
    */
   rigFor(session: string): { ring: THREE.Object3D } | null {
     return this.rigs.get(session) ?? null
+  }
+
+  /** A flag base's rig, for test/flags.mjs. See `coverMeshAt` for the reasoning. */
+  flagRigAt(team: number): { root: THREE.Object3D; cloth: THREE.Mesh } | null {
+    return this.flagPoles.get(team) ?? null
+  }
+
+  /** Whether our own tank is visibly carrying a flag. Also for the suite. */
+  youFlagVisible(): boolean {
+    return this.you.flag?.visible === true
   }
 
   private wear(rig: TankRig, v: TankView, now: number, dt: number, inside = false): void {

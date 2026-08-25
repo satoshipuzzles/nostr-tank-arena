@@ -300,6 +300,25 @@ try {
       !box.visible || box.hintRight > 40,
       JSON.stringify(box),
     )
+    // And the kill feed sits above them rather than through them. The feed's
+    // `bottom` used to be a constant sized for a one-line hint row, and every
+    // button added on the right makes that row one line taller on the left —
+    // at three lines the feed was printing straight over the hints.
+    const stack = await page.evaluate(() => {
+      const hint = document.getElementById('controls-hint').getBoundingClientRect()
+      const feed = document.getElementById('feed').getBoundingClientRect()
+      return {
+        overlap: Math.round(feed.bottom - hint.top),
+        feedBottom: Math.round(feed.bottom),
+        hintTop: Math.round(hint.top),
+        feedRows: document.querySelectorAll('#feed div').length,
+      }
+    })
+    check(
+      `and the kill feed clears the hints at ${width}px`,
+      !box.visible || stack.feedRows === 0 || stack.overlap <= 0,
+      JSON.stringify(stack),
+    )
   }
   await page.setViewport({ width: 1280, height: 800 })
 

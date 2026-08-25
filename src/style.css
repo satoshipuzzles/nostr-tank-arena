@@ -263,7 +263,15 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
 
 #feed {
   position: absolute;
-  bottom: 84px;
+  /* Above the key hints, whatever height they have wrapped to.
+     `bottom: 84px` was the height of a one-line hint row plus a gap, and it
+     stopped being true the moment the hints started wrapping — every button
+     added to the row on the right makes the row on the left one line taller,
+     and at three lines the feed was printing straight through it. `--hint-h`
+     is written by `watchActionsWidth` in main.ts from the real element, for the
+     same reason `--actions-w` is: a constant here is a promise that the layout
+     will never change again, and it has already been broken twice. */
+  bottom: calc(var(--hint-h, 42px) + 28px);
   left: 14px;
   display: flex;
   flex-direction: column;
@@ -1122,6 +1130,18 @@ body.hud-compact #feed { bottom: max(10px, env(safe-area-inset-bottom)); }
   font-variant-numeric: tabular-nums;
 }
 .team-row .kd { margin-left: 8px; }
+
+/* Captures, above the team tally when anybody has one.
+   A flag round's score is not the kill tally, so it goes first — but only once
+   somebody has scored, so a team round nobody is playing flags in reads exactly
+   as it did before. */
+.team-tally.flags { border-bottom-style: dashed; }
+.team-caps {
+  margin-left: auto;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.team-caps i { margin-left: 3px; font-style: normal; opacity: 0.75; }
 
 /* The chopper clock.
    Top-centre, under the rules banner, because that is the one strip of screen a

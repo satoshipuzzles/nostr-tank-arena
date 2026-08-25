@@ -43,6 +43,8 @@ import {
   roomTag,
 } from './protocol'
 import { BOT_COUNT, killBot, makeBot, stepBot } from './bots'
+import { FLAG_TEAMS, canScore, canTake, carriers } from './flags'
+import type { Claim } from './flags'
 import { WALLS, applyCoverBits, coverBits, damageCover, explodes, resetCover } from './arena'
 import {
   CHOPPER_DAMAGE,
@@ -301,6 +303,8 @@ export interface Peer {
   claimed: { kills: number; deaths: number } | null
   /** Their kills in a row, from the state tick, so their glow is visible here too. */
   streak: number
+  /** Captures this round, off their own tick. See `StatePayload.cap`. */
+  captures: number
   /** The finish they picked. Purely cosmetic; see `src/skins.ts`. */
   skin: SkinId
   /**
@@ -879,6 +883,7 @@ export class Game {
         deaths: 0,
         claimed: null,
         streak: 0,
+        captures: 0,
         skin: DEFAULT_SKIN,
       }
       this.peers.set(session, peer)
@@ -952,6 +957,14 @@ export class Game {
     // Cosmetic and self-reported, exactly like the HP beside it. A streak you
     // cannot see on the tank that has it is a number in somebody else's HUD.
     peer.streak = typeof p.k === 'number' && p.k > 0 ? Math.min(99, Math.floor(p.k)) : 0
+    // Their flag claim, refreshed on every tick that carries one. Kept in the
+    // same table as our own so `carriers` sees one population and resolves ties
+    // between us and them the same way it resolves ties between two of them.
+    if (typeof p.f === 'number' && p.f >= 1 && p.f <= FLAG_TEAMS) {
+      this.claims.set(e.pubkey, { who: e.pubkey, flag: Math.floor(p.f), at: performance.now() })
+    } else {
+      this.claims.delete(e.pubkey)
+    }
     // Their own tally, which beats ours. Ours is built from death events and
     // can only be short — theirs is the count kept by the one client that saw
     // every one of their kills. Recorded whenever the fields are present, so a
@@ -961,6 +974,12 @@ export class Game {
     // peer who has not seen the new tip yet. Dropping it costs them a second of
     // showing 0/0; keeping it would show everybody a wrong number instead.
     const sameRound = (typeof p.r === 'number' ? p.r : 0) === this.round
+    // Captures, on the same round gate as the kill tally beside it: a count
+    // stamped with a round we are not playing is last round's, from a peer who
+    // has not seen the new tip yet.
+    if (sameRound && typeof p.cap === 'number') {
+      peer.captures = Math.max(0, Math.min(999, Math.floor(p.cap)))
+    }
     if (sameRound && typeof p.ks === 'number' && typeof p.ds === 'number') {
       peer.claimed = {
         kills: Math.max(0, Math.min(9999, Math.floor(p.ks))),
@@ -1313,6 +1332,111 @@ export class Game {
    * somebody's side buys a truce rather than an advantage.
    */
   team = 0
+
+  /**
+   * The flag we are carrying, 1..5, or 0.
+   *
+   * Written by `stepFlags` and never set directly, because who is carrying
+   * what is *read back out of* the claim table rather than remembered — see
+   * `flags.ts`. A player who loses a tie is not carrying the flag on anybody's
+   * screen including their own, and the only way to guarantee that is for this
+   * to be a derived value rather than a decision we made once.
+   */
+  carrying = 0
+
+  /** Captures this round. Sits beside `kills`; see `StatePayload.cap`. */
+  captures = 0
+
+  /** Every live claim we know about, ours included, keyed by session. */
+  private claims = new Map<string, Claim>()
+
+  /** Who is carrying which flag right now, as everybody else computes it too. */
+  flagCarriers(now = performance.now()): Map<number, string> {
+    return carriers(this.claims.values(), now)
+  }
+
+  /**
+   * Take a flag, run it home, score.
+   *
+   * Nothing here is told to anybody as an event: taking is "our next tick says
+   * `f`", and scoring is "our next tick says `cap` one higher". Both are read
+   * by everybody else off a stream that was going out regardless.
+   *
+   * The order matters. Scoring is checked *before* taking, because a player
+   * standing on their own base with an enemy flag is scoring, and if taking ran
+   * first they would grab their own flag on the same frame and the score would
+   * be blocked by the rule that your flag must be home.
+   */
+  private stepFlags(now: number): void {
+    // Our own claim, refreshed while we are still holding it. Dropped the
+    // moment we are dead, spectating or flying — a flag on a tank that is not
+    // on the board is the dropped-flag state by another name.
+    const out = this.tank.dead || this.watching || this.flying
+    if (out) this.claims.delete(this.identity.sessionPubkey)
+    else if (this.carrying) {
+      this.claims.set(this.identity.sessionPubkey, {
+        who: this.identity.sessionPubkey,
+        flag: this.carrying,
+        at: now,
+      })
+    }
+
+    const held = this.flagCarriers(now)
+    const carried = new Set(held.keys())
+    // Read our own state back out rather than trusting what we set. Losing a
+    // tie has to look the same to us as it does to everybody else.
+    const mine = [...held.entries()].find(([, who]) => who === this.identity.sessionPubkey)
+    this.carrying = mine ? mine[0] : 0
+
+    if (out || !this.team) {
+      if (this.carrying) {
+        this.carrying = 0
+        this.claims.delete(this.identity.sessionPubkey)
+      }
+      return
+    }
+
+    if (this.carrying && canScore(this.team, this.carrying, this.tank.x, this.tank.y, carried)) {
+      const scored = this.carrying
+      this.captures++
+      this.carrying = 0
+      this.claims.delete(this.identity.sessionPubkey)
+      this.sound('streak')
+      this.announce('FLAG CAPTURED', `${this.captures} for your side`, 130)
+      this.pushFeed(`you captured flag ${scored}`)
+      return
+    }
+
+    if (this.carrying) return
+    for (let flag = 1; flag <= FLAG_TEAMS; flag++) {
+      if (!canTake(this.team, flag, this.tank.x, this.tank.y, carried)) continue
+      this.carrying = flag
+      this.claims.set(this.identity.sessionPubkey, {
+        who: this.identity.sessionPubkey,
+        flag,
+        at: now,
+      })
+      this.sound('pickup')
+      this.pushFeed('you have the flag — run')
+      return
+    }
+  }
+
+  /** Captures per side, or null when nobody is playing flags. */
+  flagStandings(): { team: number; captures: number }[] | null {
+    const rows: { team: number; captures: number }[] = []
+    const add = (team: number, caps: number) => {
+      if (!team) return
+      const row = rows.find((r) => r.team === team)
+      if (row) row.captures += caps
+      else rows.push({ team, captures: caps })
+    }
+    add(this.team, this.captures)
+    for (const p of this.peers.values()) add(p.view.team, p.captures)
+    if (rows.length < 2) return null
+    if (!rows.some((r) => r.captures > 0)) return null
+    return rows.sort((a, b) => b.captures - a.captures || a.team - b.team)
+  }
 
   /**
    * Are we and the owner of this shell on the same side?
@@ -1915,6 +2039,7 @@ export class Game {
     // taken to zero by a chopper should not also eat a shell in the same frame
     // and report two deaths.
     this.takeChopperFire(now)
+    this.stepFlags(now)
     this.refreshPickups()
 
     for (const shell of this.shells.values()) {
@@ -2324,6 +2449,10 @@ export class Game {
       // Absent in a free-for-all, which is most rounds, so the common tick is
       // the size it was before teams existed.
       ...(this.team ? { tm: this.team } : {}),
+      // The flag and the score for it. Both absent in every round nobody is
+      // playing flags in, which is the common case and costs nothing.
+      ...(this.carrying ? { f: this.carrying } : {}),
+      ...(this.captures ? { cap: this.captures } : {}),
       // The whole gunship, on a tick that was going out anyway. A duration, so
       // a receiver adds it to its own clock and nobody has to agree on a
       // deadline. Absent for every tick of a round nobody earned one in.
@@ -2400,6 +2529,13 @@ export class Game {
     // would be a tank nobody can shoot on a board it did not earn.
     if (this.chopperUntil) this.landChopper()
     this.chopperHitAt.clear()
+    // Flags go home and the captures reset, like the kill tally. A claim that
+    // survived the boundary would be a flag carried out of a round that is
+    // over, on a board that has been rebuilt underneath it.
+    this.carrying = 0
+    this.captures = 0
+    this.claims.clear()
+    for (const peer of this.peers.values()) peer.captures = 0
     this.blasts.length = 0
     // Peer tallies are ours to keep, not theirs to send, so they reset here too.
     for (const peer of this.peers.values()) {

@@ -1,5 +1,6 @@
 import './style.css'
 import * as arena from './arena'
+import * as flags from './flags'
 import { layoutForBlock, layoutName, setLayout } from './arena'
 import { Sfx } from './audio'
 import { BlockClock } from './blocks'
@@ -1332,6 +1333,11 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     // number rather than a rule, and a suite has to be able to read the one the
     // build actually shipped rather than the one it was written against.
     ;(window as unknown as { __rooms: unknown }).__rooms = { SEATS }
+    // The flag rules, for test/flags.mjs. `carriers` is the one function in the
+    // game whose whole claim is that two clients hearing the same input agree,
+    // and the only way to check that is to run it twice with the input in a
+    // different order.
+    ;(window as unknown as { __flags: unknown }).__flags = flags
 
     // Faces on the tanks. The renderer asks by pubkey and never learns what a
     // relay is; `Profiles.get` queues an unknown npub for the next batch and
@@ -1495,12 +1501,23 @@ function paintCrosshair(game: Game, view: ViewMode): void {
  */
 function watchActionsWidth(): void {
   const row = $('hud-actions')
+  const hint = $('controls-hint')
   const publish = () => {
     const w = Math.round(row.getBoundingClientRect().width)
     if (w > 0) document.documentElement.style.setProperty('--actions-w', `${w}px`)
+    // And how tall the hints ended up, which the kill feed sits above. Every
+    // button added on the right makes the hints one line taller on the left,
+    // and the feed's `bottom` was a constant sized for one line — at three the
+    // feed printed straight through them.
+    const h = Math.round(hint.getBoundingClientRect().height)
+    if (h > 0) document.documentElement.style.setProperty('--hint-h', `${h}px`)
   }
   publish()
-  if (typeof ResizeObserver === 'function') new ResizeObserver(publish).observe(row)
+  if (typeof ResizeObserver === 'function') {
+    const ro = new ResizeObserver(publish)
+    ro.observe(row)
+    ro.observe(hint)
+  }
   window.addEventListener('resize', publish)
 }
 watchActionsWidth()
@@ -1682,6 +1699,22 @@ function drawHud(game: Game): void {
   // them, which is the right threshold: a team of one is a person, and a
   // scoreboard that grows a "Red 0 — 0" header the instant you press T would
   // be reporting a game nobody is playing.
+  // Captures first when anybody has one. A flag game's score is not the kill
+  // tally, and a scoreboard that led with kills would be reporting the wrong
+  // game — but only once somebody has actually scored, so a team round that
+  // nobody is playing flags in reads exactly as it did before.
+  const flags = game.flagStandings()
+  const flagRows = flags
+    ? `<div class="team-tally flags">${flags
+        .map(
+          (t) =>
+            `<div class="team-row"><span class="team-dot" style="background:hsl(${TEAM_HUES[t.team]} 72% 56%)"></span>` +
+            `<span class="team-name">${escapeHtml(TEAM_NAMES[t.team] ?? String(t.team))}</span>` +
+            `<span class="team-caps">${t.captures}<i>&#9873;</i></span></div>`,
+        )
+        .join('')}</div>`
+    : ''
+
   const teams = game.teamStandings()
   const teamRows = teams
     ? `<div class="team-tally">${teams
@@ -1695,6 +1728,7 @@ function drawHud(game: Game): void {
     : ''
 
   $('scoreboard').innerHTML =
+    flagRows +
     teamRows +
     game
       .scoreboard()
