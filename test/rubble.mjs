@@ -295,6 +295,106 @@ try {
     JSON.stringify(passable),
   )
 
+  // ------------------------------------------------ 3b. and it slows you down
+  //
+  // Puzz, after the cosmetic version shipped: "we want rubble to slow a tank
+  // crossing it." So the lane is open and it costs something to take.
+  //
+  // Measured by stepping the tank from the same spot the same number of times
+  // and summing how far each step carried it — position reset between steps so
+  // the tank stays *on* the debris rather than driving off it after 3px and
+  // averaging in open ground. The comparison point is real open ground on the
+  // same board, so this is a ratio between two measurements rather than a
+  // number checked against a constant the code also owns.
+
+  const drag = await page.evaluate((id) => {
+    const a = window.__arena
+    const g = window.__game
+    const w = a.WALLS[id]
+    const on = { x: w.x + w.w / 2, y: w.y + w.h / 2 }
+
+    // Somewhere with nothing on it at all, found rather than assumed.
+    let clear = null
+    for (let gx = 200; gx < 1600 && !clear; gx += 40) {
+      for (let gy = 200; gy < 900; gy += 40) {
+        if (!a.pointInWall(gx, gy) && !a.pointInRubble(gx, gy)) {
+          clear = { x: gx, y: gy }
+          break
+        }
+      }
+    }
+    if (!clear) return null
+
+    const controls = (throttle, steer) => ({
+      throttle, steer, aim: null, aimAt: null, fire: false, reload: false, lob: false,
+    })
+    const measure = (at, throttle, steer) => {
+      g.tank.dead = false
+      let moved = 0
+      let turned = 0
+      for (let i = 0; i < 24; i++) {
+        g.tank.x = at.x
+        g.tank.y = at.y
+        g.tank.hull = 0
+        g.update(0.016, controls(throttle, steer))
+        moved += Math.hypot(g.tank.x - at.x, g.tank.y - at.y)
+        turned += Math.abs(g.tank.hull)
+      }
+      return { moved, turned }
+    }
+
+    return {
+      on: measure(on, 1, 0),
+      clear: measure(clear, 1, 0),
+      onTurn: measure(on, 0, 1),
+      clearTurn: measure(clear, 0, 1),
+      where: { on, clear },
+      // What the arena itself says, so a failure can be read without guessing
+      // whether the tank was standing where the test thought it was.
+      onRubble: !!a.pointInRubble(on.x, on.y),
+      clearRubble: !!a.pointInRubble(clear.x, clear.y),
+    }
+  }, target)
+
+  check('there is open ground on this board to compare against', drag !== null)
+  check(
+    'the control: one measurement is on the debris and the other is not',
+    drag?.onRubble === true && drag?.clearRubble === false,
+    JSON.stringify({ on: drag?.onRubble, clear: drag?.clearRubble }),
+  )
+  const ratio = drag ? drag.on.moved / drag.clear.moved : 0
+  check(
+    'crossing rubble is slower than crossing grass',
+    ratio > 0.4 && ratio < 0.75,
+    `${(ratio * 100).toFixed(0)}% of open-ground speed (${drag?.on.moved.toFixed(1)} against ${drag?.clear.moved.toFixed(1)})`,
+  )
+  // The other half of the design, and the half that would read as a bug: a
+  // tank that cannot turn on debris looks broken rather than slowed.
+  check(
+    'but turning is not slowed with it',
+    !!drag && Math.abs(drag.onTurn.turned - drag.clearTurn.turned) < 1e-6,
+    JSON.stringify({ on: drag?.onTurn.turned, clear: drag?.clearTurn.turned }),
+  )
+  // And the lane is still a lane: a shell goes through the space above it.
+  const stillOpen = await page.evaluate((id) => {
+    const a = window.__arena
+    const w = a.WALLS[id]
+    const cx = w.x + w.w / 2
+    const cy = w.y + w.h / 2
+    return {
+      tank: a.pointInWall(cx, cy)?.id ?? null,
+      shell: a.pointInTallWall(cx, cy)?.id ?? null,
+      rubble: a.pointInRubble(cx, cy)?.id ?? null,
+      passing: a.passing(w),
+    }
+  }, target)
+  check(
+    'slowing a tank did not close the lane for a shell',
+    stillOpen.shell === null && stillOpen.tank === null && stillOpen.rubble === target &&
+      stillOpen.passing === 'rubble',
+    JSON.stringify(stillOpen),
+  )
+
   // ------------------------------------------------------------- 4. the wire
 
   const ourBits = await page.evaluate(() => ({

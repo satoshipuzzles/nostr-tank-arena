@@ -50,6 +50,7 @@ import {
   coverBits,
   coverDamageBits,
   damageCover,
+  groundSpeed,
   explodes,
   resetCover,
 } from './arena'
@@ -1976,7 +1977,13 @@ export class Game {
     } else if (this.tank.dead) {
       if (now >= this.tank.respawnAt) this.respawn()
     } else {
-      const boost = (hasBuff(this.buffs, 'speedUntil', now) ? 1.45 : 1) * this.modifier.speed
+      // Ground before boost: crossing a breach costs you the same fraction
+      // whether or not you are running overdrive, which is what keeps rubble a
+      // decision rather than something a pickup deletes.
+      const boost =
+        (hasBuff(this.buffs, 'speedUntil', now) ? 1.45 : 1) *
+        this.modifier.speed *
+        groundSpeed(this.tank.x, this.tank.y)
       stepTank(this.tank, controls.throttle, controls.steer, controls.aim, dt, boost)
       this.stepMagazine(now, controls.reload)
       const armed = this.tank.ammo > 0 && !this.tank.reloadingUntil && now >= this.tank.reloadAt
