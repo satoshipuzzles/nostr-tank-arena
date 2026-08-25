@@ -3,7 +3,7 @@ import * as arena from './arena'
 import { layoutForBlock, layoutName, setLayout } from './arena'
 import { Sfx } from './audio'
 import { BlockClock } from './blocks'
-import { Game } from './game'
+import { Game, STREAK_LADDER, nextRung, rungFloor } from './game'
 import { Input, PLAYER_TWO, SOLO, type Scheme } from './input'
 import { TouchSticks } from './touch'
 
@@ -1305,6 +1305,10 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     for (const p of players) p.input.scheme = scheme
     store('tank.scheme', scheme)
     running = { players, renderer, clock, profiles }
+    // The ladder, once, in the feed. The strip on the HUD says what is next;
+    // this says what exists, which is a question you ask on the way in and
+    // never again.
+    announceLadder(game)
     $('hint-p2').hidden = !twoPlayer
     // A profile landing has to repaint immediately: the HUD throttles itself to
     // eight frames a second and would otherwise show the npub for another beat
@@ -1803,6 +1807,7 @@ function drawHud(game: Game): void {
 
   drawNotice(game, now)
   drawBuffs(game, now)
+  drawStreak(game)
 }
 
 /**
@@ -2068,6 +2073,63 @@ function drawBuffs(game: Game, now: number): void {
   }
   node.hidden = live.length === 0
   node.innerHTML = live.join('')
+}
+
+/**
+ * What the next kill buys you.
+ *
+ * cloudfodder asked "how am I supposed to get to the choppa?" in the middle of
+ * a match, which is the whole bug: the ladder worked and nothing on the screen
+ * admitted it existed. A reward you cannot see coming is a surprise once and
+ * invisible forever after — and a player who knows the chopper is four kills
+ * away plays the next four kills differently, which is the actual point.
+ *
+ * Always on screen during a round, including at zero, because zero is exactly
+ * when a new player needs to be told there is a ladder at all. It reads as one
+ * line and a bar rather than as a list of six tiers: a HUD element you have to
+ * *study* during a firefight is decoration.
+ *
+ * The rung names come from `STREAK_LADDER` in game.ts — the same table
+ * `onOwnKill` awards from — so retuning the ladder cannot leave this promising
+ * a chopper the game does not hand over.
+ */
+function drawStreak(game: Game): void {
+  const node = $('streak')
+  const rung = nextRung(game.streak)
+  if (!rung) {
+    // Past the top of the ladder there is nothing left to earn, so the strip
+    // stops making promises and just keeps count.
+    node.hidden = false
+    node.className = 'top'
+    node.innerHTML =
+      `<div class="streak-line"><b>${game.streak}</b> in a row` +
+      `<span class="streak-next">unstoppable</span></div>`
+    return
+  }
+  const floor = rungFloor(game.streak)
+  const span = rung.at - floor
+  const done = game.streak - floor
+  const left = rung.at - game.streak
+  node.hidden = false
+  // One away is the moment worth lighting up: it is the difference between a
+  // meter you ignore and a decision about whether to push.
+  node.className = left === 1 ? 'close' : ''
+  node.innerHTML =
+    `<div class="streak-line">` +
+    (game.streak > 0 ? `<b>${game.streak}</b> in a row` : `<span class="dim">no streak</span>`) +
+    `<span class="streak-next">${left} more &rarr; ${escapeHtml(rung.name)}</span></div>` +
+    `<div class="streak-bar"><i style="width:${Math.round((done / span) * 100)}%"></i></div>`
+}
+
+/**
+ * The whole ladder, once, on the way in.
+ *
+ * The strip above answers "what is next"; this answers "what is there", which
+ * is a question you only ask once per session. Six seconds in the feed rather
+ * than a permanent panel, because a legend that never goes away is furniture.
+ */
+function announceLadder(game: Game): void {
+  game.pushFeed('streaks: ' + STREAK_LADDER.map((r) => `${r.at} ${r.name}`).join(' · '))
 }
 
 // ------------------------------------------------------------------ podium
