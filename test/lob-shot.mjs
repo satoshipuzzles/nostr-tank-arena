@@ -5,6 +5,16 @@
 // proves the trajectory; this proves you can look at the board and tell what
 // is about to happen to you.
 //
+// One trap in the pictures this writes, which cost a round of chasing: calling
+// `page.screenshot()` perturbs the board camera. Puppeteer overrides the page's
+// device metrics to capture, that fires a resize, and `Renderer.resize` re-fits
+// `home` to whatever aspect it saw — so every frame after the first screenshot
+// is drawn from further back than the game actually plays. Measured: the camera
+// sits at y=1574 before any capture and y=2228 after three, at an unchanged
+// 1280x800 canvas and a 40-degree fov. It is a harness artifact, not a framing
+// bug, and it is why the checks below read world-space numbers off the meshes
+// rather than measuring anything in the images.
+//
 //   npm run build && npx vite preview --port 4188 &
 //   node test/lob-shot.mjs
 

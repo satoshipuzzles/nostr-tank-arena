@@ -26,7 +26,7 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import { ARENA_H, ARENA_W, WALLS, onLayoutChange, pointInTallWall } from './arena'
 import type { CoverKind, Rect } from './arena'
 import type { Game, Peer } from './game'
-import { LOB_BLAST, MAX_HP, RELOAD, TANK_RADIUS, shellHeight } from './sim'
+import { LOB_APEX, LOB_BLAST, MAX_HP, RELOAD, TANK_RADIUS, shellHeight } from './sim'
 import { ICON_POLYS, PICKUPS, hasBuff } from './pickups'
 import type { PickupKind } from './pickups'
 import { Avatar } from './avatars'
@@ -1369,9 +1369,13 @@ export class Renderer {
    */
   private lobShadow = (() => {
     const m = new THREE.Mesh(
-      new THREE.CircleGeometry(10, 20),
+      // 16 rather than 10, and darker. The first cut was sized against the
+      // shell mesh; what it actually has to be legible against is a board the
+      // camera draws from two thousand units back, where ten units is six
+      // pixels of grass-on-grass.
+      new THREE.CircleGeometry(16, 24),
       new THREE.MeshBasicMaterial({
-        color: 0x000000, transparent: true, opacity: 0.28, depthWrite: false,
+        color: 0x000000, transparent: true, opacity: 0.4, depthWrite: false,
       }),
     )
     m.rotation.x = -Math.PI / 2
@@ -2247,15 +2251,32 @@ export class Renderer {
         if (firer) firer.recoil = 1
         this.confetti.burst(shell.x, shell.y, 5, 45, { speed: 90, up: 60, y: 24, size: 0.55, life: 0.35 })
       }
-      mesh.position.set(shell.x, 24 + shellHeight(shell), shell.y)
+      const height = shellHeight(shell)
+      mesh.position.set(shell.x, 24 + height, shell.y)
       mesh.rotation.y += 0.3
       if (shell.lob > 0) {
+        // Grow with the arc. A 7-unit sphere seen from the board camera two
+        // thousand units back is four pixels, and photographed at apex the lob
+        // was a yellow dot you had to be told was there — which loses the trade
+        // the weapon is built on. A lob is slow and telegraphed *on purpose*:
+        // the target is supposed to see it coming and walk out of the crater.
+        // A round nobody can see is just a delayed shell.
+        //
+        // Keyed to height rather than to a constant, so the thing is largest at
+        // the top of its arc, which is both when it is furthest from the camera
+        // and when there is most time left to react to it.
+        mesh.scale.setScalar(1 + (height / LOB_APEX) * 1.3)
         // One shadow, under whichever lob is highest. Two lobs at once is rare
         // enough that a second mesh is not worth the allocation, and the one in
         // the air is the one you need to walk away from.
         this.lobShadow.visible = true
         this.lobShadow.position.set(shell.x, GROUND_Y + DECAL_LIFT, shell.y)
-        const drop = 1 - shellHeight(shell) / 150
+        // Tightens as it comes down rather than spreading, which is backwards
+        // for a real shadow and right for a marker: the thing it is telling you
+        // is *where*, and it should be at its most precise the moment before it
+        // matters. Read the height once, above — calling `shellHeight` a second
+        // time here worked and invited the two to drift apart.
+        const drop = 1 - height / LOB_APEX
         this.lobShadow.scale.setScalar(0.55 + drop * 0.85)
       }
     }
