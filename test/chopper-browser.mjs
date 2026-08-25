@@ -240,6 +240,13 @@ try {
   // Timing the gaps in the page removes both problems. `hp` is set high on
   // purpose so the tank survives long enough to produce four of them — one
   // interval is a number, four is a rate.
+  //
+  // The window was 2600ms and that was a knife edge: four hits need three
+  // 520ms gaps, and the *first* hit is wherever the rake's phase happens to
+  // put it. A slow start pushed it to 1268ms on one run and only three hits
+  // fitted, which reads as "the chopper stopped shooting" when nothing of the
+  // sort happened. 4200ms leaves room for a phase most of a second long. A
+  // window that cannot contain the behaviour cannot report on it.
   await theirTick(700, 500)
   const rate = await page.evaluate(async () => {
     const g = window.__game
@@ -249,7 +256,7 @@ try {
     const hits = []
     let last = g.tank.hp
     const t0 = performance.now()
-    while (performance.now() - t0 < 2600) {
+    while (performance.now() - t0 < 4200) {
       g.tank.x = 700
       g.tank.y = 500
       g.update(0.016, { throttle: 0, steer: 0, aim: null, aimAt: null, fire: false, reload: false, lob: false })

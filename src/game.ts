@@ -189,6 +189,55 @@ const STREAK_JUGGERNAUT = 20
 const STREAK_CARPET = 25
 
 /**
+ * The ladder as a table, because two places have to agree about it.
+ *
+ * cloudfodder, mid-match: "how am I supposed to get to the choppa?" Every rung
+ * above worked perfectly and nothing on the screen ever mentioned that they
+ * existed, so a reward was a surprise the first time and invisible after that.
+ * The HUD strip that fixes it has to name the same rungs `onOwnKill` awards,
+ * and the way to guarantee that is to have one list rather than two — a
+ * hand-written copy in the HUD is a promise that nobody will ever retune the
+ * ladder, and this ladder has already been retuned twice.
+ *
+ * `name` is what the HUD shows while you are climbing toward it. `detail` is
+ * the subtitle on the banner when you land on it, which stays longer because
+ * there is a moment to read it.
+ */
+export interface StreakRung {
+  at: number
+  name: string
+  detail: string
+}
+
+export const STREAK_LADDER: readonly StreakRung[] = [
+  { at: STREAK_REPAIR, name: 'hull repair', detail: 'hull repaired' },
+  { at: STREAK_STRIKE, name: 'air strike', detail: 'air strike inbound' },
+  { at: STREAK_OVERDRIVE, name: 'chopper', detail: 'chopper — ten seconds of gun' },
+  { at: STREAK_SIEGE, name: 'siege shells', detail: 'siege shells — two hull a hit' },
+  { at: STREAK_JUGGERNAUT, name: 'juggernaut', detail: 'juggernaut — shielded and fast' },
+  { at: STREAK_CARPET, name: 'carpet bombing', detail: 'carpet bombing' },
+]
+
+/** The rung a given streak is climbing toward, or null at the top of the ladder. */
+export function nextRung(streak: number): StreakRung | null {
+  return STREAK_LADDER.find((r) => r.at > streak) ?? null
+}
+
+/**
+ * The rung below, so the meter fills across one step rather than across the
+ * whole ladder. Nineteen kills is one away from juggernaut, and a bar that
+ * reads 76% there is measuring the wrong thing.
+ */
+export function rungFloor(streak: number): number {
+  let floor = 0
+  for (const r of STREAK_LADDER) if (r.at <= streak) floor = r.at
+  return floor
+}
+
+/** The banner subtitle for a rung, read from the same table the HUD reads. */
+const detailAt = (at: number): string => STREAK_LADDER.find((r) => r.at === at)?.detail ?? ''
+
+/**
  * How many sides there are.
  *
  * Five, because Puzz asked for "duos with 5 teams" — a full room of eight is
@@ -1117,12 +1166,12 @@ export class Game {
         this.tank.hp = this.maxHp
         this.repairedAt = now
         this.sound('streak')
-        this.announce(`${STREAK_REPAIR} IN A ROW`, 'hull repaired', 130)
+        this.announce(`${STREAK_REPAIR} IN A ROW`, detailAt(STREAK_REPAIR), 130)
         return
       case STREAK_STRIKE:
         this.sound('streak')
         this.callStrike(now, STRIKE_BOMBS)
-        this.announce(`${STREAK_STRIKE} IN A ROW`, 'air strike inbound', 20)
+        this.announce(`${STREAK_STRIKE} IN A ROW`, detailAt(STREAK_STRIKE), 20)
         return
       case STREAK_OVERDRIVE:
         // Puzz asked for a chopper at ten, and a chopper is not a buff — it
@@ -1131,12 +1180,12 @@ export class Game {
         // do any more is duplicate a pickup as a reward.
         this.sound('streak')
         this.boardChopper(now)
-        this.announce(`${STREAK_OVERDRIVE} IN A ROW`, 'chopper — ten seconds of gun', 20)
+        this.announce(`${STREAK_OVERDRIVE} IN A ROW`, detailAt(STREAK_OVERDRIVE), 20)
         return
       case STREAK_SIEGE:
         this.sound('streak')
         this.buffs.siegeUntil = Math.max(this.buffs.siegeUntil, now) + STREAK_SIEGE_MS
-        this.announce(`${STREAK_SIEGE} IN A ROW`, 'siege shells — two hull a hit', 300)
+        this.announce(`${STREAK_SIEGE} IN A ROW`, detailAt(STREAK_SIEGE), 300)
         return
       case STREAK_JUGGERNAUT:
         this.sound('streak')
@@ -1144,12 +1193,12 @@ export class Game {
         this.repairedAt = now
         this.buffs.shieldUntil = Math.max(this.buffs.shieldUntil, now) + STREAK_JUGGER_MS
         this.buffs.speedUntil = Math.max(this.buffs.speedUntil, now) + STREAK_JUGGER_MS
-        this.announce(`${STREAK_JUGGERNAUT} IN A ROW`, 'juggernaut — shielded and fast', 190)
+        this.announce(`${STREAK_JUGGERNAUT} IN A ROW`, detailAt(STREAK_JUGGERNAUT), 190)
         return
       case STREAK_CARPET:
         this.sound('streak')
         this.callStrike(now, CARPET_BOMBS)
-        this.announce(`${STREAK_CARPET} IN A ROW`, 'carpet bombing', 0)
+        this.announce(`${STREAK_CARPET} IN A ROW`, detailAt(STREAK_CARPET), 0)
         return
     }
     if (this.streak > STREAK_CARPET) this.announce(`${this.streak} IN A ROW`, 'unstoppable', 45)
