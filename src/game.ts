@@ -43,8 +43,13 @@ import {
   roomTag,
 } from './protocol'
 import {
+  LOB_BLAST,
+  LOB_CHARGE_MS,
+  LOB_MAX,
+  LOB_MIN,
   MUZZLE_OFFSET,
   MAG_RELOAD,
+  TANK_RADIUS,
   MAG_SIZE,
   RELOAD,
   RESPAWN_DELAY,
@@ -894,12 +899,22 @@ export class Game {
     // hostile event can take a full hull off, and no more than that.
     const damage =
       typeof p.d === 'number' && p.d >= 1 ? Math.min(MAX_HULL, Math.floor(p.d)) : 1
-    const shell = spawnShell(p.id, e.pubkey, p.x, p.y, p.a, bounces, damage)
+    // A lob's range comes off the wire because nobody else can see how long the
+    // key was held. Clamped, like the damage: the range decides where a crater
+    // that hurts *us* appears, so a hostile event does not get to place one on
+    // the far side of the map or at zero distance under our own tracks.
+    const lob =
+      typeof p.l === 'number' && p.l > 0 ? Math.min(LOB_MAX, Math.max(LOB_MIN, p.l)) : 0
+    const shell = spawnShell(p.id, e.pubkey, p.x, p.y, p.a, bounces, damage, lob)
     this.sound('fire', { at: { x: p.x, y: p.y } })
     // Fast-forward by however long the event spent in flight, so the shell
     // appears where the shooter already sees it rather than at the muzzle.
     const lateMs = performance.now() - (p.t0 + peer.offset)
     stepShell(shell, Math.max(0, Math.min(1500, lateMs)) / 1000)
+    // A lob that finished its flight inside the catch-up must still go off.
+    // Dropping it because it arrived dead is how a shot that visibly landed on
+    // you does nothing — the shell is gone, but the crater is the weapon.
+    if (shell.landed) this.detonate(shell)
     if (!shell.dead) this.shells.set(shell.id, shell)
   }
 
@@ -1138,6 +1153,42 @@ export class Game {
   repairedAt = 0
 
   /**
+   * When the current lob charge started, or 0 when the key is not down.
+   *
+   * Only the local player has one. A charge is not on the wire and never will
+   * be: what other clients need is the range the shot went out at, which is one
+   * number on the fire event, rather than a second stream of "still holding it"
+   * ticks at 10Hz for as long as somebody leans on a key.
+   */
+  private lobFrom = 0
+
+  /**
+   * Where a charging lob would land right now, for the aiming ring, or null.
+   *
+   * Read by the renderer every frame. This is the honest half of the weapon:
+   * the shooter sees exactly where the crater goes, and so does everybody who
+   * can see the tank, because the ring is drawn from the same numbers on every
+   * client once the shell is in the air.
+   */
+  get lobAim(): { x: number; y: number; r: number; charge: number } | null {
+    if (!this.lobFrom || this.tank.dead) return null
+    const charge = this.lobCharge(performance.now())
+    const range = LOB_MIN + (LOB_MAX - LOB_MIN) * charge
+    return {
+      x: this.tank.x + Math.cos(this.tank.gun) * range,
+      y: this.tank.y + Math.sin(this.tank.gun) * range,
+      r: LOB_BLAST,
+      charge,
+    }
+  }
+
+  /** 0..1, how far the held key has wound the range up. */
+  private lobCharge(now: number): number {
+    if (!this.lobFrom) return 0
+    return Math.max(0, Math.min(1, (now - this.lobFrom) / LOB_CHARGE_MS))
+  }
+
+  /**
    * "Our clock is behind", when the only events carrying a deadline die of it.
    *
    * The evidence is a fingerprint rather than a tally, and the shape of it is
@@ -1221,7 +1272,20 @@ export class Game {
       const boost = (hasBuff(this.buffs, 'speedUntil', now) ? 1.45 : 1) * this.modifier.speed
       stepTank(this.tank, controls.throttle, controls.steer, controls.aim, dt, boost)
       this.stepMagazine(now, controls.reload)
-      if (controls.fire && this.tank.ammo > 0 && !this.tank.reloadingUntil && now >= this.tank.reloadAt) {
+      const armed = this.tank.ammo > 0 && !this.tank.reloadingUntil && now >= this.tank.reloadAt
+      // The lob is checked before the trigger and takes precedence, so holding
+      // Q with a finger still on the mouse charges rather than machine-gunning
+      // flat shells past the wall you were trying to go over.
+      if (controls.lob) {
+        // Only start winding up when there is actually a shell to throw.
+        // Charging a lob you cannot fire, and then having it not go off on
+        // release, is the kind of thing a player reads as the key not working.
+        if (!this.lobFrom && armed) this.lobFrom = now
+      } else if (this.lobFrom) {
+        const charge = this.lobCharge(now)
+        this.lobFrom = 0
+        if (armed) this.fire(now, LOB_MIN + (LOB_MAX - LOB_MIN) * charge)
+      } else if (controls.fire && armed) {
         this.fire(now)
       }
       this.sweepPickups(now)
@@ -1232,6 +1296,7 @@ export class Game {
       stepShell(shell, dt)
       if (shell.dead) {
         this.shells.delete(shell.id)
+        if (shell.landed) this.detonate(shell)
         continue
       }
       this.collide(shell)
@@ -1276,7 +1341,35 @@ export class Game {
     while (this.feed.length && now - this.feed[0].at > 6000) this.feed.shift()
   }
 
+  /**
+   * A lob has arrived. Everything inside the blast takes the hit.
+   *
+   * Only our own tank's HP is authoritative here, exactly as with a flat shell
+   * — we work out whether *we* were caught and let the state tick carry the
+   * result. The landing point is a pure function of the fire event, so every
+   * client runs this with the same crater in the same place, and two players
+   * standing together both take it.
+   */
+  private detonate(shell: Shell): void {
+    this.sound('blast', { at: { x: shell.x, y: shell.y } })
+    if (shell.owner === this.identity.sessionPubkey || this.tank.dead || this.watching) return
+    const r = LOB_BLAST + TANK_RADIUS
+    if ((this.tank.x - shell.x) ** 2 + (this.tank.y - shell.y) ** 2 > r * r) return
+    if (hasBuff(this.buffs, 'shieldUntil', performance.now())) {
+      this.buffs.shieldUntil = 0
+      this.sound('shield')
+      this.announce('SHIELD BROKE', 'that one was free', 200)
+      return
+    }
+    this.tank.hp -= shell.damage
+    if (this.tank.hp > 0) this.sound('hit')
+    if (this.tank.hp <= 0) this.die(shell.owner)
+  }
+
   private collide(shell: Shell): void {
+    // A lob is over everybody's head for its whole flight. It hits nothing on
+    // the way; `detonate` is the only thing it ever does.
+    if (shell.lob > 0) return
     // Only our own tank's HP is authoritative, so that is the only hit that
     // changes game state. Hits on remote tanks just remove the shell locally
     // so it does not sail visually through someone.
@@ -1320,7 +1413,7 @@ export class Game {
    * minute is a rounding error against the tick stream, and worth checking
    * before adding anything that multiplies events.
    */
-  private fire(now: number): void {
+  private fire(now: number, lob = 0): void {
     const rapid = hasBuff(this.buffs, 'rapidUntil', now) ? 0.42 : 1
     this.tank.reloadAt = now + RELOAD * 1000 * rapid * this.modifier.reload
     // One shell per pull, even when Scattershot turns it into three. Charging
@@ -1330,18 +1423,25 @@ export class Game {
     if (this.tank.ammo <= 0) this.beginMagazineReload(now)
     const bounces = this.modifier.bounces
     const damage = hasBuff(this.buffs, 'siegeUntil', now) ? 2 : 1
-    const spread = hasBuff(this.buffs, 'scatterUntil', now) ? [-SCATTER_SPREAD, 0, SCATTER_SPREAD] : [0]
+    // Scattershot fans flat shells, not lobs. Three craters from one key press
+    // is not a pickup, it is artillery, and the lob already ignores the cover
+    // that makes Scattershot a close-range weapon.
+    const spread =
+      !lob && hasBuff(this.buffs, 'scatterUntil', now) ? [-SCATTER_SPREAD, 0, SCATTER_SPREAD] : [0]
     for (const offset of spread) {
       const angle = this.tank.gun + offset
       const x = this.tank.x + Math.cos(angle) * MUZZLE_OFFSET
       const y = this.tank.y + Math.sin(angle) * MUZZLE_OFFSET
-      const shell = spawnShell(randomId(), this.identity.sessionPubkey, x, y, angle, bounces, damage)
+      const shell = spawnShell(
+        randomId(), this.identity.sessionPubkey, x, y, angle, bounces, damage, lob,
+      )
       this.shells.set(shell.id, shell)
       // Bounce budget and damage go out with the shell rather than being looked
       // up on arrival: one so a shell outlives a block boundary under the rules
       // it was fired under, the other because the victim applies the damage and
       // cannot see the shooter's buffs.
       const payload: ShellPayload = { id: shell.id, t0: now, x, y, a: angle, b: bounces, d: damage }
+      if (lob) payload.l = Math.round(lob)
       this.publishAsSession(KIND_SHELL, payload)
     }
     this.sound('fire')

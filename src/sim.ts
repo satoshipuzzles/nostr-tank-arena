@@ -14,6 +14,41 @@ export const SHELL_SPEED = 430 // px/s
 export const SHELL_RADIUS = 5
 export const SHELL_LIFETIME = 4.0 // seconds
 export const SHELL_BOUNCES = 1
+
+/**
+ * Lobbed shots — hold Q, let go, and the shell goes *over* the wall.
+ *
+ * Puzz: "Hold Q to lob shots over obstacles."
+ *
+ * A lob is a different weapon rather than a modified shell, and the difference
+ * is worth naming: a flat shell is a ray that bounces, and a lob is a point on
+ * the ground that will be dangerous in about a second. It cannot bounce, it
+ * cannot be blocked, and it does not care where you were aiming when it lands.
+ * That is the whole trade — cover stops being cover, and in exchange you give
+ * up the instant hit and telegraph exactly where you are about to hit.
+ *
+ * The range comes from how long the key was held, and it rides out on the fire
+ * event, because the landing point has to be a pure function of the same inputs
+ * on every client. A lob whose range each client computed from its own charge
+ * timer would land in a different crater on every screen, and the victim is the
+ * one who applies the damage.
+ */
+export const LOB_MIN = 150
+export const LOB_MAX = 620
+/** How long the key is held to go from minimum range to maximum. */
+export const LOB_CHARGE_MS = 900
+/** Travel speed along the ground. Slower than a shell: you can see it coming. */
+export const LOB_SPEED = 300
+/** Apex of the arc, in world units, for the renderer. */
+export const LOB_APEX = 150
+/**
+ * Blast radius on landing.
+ *
+ * Wider than a tank because a mortar you have to place perfectly is a mortar
+ * nobody lands, and the two-second flight already gives the target time to walk
+ * out of it. Sized so that a stationary tank is dead and a moving one is fine.
+ */
+export const LOB_BLAST = 62
 export const RELOAD = 1.05 // seconds, between shots inside a magazine
 export const RESPAWN_DELAY = 2.5 // seconds
 /**
@@ -60,6 +95,26 @@ export interface Shell {
    * to know what buffs the shooter had ten seconds ago.
    */
   damage: number
+  /**
+   * Ground range of a lobbed shot, or 0 for an ordinary flat shell.
+   *
+   * On the shell rather than looked up per client, for the same reason as the
+   * bounce budget: everybody re-simulates this trajectory and everybody has to
+   * agree where the crater is.
+   */
+  lob: number
+  /** Distance covered, which is what a lob dies at rather than a wall. */
+  travel: number
+  /**
+   * Set on the step the lob lands, before it is removed.
+   *
+   * A flat shell's damage happens where the shell is; a lob's happens where the
+   * shell *stopped*, to everyone nearby including people it never touched. The
+   * update loop needs to be able to tell those apart on the frame the shell
+   * dies, and `dead` alone cannot — a lob that timed out mid-air and a lob that
+   * arrived are both dead.
+   */
+  landed: boolean
   age: number
   dead: boolean
 }
@@ -84,20 +139,44 @@ export function spawnShell(
   angle: number,
   maxBounces = SHELL_BOUNCES,
   damage = 1,
+  lob = 0,
 ): Shell {
+  const speed = lob > 0 ? LOB_SPEED : SHELL_SPEED
   return {
     id,
     owner,
     x,
     y,
-    vx: Math.cos(angle) * SHELL_SPEED,
-    vy: Math.sin(angle) * SHELL_SPEED,
+    vx: Math.cos(angle) * speed,
+    vy: Math.sin(angle) * speed,
     bounces: 0,
     maxBounces,
     damage,
+    lob,
+    travel: 0,
+    landed: false,
     age: 0,
     dead: false,
   }
+}
+
+/**
+ * Height of a lobbed shell above the felt, 0 for a flat one.
+ *
+ * A parabola over the *fraction of the range covered*, not over elapsed time:
+ * a client that receives the fire event 300ms late fast-forwards the shell by
+ * distance, and an arc keyed to its own clock would pop the shell into the sky
+ * at the moment it catches up.
+ */
+export function shellHeight(s: Shell): number {
+  if (s.lob <= 0) return 0
+  const u = Math.max(0, Math.min(1, s.travel / s.lob))
+  return LOB_APEX * 4 * u * (1 - u)
+}
+
+/** Is this shell high enough that walls and tanks are beneath it? */
+export function shellAirborne(s: Shell): boolean {
+  return s.lob > 0 && !s.landed
 }
 
 const SHELL_STEP = 1 / 120
@@ -113,6 +192,47 @@ const SHELL_STEP = 1 / 120
  * block hash — every client re-simulating this shell already agrees on it.
  */
 export function stepShell(s: Shell, dt: number): void {
+  // A lob is above the geometry for its whole flight, so it does not consult
+  // the arena at all — it flies its range and then stops. Kept as its own loop
+  // rather than as a branch inside the bounce loop because the two share almost
+  // nothing: no walls, no reflection, no bounce budget, and a different reason
+  // to die.
+  if (s.lob > 0) {
+    let left = dt
+    while (left > 0 && !s.dead) {
+      const step = Math.min(SHELL_STEP, left)
+      left -= step
+      s.age += step
+      const speed = Math.hypot(s.vx, s.vy)
+      const remain = s.lob - s.travel
+      // Land on the exact point rather than wherever the last sub-step happened
+      // to finish. This is not tidiness: a client that received the fire event
+      // late fast-forwards by an arbitrary amount, so the sub-steps fall on
+      // different boundaries on every screen, and taking one whole step past
+      // the range put the crater up to 2.5px apart between clients. Small, and
+      // still a divergence in the one number every client has to agree on.
+      if (speed * step >= remain) {
+        s.x += (s.vx / speed) * remain
+        s.y += (s.vy / speed) * remain
+        s.travel = s.lob
+        s.landed = true
+        s.dead = true
+        return
+      }
+      s.x += s.vx * step
+      s.y += s.vy * step
+      s.travel += speed * step
+      // A lob still has a lifetime, as a backstop. It cannot normally reach it
+      // — LOB_MAX at LOB_SPEED is about two seconds — but a shell that somehow
+      // outlives its range must not sit in the map forever.
+      if (s.age > SHELL_LIFETIME) {
+        s.dead = true
+        return
+      }
+    }
+    return
+  }
+
   let remaining = dt
   while (remaining > 0 && !s.dead) {
     const step = Math.min(SHELL_STEP, remaining)
