@@ -89,17 +89,17 @@ try {
   await wait(1200)
 
   const board = await page.evaluate(() => ({
-    barrels: window.__arena.BARRELS.length,
+    barrels: window.__arena.BREAKABLE.length,
     map: document.getElementById('hud-map')?.textContent,
   }))
-  check('the pinned board has barrels on it', board.barrels >= 2, JSON.stringify(board))
+  check('the pinned board has breakable cover on it', board.barrels >= 2, JSON.stringify(board))
   if (!board.barrels) throw new Error('no barrels on the pinned board')
 
   // ------------------------------------------------- 1. it leaves the screen
 
   const drawn = () => page.evaluate(() => {
     const a = window.__arena, r = window.__renderer
-    return a.BARRELS.map((b) => ({
+    return a.BREAKABLE.map((b) => ({
       id: b.id, hp: b.hp, gone: b.gone,
       // The mesh, not the rect. This is the claim.
       visible: r.coverMeshAt(b.id)?.visible ?? null,
@@ -107,7 +107,7 @@ try {
   })
 
   const before = await drawn()
-  check('every barrel is intact and on screen to start with',
+  check('every piece is intact and on screen to start with',
     before.every((b) => b.gone === false && b.visible === true), JSON.stringify(before))
 
   // Put a shell into one, through the real update loop, from a lane we pick at
@@ -116,7 +116,7 @@ try {
     const g = window.__game, a = window.__arena
     // Whichever barrel has a lane, not barrel zero. Where the barrels sit is a
     // property of the board, and the board comes from the block hash.
-    for (const b of a.BARRELS) {
+    for (const b of a.BREAKABLE) {
     const cx = b.x + b.w / 2, cy = b.y + b.h / 2
     // Find open ground to fire from, so nothing here is a claim about one
     // board's furniture.
@@ -146,8 +146,14 @@ try {
       }
     }
     if (!from) continue
+    // Fire its own hull's worth, not three. The board carries barrels at three
+    // hits and crates at eight, and the first version of this shot three shells
+    // at whatever came first in the list — which after crates were added was a
+    // crate, so it reported "three shells did not destroy it" about a thing
+    // that takes eight.
     const hits = []
-    for (let n = 0; n < 3; n++) {
+    const need = b.hp
+    for (let n = 0; n < need; n++) {
       g.tank.dead = false
       g.tank.x = from.x
       g.tank.y = from.y
@@ -163,15 +169,18 @@ try {
       }
       hits.push({ hp: b.hp, gone: b.gone })
     }
-    return { lane: true, hits, id: b.id, from: { x: Math.round(from.x), y: Math.round(from.y) } }
+    return { lane: true, hits, id: b.id, need, kind: b.kind, from: { x: Math.round(from.x), y: Math.round(from.y) } }
     }
     return { lane: false }
   })
-  check('found a lane and put three shells into a barrel', shot.lane, JSON.stringify(shot))
+  check('found a lane and emptied a magazine into a piece of cover',
+    shot.lane, JSON.stringify({ id: shot.id, kind: shot.kind, need: shot.need, from: shot.from }))
   check(
-    'three shells destroy it, and the first two do not',
-    shot.hits && shot.hits[0].gone === false && shot.hits[1].gone === false && shot.hits[2].gone === true,
-    JSON.stringify(shot.hits),
+    'it takes exactly its own hull, and only the last shell destroys it',
+    shot.hits && shot.hits.length === shot.need &&
+      shot.hits.slice(0, -1).every((h) => h.gone === false) &&
+      shot.hits[shot.hits.length - 1].gone === true,
+    `${shot.kind} at ${shot.need}: ${JSON.stringify(shot.hits.map((h) => h.hp))}`,
   )
 
   // Poll, do not wait a fixed 400ms. `syncCover` runs inside `draw`, and under
@@ -193,7 +202,7 @@ try {
   const hitOne = after.find((b) => b.id === shot.id)
   check('and the mesh comes off the board, not just the rect',
     hitOne?.gone === true && hitOne?.visible === false, JSON.stringify(hitOne))
-  check('the control: the barrels nobody shot are still drawn',
+  check('the control: the pieces nobody shot are still drawn',
     after.filter((b) => b.id !== shot.id).every((b) => b.gone === false && b.visible === true),
     JSON.stringify(after.filter((b) => b.id !== shot.id)))
 
@@ -218,8 +227,8 @@ try {
     void hash
     // A different barrel from the one we shot, so this is about the union
     // rather than about re-destroying something already gone.
-    const idx = a.BARRELS.findIndex((b) => !b.gone)
-    const target = a.BARRELS[idx]
+    const idx = a.BREAKABLE.findIndex((b) => !b.gone)
+    const target = a.BREAKABLE[idx]
     const bit = 1 << idx
     g.onEvent({
       id: 'a' + Math.random().toString(16).slice(2),
@@ -231,7 +240,7 @@ try {
     }, false)
     return { gone: target.gone, hp: target.hp, bits: a.coverBits(), id: target.id }
   }, PEER, HASH)
-  check("a peer's tick takes out a barrel we never shot",
+  check("a peer's tick takes out a piece we never shot",
     fromPeer.gone === true && fromPeer.bits !== ourBits && (fromPeer.bits & ourBits) === ourBits,
     JSON.stringify({ ...fromPeer, ourBits }))
 
@@ -245,8 +254,8 @@ try {
   // so a stale mask would flatten a board that has just been rebuilt.
   const stale = await page.evaluate((PEER) => {
     const g = window.__game, a = window.__arena
-    const idx = a.BARRELS.findIndex((b) => !b.gone)
-    const target = a.BARRELS[idx]
+    const idx = a.BREAKABLE.findIndex((b) => !b.gone)
+    const target = a.BREAKABLE[idx]
     const was = a.coverBits()
     g.onEvent({
       id: 'a' + Math.random().toString(16).slice(2),
@@ -267,9 +276,9 @@ try {
     const g = window.__game, a = window.__arena, r = window.__renderer
     // `beginRound` was nailed shut above; call the real one off the prototype.
     Object.getPrototypeOf(g).beginRound.call(g, 900001, hash)
-    return { bits: a.coverBits(), hp: a.BARRELS.map((b) => b.hp), gen: a.coverGeneration(), gone: a.BARRELS.map((b) => b.gone), firstId: a.BARRELS[0].id, _r: !!r }
+    return { bits: a.coverBits(), hp: a.BREAKABLE.map((b) => b.hp), gen: a.coverGeneration(), gone: a.BREAKABLE.map((b) => b.gone), firstId: a.BREAKABLE[0].id, _r: !!r }
   }, HASH)
-  check('a new round puts every barrel back',
+  check('a new round puts every piece back',
     rebuilt.bits === 0 && rebuilt.gone.every((g) => g === false), JSON.stringify(rebuilt))
   const afterRound = await drawnOnce(rebuilt.firstId, true)
   check('and they are all drawn again',

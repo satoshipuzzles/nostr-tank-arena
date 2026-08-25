@@ -2351,24 +2351,31 @@ export class Renderer {
     for (const blast of game.coverBlasts) {
       if (blast.at <= this.lastCoverBlast) continue
       this.lastCoverBlast = blast.at
-      // Orange and upward, so it reads as a barrel rather than as a tank dying
-      // — a death is grey confetti thrown outward at ground level.
-      this.confetti.burst(blast.x, blast.y, blast.loud ? 26 : 12, 28, {
-        speed: 150,
-        up: 220,
-        y: 26,
-        size: 1.1,
-        life: 0.75,
-      })
-      for (let i = 0; i < (blast.loud ? 14 : 6); i++) {
-        this.plumes.puff(
-          blast.x + (Math.random() - 0.5) * 46,
-          20 + Math.random() * 60,
-          blast.y + (Math.random() - 0.5) * 46,
-          i < 6,
-        )
+      // A barrel goes up; a crate comes apart. Orange and upward for the first,
+      // timber-coloured and outward for the second — the two are the difference
+      // between "stand back" and "the lane is open", and a crate that broke in
+      // a fireball would say the wrong one.
+      const fire = blast.fire
+      this.confetti.burst(
+        blast.x,
+        blast.y,
+        blast.loud ? (fire ? 26 : 20) : 10,
+        fire ? 28 : 32,
+        fire
+          ? { speed: 150, up: 220, y: 26, size: 1.1, life: 0.75 }
+          : { speed: 190, up: 90, y: 18, size: 0.95, life: 0.6 },
+      )
+      if (fire) {
+        for (let i = 0; i < (blast.loud ? 14 : 6); i++) {
+          this.plumes.puff(
+            blast.x + (Math.random() - 0.5) * 46,
+            20 + Math.random() * 60,
+            blast.y + (Math.random() - 0.5) * 46,
+            i < 6,
+          )
+        }
       }
-      if (blast.loud) this.shake = Math.max(this.shake, 14)
+      if (blast.loud) this.shake = Math.max(this.shake, fire ? 14 : 7)
     }
   }
 
