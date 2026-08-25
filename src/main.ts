@@ -404,6 +404,50 @@ function autoPublishRound(result: import('./game').RoundResult): void {
 }
 
 /**
+ * Which side you are on. None, or one of five.
+ *
+ * A button rather than a lobby setting, because a side is something you change
+ * mid-round when somebody asks you to — and because there is nobody here to
+ * agree a room's mode with in advance. Two players on the same side stop
+ * shooting each other and their scores add up; one player on a side is still a
+ * deathmatch, which is exactly what should happen when you pick a team and
+ * nobody joins you.
+ *
+ * Remembered, because "we're red" survives a reload and re-picking it every
+ * time you rejoin is the thing that makes people not bother.
+ */
+const TEAM_NAMES = ['none', 'Red', 'Blue', 'Green', 'Gold', 'Violet']
+const TEAM_HUES = [0, 356, 210, 132, 44, 285]
+let teamPick = Math.max(0, Math.min(5, Number(stored('tank.team') ?? 0) || 0))
+
+function paintTeamButton(): void {
+  const btn = $('team-toggle')
+  btn.textContent = `Team: ${TEAM_NAMES[teamPick]}`
+  btn.style.borderColor = teamPick ? `hsl(${TEAM_HUES[teamPick]} 72% 58%)` : ''
+  btn.style.color = teamPick ? `hsl(${TEAM_HUES[teamPick]} 78% 72%)` : ''
+}
+
+function setTeam(next: number): void {
+  teamPick = ((next % 6) + 6) % 6
+  store('tank.team', String(teamPick))
+  paintTeamButton()
+  if (!running) return
+  for (const p of running.players) p.game.team = teamPick
+  running.players[0].game.pushFeed(
+    teamPick ? `you are on ${TEAM_NAMES[teamPick]}` : 'free-for-all — no side',
+  )
+}
+
+paintTeamButton()
+$('team-toggle').addEventListener('click', () => setTeam(teamPick + 1))
+window.addEventListener('keydown', (e) => {
+  if (e.code !== 'KeyT' || e.repeat) return
+  const target = e.target as HTMLElement | null
+  if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return
+  setTeam(teamPick + 1)
+})
+
+/**
  * Practice tanks, on or off.
  *
  * On by default and remembered, because the common first run of this game is
@@ -1298,6 +1342,10 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     // player one, so the room is never empty and the bots stand down on their
     // own without this having to know about couch mode.
     for (const p of players) p.game.botsEnabled = botsWanted
+    // The remembered side reaches the fresh `Game`, and player two shares it —
+    // two people on one couch are on one team unless they say otherwise, which
+    // is what a couch is.
+    for (const p of players) p.game.team = teamPick
     // Repainted here rather than at module load: the default depends on whether
     // this session is a guest, and that is not known until a game exists.
     paintAutoPublish()
@@ -1626,20 +1674,48 @@ function drawHud(game: Game): void {
   // key has no profile to fetch and falls back to a coloured initial, which is
   // the point — playing without an identity stays a first-class option.
   const profiles = running?.profiles
-  $('scoreboard').innerHTML = game
-    .scoreboard()
-    .map((r) => {
-      const profile = r.pubkey ? (profiles?.get(r.pubkey) ?? null) : null
-      const badge = nip05Badge(profile)
-      const real = profile && r.pubkey && profile.name !== shortNpub(r.pubkey) ? profile.name : ''
-      return `<div class="score-row card${r.you ? ' you' : ''}">
+  // Sides first, when there are any. Two rows of "Red 7 — Blue 5" above the
+  // players is the only thing a team game needs that a deathmatch does not, and
+  // it is drawn from the same standings rather than from a second tally.
+  //
+  // `teamStandings` returns null until at least two sides have somebody on
+  // them, which is the right threshold: a team of one is a person, and a
+  // scoreboard that grows a "Red 0 — 0" header the instant you press T would
+  // be reporting a game nobody is playing.
+  const teams = game.teamStandings()
+  const teamRows = teams
+    ? `<div class="team-tally">${teams
+        .map(
+          (t) =>
+            `<div class="team-row"><span class="team-dot" style="background:hsl(${TEAM_HUES[t.team]} 72% 56%)"></span>` +
+            `<span class="team-name">${escapeHtml(TEAM_NAMES[t.team] ?? String(t.team))}</span>` +
+            `<span class="team-n">${t.players}</span>${kd(t.kills, t.deaths)}</div>`,
+        )
+        .join('')}</div>`
+    : ''
+
+  $('scoreboard').innerHTML =
+    teamRows +
+    game
+      .scoreboard()
+      .map((r) => {
+        const profile = r.pubkey ? (profiles?.get(r.pubkey) ?? null) : null
+        const badge = nip05Badge(profile)
+        const real = profile && r.pubkey && profile.name !== shortNpub(r.pubkey) ? profile.name : ''
+        // A stripe in the team colour rather than recolouring the tank. The hue
+        // is how you find yourself on a board of eight and it must not move;
+        // the side is a second fact and gets a second mark.
+        const stripe = r.team
+          ? ` style="box-shadow:inset 3px 0 0 hsl(${TEAM_HUES[r.team]} 72% 56%)"`
+          : ''
+        return `<div class="score-row card${r.you ? ' you' : ''}"${stripe}>
            <span class="who">${avatar(profile, r.name, r.color)}
            <span class="ident"><span class="name" style="color:hsl(${r.color} 70% 70%)">${escapeHtml(r.name)}</span>
            ${badge || (real ? `<span class="nip05">${escapeHtml(real)}</span>` : '')}</span></span>
            ${kd(r.kills, r.deaths)}
          </div>`
-    })
-    .join('')
+      })
+      .join('')
 
   drawRules(game)
   drawClockAlarm()

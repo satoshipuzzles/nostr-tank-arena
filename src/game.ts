@@ -187,6 +187,15 @@ const STREAK_SIEGE = 15
 const STREAK_JUGGERNAUT = 20
 /** A second, longer air strike. Nothing beyond this changes; 25 is the top. */
 const STREAK_CARPET = 25
+
+/**
+ * How many sides there are.
+ *
+ * Five, because Puzz asked for "duos with 5 teams" — a full room of eight is
+ * four duos, and five leaves a spare side for an odd number rather than forcing
+ * somebody onto a team of three.
+ */
+const TEAMS = 5
 /** How long the streak reward's rapid fire lasts. */
 const STREAK_SIEGE_MS = 20_000
 const STREAK_JUGGER_MS = 12_000
@@ -269,6 +278,8 @@ export interface Peer {
     chopperUntil: number
     /** Where their chopper's rounds are landing, or null. */
     chopperAt: { x: number; y: number } | null
+    /** The team they say they are on, 1..5, or 0 for a free-for-all. */
+    team: number
   }
   /** What we counted for them out of the death events we personally received. */
   kills: number
@@ -339,6 +350,8 @@ interface StateSample {
   chopperUntil: number
   /** Ground point their rounds are landing on, or null. */
   chopperAt: { x: number; y: number } | null
+  /** Declared team, 1..5, or 0. */
+  team: number
 }
 
 export interface FeedEntry {
@@ -355,6 +368,8 @@ export interface Standing {
   you: boolean
   /** Real npub, so the scoreboard can put a face to it. Null until attested. */
   pubkey: string | null
+  /** Declared side, 1..5, or 0 for a free-for-all. */
+  team: number
 }
 
 export interface RoundResult {
@@ -858,6 +873,7 @@ export class Game {
         shield: false,
         chopperUntil: 0,
         chopperAt: null,
+        team: 0,
       },
         kills: 0,
         deaths: 0,
@@ -928,6 +944,10 @@ export class Game {
         typeof p.c === 'number' && p.c > 0 && typeof p.cx === 'number' && typeof p.cy === 'number'
           ? chopperAim(p.x, p.y, p.cx, p.cy)
           : null,
+      // Clamped to the band a player can actually pick. A team index outside it
+      // would put somebody on a side nothing draws and nobody can shoot.
+      team:
+        typeof p.tm === 'number' && p.tm >= 1 && p.tm <= TEAMS ? Math.floor(p.tm) : 0,
     }
     // Cosmetic and self-reported, exactly like the HP beside it. A streak you
     // cannot see on the tank that has it is a number in somebody else's HUD.
@@ -1214,6 +1234,10 @@ export class Game {
         this.blasts.push({ x, y: strike.y, mine })
         this.sound('blast', { at: { x, y: strike.y } })
         if (mine || this.watching || this.tank.dead) continue
+        // A teammate's strike walks over us. The lane is picked away from the
+        // caller already; on a team that exemption has to cover the side, or a
+        // reward earned by one player is a punishment for their partner.
+        if (this.friendly(strike.owner)) continue
         const dx = this.tank.x - x
         const dy = this.tank.y - strike.y
         if (dx * dx + dy * dy > STRIKE_RADIUS * STRIKE_RADIUS) continue
@@ -1270,6 +1294,73 @@ export class Game {
 
   /** Kills against bots. Deliberately not `kills` — see the note in bots.ts. */
   botKills = 0
+
+  /**
+   * The side this player has declared, 1..5, or 0 for a free-for-all.
+   *
+   * Puzz: "Team Death match Duos with 5 teams."
+   *
+   * Self-declared, always available, and it needs no agreement from anybody.
+   * There is no host here to assign sides, and the two ways of deciding them
+   * without one are both worse: deriving from the roster means two clients with
+   * different relay visibility computing different sides for the same player,
+   * and deriving from the pubkey takes away the choice, which is the half of
+   * team play people actually want.
+   *
+   * So a room is in team mode when the people in it say it is. One player on a
+   * side is still a deathmatch; two on the same side stop shooting each other.
+   * Nothing is enforced and nothing has to be: see `friendly` for why claiming
+   * somebody's side buys a truce rather than an advantage.
+   */
+  team = 0
+
+  /**
+   * Are we and the owner of this shell on the same side?
+   *
+   * Read by whoever is being shot, never by the shooter — which is what makes
+   * a self-declared team safe. Think about what a liar gets: claiming somebody
+   * else's side makes their shells pass through you, and *yours pass through
+   * them*, because they are running this same check against your tick. A false
+   * claim is a mutual truce, not immunity, and a mutual truce with somebody who
+   * did not agree to it is a fight you cannot win rather than one you cannot
+   * lose.
+   *
+   * Zero is nobody's side. Two players who have not picked a team are not
+   * teammates, they are two people in a deathmatch, so a `0 === 0` shortcut
+   * here would silently turn off friendly fire for the whole room the moment
+   * anybody looked at this the wrong way.
+   */
+  private friendly(owner: string | null): boolean {
+    if (!this.team || !owner) return false
+    const peer = this.peers.get(owner)
+    return !!peer && peer.view.team === this.team
+  }
+
+  /** How many sides a player can pick from. */
+  static readonly TEAMS = TEAMS
+
+  /**
+   * The room's sides and what each has scored, or null in a free-for-all.
+   *
+   * Null rather than an empty array when nobody has picked, because "no teams"
+   * and "teams with nothing in them" are different things and the HUD draws
+   * them differently. One side with one player on it is also a free-for-all —
+   * a team of one is a person.
+   */
+  teamStandings(): { team: number; kills: number; deaths: number; players: number }[] | null {
+    const rows = this.scoreboard()
+    const byTeam = new Map<number, { team: number; kills: number; deaths: number; players: number }>()
+    for (const r of rows) {
+      if (!r.team) continue
+      const t = byTeam.get(r.team) ?? { team: r.team, kills: 0, deaths: 0, players: 0 }
+      t.kills += r.kills
+      t.deaths += r.deaths
+      t.players++
+      byTeam.set(r.team, t)
+    }
+    if (byTeam.size < 2) return null
+    return [...byTeam.values()].sort((a, b) => b.kills - a.kills || a.deaths - b.deaths || a.team - b.team)
+  }
 
   /** Is this session key one of ours rather than a person on a relay? */
   isBot(session: string | null): boolean {
@@ -1340,6 +1431,9 @@ export class Game {
       peer.view.shield = false
       peer.view.chopperUntil = 0
       peer.view.chopperAt = null
+      // Bots take the side of whoever they are practising against, so a player
+      // on a team is not suddenly fighting three tanks that are all on it too.
+      peer.view.team = 0
     }
   }
 
@@ -1456,6 +1550,10 @@ export class Game {
       }
     }
     if (this.tank.dead || this.watching) return
+    // A barrel a teammate shot still does not hurt us, which is the same rule
+    // as their shell — and it means a team can use the barrels as a weapon
+    // without having to check who is standing where first.
+    if (this.friendly(owner)) return
     if ((this.tank.x - x) ** 2 + (this.tank.y - y) ** 2 > r * r) return
     if (hasBuff(this.buffs, 'shieldUntil', performance.now())) {
       this.buffs.shieldUntil = 0
@@ -1597,6 +1695,7 @@ export class Game {
     for (const peer of this.peers.values()) {
       const at = peer.view.chopperAt
       if (!at || peer.view.chopperUntil <= now) continue
+      if (this.team && peer.view.team === this.team) continue
       if (!underFire(at.x, at.y, this.tank.x, this.tank.y)) continue
       if (now < (this.chopperHitAt.get(peer.session) ?? 0)) continue
       this.chopperHitAt.set(peer.session, now + CHOPPER_HIT_MS)
@@ -1890,6 +1989,7 @@ export class Game {
     // after the first casualty would drop the rest.
     this.blastBots(shell)
     if (shell.owner === this.identity.sessionPubkey || this.tank.dead || this.watching) return
+    if (this.friendly(shell.owner)) return
     const r = LOB_BLAST + TANK_RADIUS
     if ((this.tank.x - shell.x) ** 2 + (this.tank.y - shell.y) ** 2 > r * r) return
     if (hasBuff(this.buffs, 'shieldUntil', performance.now())) {
@@ -1916,6 +2016,10 @@ export class Game {
       shellHits(shell, this.tank.x, this.tank.y)
     ) {
       this.shells.delete(shell.id)
+      // A teammate's shell stops here rather than passing through, so it does
+      // not sail on and kill somebody behind us. Removed and forgotten: the
+      // shot was still fired, it just did not land on a friend.
+      if (this.friendly(shell.owner)) return
       // A shield eats the shot and is spent. Same authority as HP: our own
       // tank decides what happened to it, and the result rides out in the next
       // state tick like any other change.
@@ -2101,6 +2205,7 @@ export class Game {
         peer.view.shield = newest.shield
         peer.view.chopperUntil = newest.chopperUntil
         peer.view.chopperAt = newest.chopperAt
+        peer.view.team = newest.team
         continue
       }
 
@@ -2132,6 +2237,8 @@ export class Game {
       // shooting at.
       peer.view.chopperUntil = bb.chopperUntil
       peer.view.chopperAt = bb.chopperAt
+      // The newer sample. A side is a step, not a slope.
+      peer.view.team = bb.team
       while (b.length > 2 && b[1].t < renderAt) b.shift()
     }
   }
@@ -2214,6 +2321,9 @@ export class Game {
       // round. Unioned by whoever receives it, so a tick lost on the way costs
       // nothing and a late joiner is caught up by the next one.
       ...(coverBits() ? { b: coverBits() } : {}),
+      // Absent in a free-for-all, which is most rounds, so the common tick is
+      // the size it was before teams existed.
+      ...(this.team ? { tm: this.team } : {}),
       // The whole gunship, on a tick that was going out anyway. A duration, so
       // a receiver adds it to its own clock and nobody has to agree on a
       // deadline. Absent for every tick of a round nobody earned one in.
@@ -2557,6 +2667,7 @@ export class Game {
         color: this.displayColor,
         you: true,
         pubkey: this.identity.pubkey,
+        team: this.team,
       },
       // A peer's own count beats ours. See `Peer.claimed`: ours is assembled
       // from ephemeral death events and is short by everything that happened
@@ -2569,6 +2680,7 @@ export class Game {
         color: p.displayColor,
         you: false,
         pubkey: p.pubkey,
+        team: p.view.team,
       })),
     ]
     return rows.sort((a, b) => b.kills - a.kills || a.deaths - b.deaths)

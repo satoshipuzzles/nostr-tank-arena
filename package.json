@@ -34,7 +34,8 @@
     "test:autopublish": "node test/autopublish.mjs",
     "test:chopper": "node test/chopper.mjs",
     "test:chopper-browser": "node test/chopper-browser.mjs",
-    "test:eight": "node test/eight.mjs"
+    "test:eight": "node test/eight.mjs",
+    "test:teams": "node test/teams.mjs"
   },
   "dependencies": {
     "nostr-tools": "^2.10.4",

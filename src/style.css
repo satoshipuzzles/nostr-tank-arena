@@ -1093,6 +1093,36 @@ body.hud-compact #feed { bottom: max(10px, env(safe-area-inset-bottom)); }
 .sn-won { font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; }
 .seasoncard .fine { margin-top: 8px; }
 
+/* Team tally, above the player rows.
+   Only drawn when two sides have somebody on them — see `teamStandings` — so
+   the common scoreboard is exactly what it was. The dot carries the colour and
+   the word carries the name, because a colour alone is not a message on a
+   screen somebody is glancing at mid-fight. */
+.team-tally {
+  display: grid;
+  gap: 2px;
+  padding-bottom: 6px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+.team-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+}
+.team-dot { width: 9px; height: 9px; border-radius: 2px; flex: none; }
+.team-name { font-weight: 700; }
+/* How many players are on it, so "Red 12" against "Blue 9" is readable as
+   three against two rather than as one player having a very good round. */
+.team-n {
+  margin-left: auto;
+  color: var(--dim);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.team-row .kd { margin-left: 8px; }
+
 /* The chopper clock.
    Top-centre, under the rules banner, because that is the one strip of screen a
    player flying a gunship is not looking at — they are watching the ground.

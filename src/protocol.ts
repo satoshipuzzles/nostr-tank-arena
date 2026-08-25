@@ -138,6 +138,23 @@ export interface StatePayload {
   cx?: number
   cy?: number
   /**
+   * The team this tank has declared, 1..5, or absent for a free-for-all.
+   *
+   * **Self-declared, and that is the design rather than a shortcut.** There is
+   * no host to assign teams, and deriving them from the roster is the one thing
+   * that cannot work here: two clients with different relay visibility would
+   * compute different sides for the same player, which is worse than lopsided
+   * teams. Deriving them from the pubkey would work and would take the choice
+   * away, which is the half of team play people actually want.
+   *
+   * So it is exactly as trustworthy as the `hp` beside it, and it happens to be
+   * the one self-reported field with no exploit in it. Claiming somebody's team
+   * makes their shells pass through you *and yours pass through them* — the
+   * rule is applied by whoever is being shot, so a false claim buys a mutual
+   * truce rather than immunity. See "Teams" in the README.
+   */
+  tm?: number
+  /**
    * Shells left in the sender's magazine, 0 while reloading.
    *
    * On the wire for a gameplay reason rather than a bookkeeping one: an empty
