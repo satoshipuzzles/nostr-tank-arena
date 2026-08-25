@@ -29,6 +29,19 @@ export interface Controls {
   steer: number
   /** Absolute gun angle in world radians, or null to hold the current one. */
   aim: number | null
+  /**
+   * Where on the board the player is pointing, in world units, or null.
+   *
+   * A bearing is enough for a turret, which is bolted to a tank and can only
+   * choose a direction. The chopper gun needs a *point*: it is three hundred
+   * units up and its rounds land somewhere specific, and "the direction of the
+   * mouse from the helicopter" would put them at the board edge every time.
+   *
+   * Null on a pad or a thumb, which have a stick and no cursor — `Game` reads
+   * the bearing and projects it, so a controller aims at arm's length ahead
+   * rather than at nothing.
+   */
+  aimAt: { x: number; y: number } | null
   fire: boolean
   /**
    * Asked for a reload before the magazine ran dry.
@@ -329,7 +342,7 @@ export class Input {
       if (this.scheme === 'tank') {
         // No lob on glass yet: it needs its own on-screen control, and that
         // belongs with the mobile pass rather than bolted onto the fire pad.
-        return { throttle: -y, steer: x, aim, fire: touched.fire, reload: false, lob: false }
+        return { throttle: -y, steer: x, aim, aimAt: null, fire: touched.fire, reload: false, lob: false }
       }
       const heading = this.fromScreen(x, y, tank.hull)
       const drive = this.toHeading(heading.x, heading.y, tank.hull)
@@ -338,7 +351,7 @@ export class Input {
       // is no way to nudge into a corner.
       const push = Math.min(1, Math.hypot(x, y))
       return {
-        throttle: drive.throttle * push, steer: drive.steer, aim,
+        throttle: drive.throttle * push, steer: drive.steer, aim, aimAt: null,
         fire: touched.fire, reload: false, lob: false,
       }
     }
@@ -359,6 +372,9 @@ export class Input {
     const fire = (this.binding.mouse && this.mouseDown) || has(map.fire)
     const reload = has(map.reload)
     const lob = has(map.lob)
+    // The raw cursor point, before it is turned into a bearing. Only the mouse
+    // has one; a stick has a direction and no position on the board.
+    const aimAt = this.binding.mouse && this.mouseWorld ? { ...this.mouseWorld } : null
     const aim =
       this.binding.mouse && this.mouseWorld
         ? Math.atan2(this.mouseWorld.y - tank.y, this.mouseWorld.x - tank.x)
@@ -372,10 +388,10 @@ export class Input {
     // scheme reads the keys as a direction on the board, and only that reading
     // has to be rotated when the board is being seen from inside the turret.
     if (this.scheme === 'tank') {
-      return { throttle: -y, steer: x, aim, fire, reload, lob }
+      return { throttle: -y, steer: x, aim, aimAt, fire, reload, lob }
     }
     const heading = this.fromScreen(x, y, tank.hull)
-    return { ...this.toHeading(heading.x, heading.y, tank.hull), aim, fire, reload, lob }
+    return { ...this.toHeading(heading.x, heading.y, tank.hull), aim, aimAt, fire, reload, lob }
   }
 
   /** Where a player with no aiming device is pointing: along the hull. */
@@ -466,9 +482,9 @@ export class Input {
         const drive = this.toHeading(heading.x, heading.y, tank.hull)
         // Scale by how far the stick is pushed, so it is not all-or-nothing.
         const push = Math.min(1, Math.hypot(lx, ly))
-        return { throttle: drive.throttle * push, steer: drive.steer, aim, fire, reload, lob }
+        return { throttle: drive.throttle * push, steer: drive.steer, aim, aimAt: null, fire, reload, lob }
       }
-      return { throttle: -ly, steer: lx, aim, fire, reload, lob }
+      return { throttle: -ly, steer: lx, aim, aimAt: null, fire, reload, lob }
     }
     return null
   }

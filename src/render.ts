@@ -24,6 +24,7 @@ import * as THREE from 'three'
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { ARENA_H, ARENA_W, WALLS, coverGeneration, onLayoutChange, pointInTallWall } from './arena'
+import { CHOPPER_ALT, CHOPPER_SPREAD } from './chopper'
 import type { CoverKind, Rect } from './arena'
 import type { Game, Peer } from './game'
 import { LOB_APEX, LOB_BLAST, MAX_HP, RELOAD, TANK_RADIUS, shellHeight } from './sim'
@@ -83,6 +84,9 @@ const AIM_ARC = (105 * Math.PI) / 180
 export type ViewMode = 'board' | 'cockpit'
 
 const TAU = Math.PI * 2
+
+/** Reused by the chopper's beam orientation; allocating one a frame is waste. */
+const UP = new THREE.Vector3(0, 1, 0)
 
 // --------------------------------------------------------------- materials
 
@@ -287,6 +291,143 @@ function chalkTexture(): THREE.Texture {
   texture.colorSpace = THREE.SRGBColorSpace
   texture.anisotropy = 4
   return texture
+}
+
+/**
+ * A gunship: hull, tail, rotor, the beam of rounds, and the circle they land in.
+ *
+ * Toy-scaled to match everything else on this board. It is drawn three hundred
+ * units up and seen from a camera two thousand back, so it is deliberately
+ * chunky — a scale model of a helicopter at this distance is a smudge, and what
+ * has to read in a quarter of a second is "that is a chopper and it is over
+ * there".
+ */
+interface ChopperRig {
+  root: THREE.Group
+  body: THREE.Group
+  rotor: THREE.Mesh
+  beam: THREE.Mesh
+  splash: THREE.Mesh
+  shadow: THREE.Mesh
+  wasX: number
+  wasZ: number
+}
+
+// Sized against the tanks, not against a real helicopter.
+//
+// The first cut had a 150-unit rotor over a 30-unit hull and photographed as a
+// flat purple X on the felt: at this camera distance the blades were the only
+// thing with any area and the body was three pixels underneath them. A tank is
+// 44 long and reads fine, so the hull is built to about that and the rotor is
+// only half again as wide — the disc still says helicopter, and now there is a
+// body under it saying whose.
+const CHOPPER_GEO = {
+  hull: new THREE.CapsuleGeometry(17, 34, 5, 12),
+  cabin: new THREE.SphereGeometry(15, 14, 12),
+  tail: new THREE.BoxGeometry(9, 9, 52),
+  fin: new THREE.BoxGeometry(4, 22, 12),
+  rotor: new THREE.BoxGeometry(96, 3, 9),
+  rotor2: new THREE.BoxGeometry(9, 3, 96),
+  disc: new THREE.CircleGeometry(52, 26),
+  mast: new THREE.CylinderGeometry(3, 3, 16, 8),
+  beam: new THREE.CylinderGeometry(4, 11, 1, 10, 1, true),
+  splash: new THREE.RingGeometry(CHOPPER_SPREAD - 9, CHOPPER_SPREAD, 30),
+  shadow: new THREE.CircleGeometry(30, 22),
+}
+
+function makeChopper(hue: number): ChopperRig {
+  const root = new THREE.Group()
+  const body = new THREE.Group()
+  const paint = new THREE.MeshStandardMaterial({
+    color: new THREE.Color().setHSL(hue / 360, 0.62, 0.54),
+    roughness: 0.55,
+    metalness: 0.05,
+  })
+  const dark = new THREE.MeshStandardMaterial({ color: 0x2b3242, roughness: 0.7 })
+
+  const hull = new THREE.Mesh(CHOPPER_GEO.hull, paint)
+  hull.rotation.x = Math.PI / 2
+  hull.castShadow = true
+  const cabin = new THREE.Mesh(CHOPPER_GEO.cabin, paint)
+  cabin.position.set(0, 2, -22)
+  cabin.scale.set(1, 0.85, 1.1)
+  const tail = new THREE.Mesh(CHOPPER_GEO.tail, paint)
+  tail.position.set(0, 4, 44)
+  const fin = new THREE.Mesh(CHOPPER_GEO.fin, dark)
+  fin.position.set(0, 14, 64)
+  const mast = new THREE.Mesh(CHOPPER_GEO.mast, dark)
+  mast.position.y = 20
+  const rotor = new THREE.Mesh(CHOPPER_GEO.rotor, dark)
+  rotor.position.y = 28
+  const rotor2 = new THREE.Mesh(CHOPPER_GEO.rotor2, dark)
+  rotor.add(rotor2)
+  // A faint disc under the blades. Two crossed bars at four frames a second
+  // read as a spinning cross; a translucent circle behind them reads as a rotor
+  // whatever the frame rate does, which on a phone is the point.
+  const disc = new THREE.Mesh(
+    CHOPPER_GEO.disc,
+    new THREE.MeshBasicMaterial({
+      color: 0xcfd8e6, transparent: true, opacity: 0.16, depthWrite: false, side: THREE.DoubleSide,
+    }),
+  )
+  disc.rotation.x = -Math.PI / 2
+  disc.position.y = 27
+  body.add(hull, cabin, tail, fin, mast, disc, rotor)
+  root.add(body)
+
+  // The altitude cue. Nothing else on this board is off the ground, so without
+  // a mark underneath it a chopper at three hundred units reads as a tank
+  // parked somewhere slightly wrong.
+  const shadow = new THREE.Mesh(
+    CHOPPER_GEO.shadow,
+    new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.22, depthWrite: false }),
+  )
+  shadow.rotation.x = -Math.PI / 2
+  root.add(shadow)
+
+  // Unlit and depth-tested off nothing: it is a beam of light, and shading it
+  // would make it a grey tube.
+  const beam = new THREE.Mesh(
+    CHOPPER_GEO.beam,
+    new THREE.MeshBasicMaterial({
+      color: 0xffd68a,
+      transparent: true,
+      opacity: 0.7,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    }),
+  )
+  beam.visible = false
+  root.add(beam)
+
+  // The ring on the felt is the important half. A player under a gunship is not
+  // looking up; what they need is the circle they are standing in.
+  const splash = new THREE.Mesh(
+    CHOPPER_GEO.splash,
+    new THREE.MeshBasicMaterial({
+      color: 0xff9d4d,
+      transparent: true,
+      opacity: 0.85,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    }),
+  )
+  splash.rotation.x = -Math.PI / 2
+  splash.visible = false
+  root.add(splash)
+
+  return { root, body, rotor, beam, splash, shadow, wasX: 0, wasZ: 0 }
+}
+
+/** Only the per-rig materials; the geometry above is shared and stays. */
+function disposeChopper(rig: ChopperRig): void {
+  rig.root.traverse((o) => {
+    const mesh = o as THREE.Mesh
+    if (!mesh.isMesh) return
+    const m = mesh.material
+    if (Array.isArray(m)) m.forEach((x) => x.dispose())
+    else m.dispose()
+  })
 }
 
 /** A name plate. Redrawn only when the name or colour actually changes. */
@@ -1868,11 +2009,24 @@ export class Renderer {
     // camera and `toWorld` measure from — but it must never reach a pixel.
     // Everything under `this.you` comes off together, including the ring, the
     // plate and the driver, because half a hidden tank is a ghost.
-    this.you.root.visible = !game.watching
+    //
+    // Same for a player in the chopper. The tank is out of play for those ten
+    // seconds — it cannot be shot and it is not collided with — so leaving it
+    // parked on the board would put a target on screen that nothing can hit,
+    // which is worse than showing nothing.
+    this.you.root.visible = !game.watching && !game.flying
 
     for (const peer of game.peers.values()) {
       const rig = this.rigs.get(peer.session)
       if (!rig) continue
+      // Flying: `syncChoppers` draws them instead, and their `x`/`y` are the
+      // gunship rather than the tank — so leaving the tank on would put a
+      // second, wrong copy of them on the board directly under the first.
+      if (peer.view.chopperUntil > now) {
+        rig.root.visible = false
+        continue
+      }
+      rig.root.visible = true
       this.applyTank(rig, dt, now, {
         x: peer.view.x,
         y: peer.view.y,
@@ -1965,6 +2119,7 @@ export class Renderer {
     }
 
     this.syncCover(game, now)
+    this.syncChoppers(game, now)
 
     if (cockpit) this.placeEye(game)
 
@@ -2221,6 +2376,115 @@ export class Renderer {
   private lastCoverBlast = 0
 
   /**
+   * One rig per chopper in the air, by owner.
+   *
+   * Built on demand and kept: a ten-second reward that arrives once every ten
+   * kills does not deserve a pool, and rebuilding the geometry each time it is
+   * earned would hitch the frame it lands on — which is the frame the player is
+   * looking at hardest.
+   */
+  private choppers = new Map<string, ChopperRig>()
+
+  /**
+   * Draw every gunship anybody can see, and the ground under the ones shooting.
+   *
+   * Reads the same two numbers everybody else reads off the tick — where it is
+   * and where its rounds are landing. Nothing here is told; a client that can
+   * see the tick can draw the chopper, and a client that cannot, cannot, which
+   * is the same visibility rule as a tank.
+   */
+  private syncChoppers(game: Game, now: number): void {
+    const live = new Map<string, { x: number; y: number; at: { x: number; y: number } | null; hue: number; mine: boolean }>()
+    if (game.flying) {
+      live.set(game.identity.sessionPubkey, {
+        x: game.chopper.x,
+        y: game.chopper.y,
+        at: game.chopperAt,
+        hue: game.displayColor,
+        mine: true,
+      })
+    }
+    for (const peer of game.peers.values()) {
+      if (peer.view.chopperUntil <= now) continue
+      live.set(peer.session, {
+        x: peer.view.x,
+        y: peer.view.y,
+        at: peer.view.chopperAt,
+        hue: peer.displayColor,
+        mine: false,
+      })
+    }
+
+    for (const [key, rig] of this.choppers) {
+      if (live.has(key)) continue
+      this.scene.remove(rig.root)
+      disposeChopper(rig)
+      this.choppers.delete(key)
+    }
+
+    for (const [key, c] of live) {
+      let rig = this.choppers.get(key)
+      if (!rig) {
+        rig = makeChopper(c.hue)
+        this.scene.add(rig.root)
+        this.choppers.set(key, rig)
+      }
+      rig.root.position.set(c.x, CHOPPER_ALT, c.y)
+      // Rotor. Fast enough to blur into a disc at any frame rate this game
+      // runs at, which is the whole reason a helicopter reads as a helicopter.
+      rig.rotor.rotation.y = (now / 26) % (Math.PI * 2)
+      // A little bank in the direction of travel, from the position delta
+      // rather than from a heading — the chopper has no facing of its own and
+      // this is the only thing on screen that says which way it is going.
+      const dx = c.x - rig.wasX
+      const dz = c.y - rig.wasZ
+      rig.wasX = c.x
+      rig.wasZ = c.y
+      rig.body.rotation.z = Math.max(-0.42, Math.min(0.42, -dx * 0.05))
+      rig.body.rotation.x = Math.max(-0.42, Math.min(0.42, dz * 0.05))
+
+      // The mark on the felt directly beneath it, so three hundred units of
+      // altitude is legible on a board where nothing else leaves the ground.
+      rig.shadow.position.set(0, GROUND_Y + DECAL_LIFT - CHOPPER_ALT, 0)
+
+      const at = c.at
+      rig.beam.visible = !!at
+      rig.splash.visible = !!at
+      if (at) {
+        // The rounds, as one cone from the gun to the ground. Cheaper than
+        // tracers and, at this scale, more legible: what a player underneath
+        // needs to read in a quarter of a second is *where*, not how many.
+        //
+        // Built in the rig's local space and oriented with a quaternion rather
+        // than with `lookAt`. `lookAt` takes a **world** point, and this mesh is
+        // a child of a group that has already been moved to the chopper — the
+        // first cut passed it world coordinates after setting a local position
+        // and the beam pointed off into the sky. It photographed as nothing at
+        // all, which is how a missing effect usually looks.
+        const dxx = at.x - c.x
+        const dzz = at.y - c.y
+        const dir = new THREE.Vector3(dxx, -CHOPPER_ALT + GROUND_Y, dzz)
+        const len = dir.length()
+        rig.beam.position.set(dxx / 2, (-CHOPPER_ALT + GROUND_Y) / 2, dzz / 2)
+        rig.beam.quaternion.setFromUnitVectors(UP, dir.normalize())
+        // The geometry is one unit tall, so the scale *is* the length.
+        rig.beam.scale.set(1, len, 1)
+        // Flicker, so it reads as a gun rather than as a laser.
+        const mat = rig.beam.material as THREE.MeshBasicMaterial
+        mat.opacity = 0.34 + Math.abs(Math.sin(now / 40)) * 0.34
+
+        rig.splash.position.set(dxx, GROUND_Y + DECAL_LIFT - CHOPPER_ALT, dzz)
+        rig.splash.scale.setScalar(1 + Math.sin(now / 90) * 0.06)
+        // Sparks where it lands, on the ground, in world space — the pool is
+        // not a child of the rig.
+        if (Math.random() < 0.5) {
+          this.confetti.burst(at.x, at.y, 2, 30, { speed: 90, up: 70, y: 8, size: 0.5, life: 0.28 })
+        }
+      }
+    }
+  }
+
+  /**
    * The mesh for a piece of destructible cover, by `Rect.id`.
    *
    * Exists for test/barrels-browser.mjs, and it is the right thing to expose:
@@ -2231,6 +2495,22 @@ export class Renderer {
    */
   coverMeshAt(id: number): THREE.Mesh | null {
     return this.coverMeshes.get(id) ?? null
+  }
+
+  /**
+   * The gunship rig for an owner, or null. For test/chopper-browser.mjs.
+   *
+   * Same reasoning as `coverMeshAt`: what is worth checking is not that the
+   * game thinks somebody is flying, it is that a mesh exists, is above the
+   * board, and projects onto the screen.
+   */
+  chopperRigAt(owner: string): { root: THREE.Object3D } | null {
+    return this.choppers.get(owner) ?? null
+  }
+
+  /** Whether our own tank is being drawn at all. Also for the suites. */
+  youVisible(): boolean {
+    return this.you.root.visible
   }
 
   private wear(rig: TankRig, v: TankView, now: number, dt: number, inside = false): void {
