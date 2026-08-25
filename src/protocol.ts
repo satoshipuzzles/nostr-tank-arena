@@ -115,6 +115,21 @@ export interface StatePayload {
    * distance. Self-reported, exactly like the `hp` above it.
    */
   a?: number
+  /**
+   * 1 while a shield is up, absent otherwise.
+   *
+   * Here for the same reason `a` is: a defensive buff nobody else can see is
+   * not a tactical fact, it is a private surprise. Knowing the tank you are
+   * lining up is currently eating one shot for free changes whether you take
+   * that shot or wait fourteen seconds, and that decision is most of what
+   * makes contesting a shield pad worth it.
+   *
+   * Sent as a flag rather than a deadline. A remaining-time number would have
+   * to be read against the *sender's* clock, and this game has already been
+   * bitten once by putting one client's clock into something another client
+   * evaluates — the bubble simply pops when the ticks stop saying `sh`.
+   */
+  sh?: 1
 }
 
 /**

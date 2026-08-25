@@ -240,6 +240,8 @@ export interface Peer {
     dead: boolean
     /** Shells left in their magazine; 0 means empty or reloading. */
     ammo: number
+    /** True while their ticks say a shield is up. See `StatePayload.sh`. */
+    shield: boolean
   }
   /** What we counted for them out of the death events we personally received. */
   kills: number
@@ -296,6 +298,7 @@ interface StateSample {
   hp: number
   dead: boolean
   ammo: number
+  shield: boolean
 }
 
 export interface FeedEntry {
@@ -791,6 +794,7 @@ export class Game {
         // their first 100ms would flash a reload marker over every tank that
         // joins, and "empty" is the reading that changes how you play.
         ammo: MAG_SIZE,
+        shield: false,
       },
         kills: 0,
         deaths: 0,
@@ -841,6 +845,12 @@ export class Game {
       // an old client would put a reload marker over a tank that is about to
       // shoot you, which is worse than saying nothing.
       ammo: typeof p.a === 'number' ? Math.max(0, Math.min(MAG_SIZE, Math.floor(p.a))) : MAG_SIZE,
+      // Absent means no shield, which is also what an old client sends — and
+      // that is the safe way round. Guessing "shielded" for a client that
+      // cannot say would paint a bubble on a tank that is not protected, and a
+      // shot held back for a shield that was never there is a worse lie than a
+      // shield that goes unadvertised.
+      shield: p.sh === 1,
     }
     // Cosmetic and self-reported, exactly like the HP beside it. A streak you
     // cannot see on the tank that has it is a number in somebody else's HUD.
@@ -1435,6 +1445,7 @@ export class Game {
         peer.view.hp = newest.hp
         peer.view.dead = newest.dead
         peer.view.ammo = newest.ammo
+        peer.view.shield = newest.shield
         continue
       }
 
@@ -1458,6 +1469,7 @@ export class Game {
       // Taken from the newer of the two samples, like HP: a magazine count is a
       // step, not a slope, and half a shell is not a thing to draw.
       peer.view.ammo = bb.ammo
+      peer.view.shield = bb.shield
       while (b.length > 2 && b[1].t < renderAt) b.shift()
     }
   }
@@ -1530,6 +1542,9 @@ export class Game {
       // pause; a reload everyone can read is the window that makes cover and
       // positioning matter. Self-reported, like the HP beside it.
       a: this.tank.reloadingUntil ? 0 : this.tank.ammo,
+      // Only when it is up, so the common case costs nothing on a tick that
+      // goes out ten times a second.
+      ...(hasBuff(this.buffs, 'shieldUntil', now) ? { sh: 1 as const } : {}),
     }
     this.publishAsSession(KIND_STATE, payload)
   }
