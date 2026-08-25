@@ -106,6 +106,17 @@ export interface Shell {
   /** Distance covered, which is what a lob dies at rather than a wall. */
   travel: number
   /**
+   * `Rect.id` of the last piece of cover this shell struck, or -1.
+   *
+   * Recorded here rather than acted on, because `sim.ts` does not know what a
+   * barrel is and should not: this is the arithmetic layer, and "that rect has
+   * two hits left" is a rule. `Game` reads it after every step.
+   *
+   * Set on the bounce as well as on the death, so the first two hits on a
+   * barrel count even though the shell survives them.
+   */
+  struck: number
+  /**
    * Set on the step the lob lands, before it is removed.
    *
    * A flat shell's damage happens where the shell is; a lob's happens where the
@@ -154,6 +165,7 @@ export function spawnShell(
     damage,
     lob,
     travel: 0,
+    struck: -1,
     landed: false,
     age: 0,
     dead: false,
@@ -245,11 +257,17 @@ export function stepShell(s: Shell, dt: number): void {
 
     const nx = s.x + s.vx * step
     const ny = s.y + s.vy * step
-    if (!pointInTallWall(nx, ny)) {
+    const wall = pointInTallWall(nx, ny)
+    if (!wall) {
       s.x = nx
       s.y = ny
       continue
     }
+    // Which rect, for whoever cares. Every client re-simulating this shell from
+    // the same fire event walks the same sub-steps into the same rect, so this
+    // is the same number on every screen — which is what makes it usable as the
+    // input to a rule other clients also apply.
+    s.struck = wall.id ?? -1
 
     // Bounce off whichever axis we actually crossed this step.
     const hitX = pointInTallWall(nx, s.y) !== null

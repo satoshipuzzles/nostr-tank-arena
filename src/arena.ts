@@ -37,6 +37,26 @@ export interface Rect {
   h: number
   /** Absent on the generated fence pieces until `ring` stamps them. */
   kind?: CoverKind
+  /**
+   * Position in `WALLS`, stamped by `setLayout`.
+   *
+   * Every client builds `WALLS` from the same layout in the same order, and the
+   * layout comes from the block hash — so this index means the same rect on
+   * every screen for as long as the round lasts. That is what makes it safe to
+   * put on the wire, and it is the only reason a barrel can be destroyed
+   * without shipping its coordinates around.
+   */
+  id?: number
+  /**
+   * Hits left. Present only on the kinds that can be destroyed.
+   *
+   * `undefined` is "indestructible" rather than "zero", which is why every read
+   * of it is a `!== undefined` and not a truthiness check — a barrel on its
+   * last legs has `hp === 1` and a rock has no hp at all.
+   */
+  hp?: number
+  /** Blown up. Still in `WALLS`, and skipped by everything that collides. */
+  gone?: boolean
 }
 
 /**
@@ -60,6 +80,46 @@ const LOW_KINDS: ReadonlySet<CoverKind> = new Set<CoverKind>(['sandbag'])
 
 /** True if shells pass over this rect. Tanks are stopped by it regardless. */
 export const isLow = (r: Rect): boolean => r.kind !== undefined && LOW_KINDS.has(r.kind)
+
+/**
+ * Cover that can be shot away, and how many hits it takes.
+ *
+ * Puzz: "Walls and obstacles can be damaged and blown up. Barrels can be blown
+ * up after x amount of hits."
+ *
+ * Barrels only, for now. They are the one kind already scattered as single
+ * blocks rather than as walls, so removing one opens a lane without turning a
+ * board into a different board — and a barrel is the thing on a battlefield
+ * everybody already expects to go up. Rocks and hedges are the skeleton of a
+ * layout and are what stop a round from dissolving into an open field by
+ * minute eight.
+ *
+ * Three hits: one shell is an accident, three is a decision. It is also a whole
+ * magazine minus one, so clearing a lane costs a reload you have to survive.
+ */
+const DESTRUCTIBLE: ReadonlySet<CoverKind> = new Set<CoverKind>(['barrel'])
+export const BARREL_HP = 3
+
+/** Every destructible rect on the current board, in `WALLS` order. */
+export const BARRELS: Rect[] = []
+
+/**
+ * Bumped whenever a barrel's state changes, including a layout swap.
+ *
+ * The renderer holds meshes for the board and rebuilds them when this moves,
+ * rather than checking sixty rects a frame for a flag that changes twice a
+ * round. An epoch is also what makes "the board changed" a single comparison
+ * for a test that wants to wait for it.
+ */
+let coverEpoch = 0
+export const coverGeneration = (): number => coverEpoch
+
+// Declared here rather than beside the rest of the destruction API at the foot
+// of this file, and that is load-bearing: `setLayout(0)` runs at module load to
+// give the game a playable board before any block arrives, and it bumps this.
+// A `let` further down the file is in its temporal dead zone at that moment, so
+// the whole module threw "Cannot access before initialization" and the game
+// never started at all.
 
 export interface Pt {
   x: number
@@ -373,6 +433,23 @@ export function setLayout(index: number): void {
   WALLS.length = 0
   WALLS.push(...ring(spec.w, spec.h), ...half, ...half.map((r) => flip(r, spec.w, spec.h)))
 
+  // Stamp identity and hulls. Order is `ring`, then the authored half, then its
+  // mirror — the same on every client, because the layout came from the block
+  // hash and nothing here is random.
+  BARRELS.length = 0
+  for (let i = 0; i < WALLS.length; i++) {
+    const w = WALLS[i]
+    w.id = i
+    w.gone = false
+    if (w.kind !== undefined && DESTRUCTIBLE.has(w.kind)) {
+      w.hp = BARREL_HP
+      BARRELS.push(w)
+    } else {
+      w.hp = undefined
+    }
+  }
+  coverEpoch++
+
   SPAWNS.length = 0
   SPAWNS.push(...spec.spawns(spec.w, spec.h))
 
@@ -398,6 +475,7 @@ export function resolveCircle(pos: { x: number; y: number }, radius: number): vo
   for (let pass = 0; pass < 3; pass++) {
     let moved = false
     for (const w of WALLS) {
+      if (w.gone) continue
       const nx = clamp(pos.x, w.x, w.x + w.w)
       const ny = clamp(pos.y, w.y, w.y + w.h)
       const dx = pos.x - nx
@@ -434,6 +512,7 @@ export function resolveCircle(pos: { x: number; y: number }, radius: number): vo
  */
 export function pointInWall(x: number, y: number): Rect | null {
   for (const w of WALLS) {
+    if (w.gone) continue
     if (x >= w.x && x <= w.x + w.w && y >= w.y && y <= w.y + w.h) return w
   }
   return null
@@ -449,7 +528,7 @@ export function pointInWall(x: number, y: number): Rect | null {
  */
 export function pointInTallWall(x: number, y: number): Rect | null {
   for (const w of WALLS) {
-    if (isLow(w)) continue
+    if (isLow(w) || w.gone) continue
     if (x >= w.x && x <= w.x + w.w && y >= w.y && y <= w.y + w.h) return w
   }
   return null
@@ -470,4 +549,89 @@ export function hasLineOfSight(ax: number, ay: number, bx: number, by: number): 
     if (pointInTallWall(ax + (bx - ax) * t, ay + (by - ay) * t)) return false
   }
   return true
+}
+
+// ------------------------------------------------------------ destructible cover
+
+
+/**
+ * Put `n` hits into a barrel. Returns true if this is the hit that destroyed it.
+ *
+ * Idempotent past zero on purpose: three clients all re-simulating the same
+ * shell will all call this, and the second and third calls must be worth
+ * nothing rather than taking out the barrel behind it.
+ */
+export function damageCover(id: number, n = 1): boolean {
+  const w = WALLS[id]
+  if (!w || w.gone || w.hp === undefined) return false
+  w.hp -= n
+  coverEpoch++
+  if (w.hp > 0) return false
+  w.hp = 0
+  w.gone = true
+  return true
+}
+
+/**
+ * Which barrels are gone, as a bitmask over `BARRELS` order.
+ *
+ * On the wire in every state tick, and unioned rather than replaced on receipt.
+ * That choice is the whole consensus design and it is worth stating plainly:
+ *
+ *   - Union is **order-independent and idempotent**, so it does not matter
+ *     which tick arrives first, whether one is lost, or how many times a client
+ *     re-sends the same bits. Every client converges on the same set as long as
+ *     it hears from anybody who saw the barrel go.
+ *   - It is **self-healing for a late joiner**, which a one-off "barrel
+ *     destroyed" event is not. Somebody who joins at minute six of a block hears
+ *     the current mask on the next tick — 100ms — rather than being permanently
+ *     out of step with a board everybody else is playing.
+ *   - It **cannot be un-set**, so a client whose own simulation missed a hit
+ *     cannot resurrect a barrel under somebody who is driving through the gap.
+ *
+ * The price is that a hostile client can clear the board by sending all ones.
+ * That is the same trust model as everything else here — a client that lies
+ * about its own position or its own kills is already possible, the README says
+ * so, and a bitmask that can only remove cover is a smaller lever than either.
+ * A board with eight barrels needs eight bits; the ceiling is the 31 a JavaScript
+ * bitwise operator can hold, which is four times the most any layout has.
+ */
+export function coverBits(): number {
+  let bits = 0
+  for (let i = 0; i < BARRELS.length && i < 31; i++) if (BARRELS[i].gone) bits |= 1 << i
+  return bits
+}
+
+/**
+ * Put every barrel back. Called at a round boundary, not at a layout swap.
+ *
+ * `setLayout` already does this, and relying on it would be a bug waiting for
+ * the right block: the map is `blockHash % 8`, so two rounds in a row land on
+ * the same board about one time in eight, and `setLayout` returns early when
+ * the index has not changed. A round that inherited the previous round's holes
+ * would be a different board from the one its own hash describes — and a late
+ * joiner, who *would* get a fresh layout, would disagree with everybody.
+ */
+export function resetCover(): void {
+  let changed = false
+  for (const w of BARRELS) {
+    if (!w.gone && w.hp === BARREL_HP) continue
+    w.gone = false
+    w.hp = BARREL_HP
+    changed = true
+  }
+  if (changed) coverEpoch++
+}
+
+/** Union somebody else's mask into ours. Returns the barrels this took out. */
+export function applyCoverBits(bits: number): Rect[] {
+  const taken: Rect[] = []
+  for (let i = 0; i < BARRELS.length && i < 31; i++) {
+    if (!(bits & (1 << i)) || BARRELS[i].gone) continue
+    BARRELS[i].hp = 0
+    BARRELS[i].gone = true
+    taken.push(BARRELS[i])
+  }
+  if (taken.length) coverEpoch++
+  return taken
 }

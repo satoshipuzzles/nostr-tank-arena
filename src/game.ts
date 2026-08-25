@@ -43,6 +43,8 @@ import {
   roomTag,
 } from './protocol'
 import { BOT_COUNT, killBot, makeBot, stepBot } from './bots'
+import { WALLS, applyCoverBits, coverBits, damageCover, resetCover } from './arena'
+import type { Rect } from './arena'
 import type { Bot } from './bots'
 import {
   LOB_BLAST,
@@ -886,6 +888,18 @@ export class Game {
         deaths: Math.max(0, Math.min(9999, Math.floor(p.ds))),
       }
     }
+    // Cover they have seen destroyed, unioned into ours. Gated on the round for
+    // the same reason the tally is: barrels come back with every new block, and
+    // a mask from the previous round would flatten the new board.
+    //
+    // Only from a peer in *our* round, and only additive — see `applyCoverBits`.
+    // The visible effect of a mask carrying something we had not seen is a
+    // barrel that vanishes with a puff rather than one that pops out of
+    // existence, which is `takeCover` below.
+    if (sameRound && typeof p.b === 'number' && p.b > 0) {
+      for (const rect of applyCoverBits(p.b)) this.blewUp(rect, false)
+    }
+
     // Relays deliver out of order often enough to matter; keep the buffer sorted.
     const b = peer.buffer
     let i = b.length
@@ -1277,6 +1291,109 @@ export class Game {
     this.sound('fire', { at: { x, y } })
   }
 
+  /**
+   * A shell went into a piece of cover. Take a hit out of it if it is a barrel.
+   *
+   * Applied by **every** client that simulates the shell, not just the shooter,
+   * and that is the design rather than an accident. Every client receives the
+   * same fire event and re-simulates the same trajectory through the same
+   * layout, so they all reach the same rect at the same sub-step and all call
+   * this — which means the hit count converges without anybody publishing
+   * anything about it. `damageCover` is idempotent past zero so the extra calls
+   * are worth nothing.
+   *
+   * What is *not* guaranteed to converge is a shell one client deleted early —
+   * a hit on an interpolated tank happens a few pixels apart on different
+   * screens, so a barrel directly behind somebody can take a hit on one client
+   * and not on another. That is what the bitmask on the state tick is for: the
+   * destroyed set is unioned across everybody, so the first client to see a
+   * barrel go takes it out for the whole room within 100ms. Hit *counts* can
+   * drift; the outcome cannot.
+   */
+  private hitCover(shell: Shell): void {
+    const rect = WALLS[shell.struck]
+    if (!rect || rect.hp === undefined || rect.gone) return
+    const destroyed = damageCover(shell.struck, shell.damage)
+    if (!destroyed) {
+      this.sound('hit', { at: { x: shell.x, y: shell.y } })
+      return
+    }
+    // The shell is spent in the barrel rather than bouncing off a rect that no
+    // longer exists. Without this it carries on through the hole it just made,
+    // which reads as the barrel never having been there.
+    shell.dead = true
+    this.blewUp(rect, true)
+    // A barrel is an explosion, not a disappearance: everything close enough
+    // takes the hit, including whoever shot it from too near.
+    const cx = rect.x + rect.w / 2
+    const cy = rect.y + rect.h / 2
+    this.blast(cx, cy, shell.owner)
+  }
+
+  /**
+   * A barrel is gone. Tell the renderer and the player.
+   *
+   * `mine` separates "a shell I simulated took it out" from "somebody else's
+   * tick said it was already gone". Both remove the barrel; only the first is
+   * worth a bang, because the second is a correction arriving up to a tick
+   * late and a delayed explosion under a tank that has already driven through
+   * the gap reads as a bug.
+   */
+  private blewUp(rect: Rect, mine: boolean): void {
+    this.coverBlasts.push({ x: rect.x + rect.w / 2, y: rect.y + rect.h / 2, at: performance.now(), loud: mine })
+    if (this.coverBlasts.length > 12) this.coverBlasts.shift()
+    if (mine) this.sound('blast', { at: { x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 } })
+  }
+
+  /**
+   * Barrels that have gone up recently, for the renderer to draw once.
+   *
+   * A list rather than a callback because the renderer is a pure function of
+   * game state plus its own particle pool, and everything else it draws works
+   * this way. Entries are read by timestamp and expire on their own.
+   */
+  readonly coverBlasts: { x: number; y: number; at: number; loud: boolean }[] = []
+
+  /**
+   * Everything a barrel takes with it.
+   *
+   * Same radius and the same authority split as a lob: our own hull is the only
+   * one we decide, remote tanks decide their own, and the bots are ours because
+   * they exist nowhere else. Friendly fire included — a barrel does not know
+   * who shot it, and a player who blows one up at point-blank range should find
+   * that out.
+   */
+  private blast(x: number, y: number, owner: string): void {
+    const r = LOB_BLAST + TANK_RADIUS
+    for (const bot of this.bots) {
+      if (bot.tank.dead) continue
+      if ((bot.tank.x - x) ** 2 + (bot.tank.y - y) ** 2 > r * r) continue
+      bot.tank.hp -= 1
+      if (bot.tank.hp > 0) continue
+      killBot(bot, performance.now(), this.modifier.respawn)
+      this.sound('death', { at: { x: bot.tank.x, y: bot.tank.y } })
+      if (owner === this.identity.sessionPubkey) {
+        this.botKills++
+        this.onOwnKill()
+        this.pushFeed(`you killed ${bot.name}`)
+      }
+    }
+    if (this.tank.dead || this.watching) return
+    if ((this.tank.x - x) ** 2 + (this.tank.y - y) ** 2 > r * r) return
+    if (hasBuff(this.buffs, 'shieldUntil', performance.now())) {
+      this.buffs.shieldUntil = 0
+      this.sound('shield')
+      this.announce('SHIELD BROKE', 'that one was free', 200)
+      return
+    }
+    this.tank.hp -= 1
+    if (this.tank.hp > 0) this.sound('hit')
+    // Credited to whoever shot the barrel, including ourselves — a player who
+    // stands next to a barrel they are shooting has self-destructed, and the
+    // feed should say so rather than blaming the last person who hit them.
+    if (this.tank.hp <= 0) this.die(owner === this.identity.sessionPubkey ? null : owner)
+  }
+
   /** Everything in the crater that is a bot. Same rules as `hitBot`. */
   private blastBots(shell: Shell): void {
     const r = LOB_BLAST + TANK_RADIUS
@@ -1465,7 +1582,13 @@ export class Game {
     this.refreshPickups()
 
     for (const shell of this.shells.values()) {
+      shell.struck = -1
       stepShell(shell, dt)
+      // Cover first, because a shell that has just taken the last hit out of a
+      // barrel should go off *there* rather than carrying on through the gap it
+      // made. `struck` is set by the sim on the bounce as well as on the death,
+      // so the first two hits count even though the shell survives them.
+      if (shell.struck >= 0) this.hitCover(shell)
       if (shell.dead) {
         this.shells.delete(shell.id)
         if (shell.landed) this.detonate(shell)
@@ -1838,6 +1961,10 @@ export class Game {
       // Only when it is up, so the common case costs nothing on a tick that
       // goes out ten times a second.
       ...(hasBuff(this.buffs, 'shieldUntil', now) ? { sh: 1 as const } : {}),
+      // Same reasoning: omitted while the board is intact, which is most of a
+      // round. Unioned by whoever receives it, so a tick lost on the way costs
+      // nothing and a late joiner is caught up by the next one.
+      ...(coverBits() ? { b: coverBits() } : {}),
     }
     this.publishAsSession(KIND_STATE, payload)
   }
@@ -1866,6 +1993,10 @@ export class Game {
     // call that first makes the pads they refer to derivable. That is the same
     // shape as dropping them on arrival, moved one step later.
     this.modifier = modifierForBlock(hash)
+    // Every barrel back. Not left to `setLayout`, which returns early when the
+    // new block lands on the same map — about one round in eight, since the map
+    // is `blockHash % 8`. See `resetCover`.
+    resetCover()
     // Glass Cannon narrows the hull; a tank carrying three points into a
     // one-hit round would be invincible for two shots and nobody would know
     // why. Coming the other way, a full hull is the fair read of "new round".

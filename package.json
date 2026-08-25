@@ -28,7 +28,9 @@
     "test:lob": "node test/lob.mjs",
     "test:bots": "node test/bots.mjs",
     "test:bots-browser": "node test/bots-browser.mjs",
-    "test:pwa": "node test/pwa.mjs"
+    "test:pwa": "node test/pwa.mjs",
+    "test:barrels": "node test/barrels.mjs",
+    "test:barrels-browser": "node test/barrels-browser.mjs"
   },
   "dependencies": {
     "nostr-tools": "^2.10.4",

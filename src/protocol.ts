@@ -106,6 +106,19 @@ export interface StatePayload {
    */
   r?: number
   /**
+   * Which barrels this client has seen destroyed, as a bitmask.
+   *
+   * Unioned on receipt, never replaced — see `applyCoverBits` in `arena.ts` for
+   * why that choice is the whole consensus design. Short version: a union is
+   * order-independent and idempotent, so a lost tick costs nothing and a late
+   * joiner is caught up within 100ms by the next one, which a one-off
+   * "barrel destroyed" event could never do.
+   *
+   * Omitted while nothing is destroyed, which is most of a round, so the common
+   * tick is exactly the size it was before this existed.
+   */
+  b?: number
+  /**
    * Shells left in the sender's magazine, 0 while reloading.
    *
    * On the wire for a gameplay reason rather than a bookkeeping one: an empty
