@@ -2706,6 +2706,39 @@ export class Renderer {
   }
 
   /**
+   * What the last frame actually cost the GPU, and what is resident.
+   *
+   * Exists because `npm run profile` needs it, and it is added in the same
+   * change as the thing that reads it — a counter nobody displays is not an
+   * instrument, and this repo has had two of those sitting wired up and unread
+   * for days.
+   *
+   * Draw calls and triangles are the honest half of a profile taken on a
+   * software rasteriser: they are the same numbers a real GPU would be handed,
+   * where milliseconds under swiftshader are not.
+   */
+  stats(): {
+    calls: number
+    triangles: number
+    lines: number
+    points: number
+    geometries: number
+    textures: number
+    programs: number
+  } {
+    const info = this.renderer.info
+    return {
+      calls: info.render.calls,
+      triangles: info.render.triangles,
+      lines: info.render.lines,
+      points: info.render.points,
+      geometries: info.memory.geometries,
+      textures: info.memory.textures,
+      programs: info.programs?.length ?? 0,
+    }
+  }
+
+  /**
    * The pile a broken piece leaves behind, by `Rect.id`.
    *
    * Same reasoning as `coverMeshAt`, and the same trap on the other side of it:
