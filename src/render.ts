@@ -1869,7 +1869,7 @@ export class Renderer {
         hue: peer.displayColor,
         name: peer.name,
         picture: this.pictures(peer.pubkey),
-        verified: peer.pubkey !== null,
+        verified: peer.pubkey !== null || peer.bot === true,
         streak: peer.streak,
         skin: peer.skin,
         mine: localSessions?.has(peer.session) ?? false,

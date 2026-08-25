@@ -315,6 +315,39 @@ $('sound-toggle').addEventListener('click', () => {
   paintSoundButton()
 })
 
+/**
+ * Practice tanks, on or off.
+ *
+ * On by default and remembered, because the common first run of this game is
+ * one person joining a room string nobody else has typed, and an empty arena is
+ * not a game. The `Game` decides whether the three actually appear — they only
+ * exist while no real player is in the room — so this is a preference rather
+ * than a spawn button, and the label says what is *wanted*, not what is on the
+ * board this second.
+ */
+let botsWanted = stored('tank.bots') !== 'off'
+
+function paintBotsButton(): void {
+  $('bots-toggle').textContent = botsWanted ? 'Bots: on' : 'Bots: off'
+}
+paintBotsButton()
+
+function setBots(on: boolean): void {
+  botsWanted = on
+  store('tank.bots', on ? 'on' : 'off')
+  paintBotsButton()
+  if (running) for (const p of running.players) p.game.botsEnabled = on
+}
+
+$('bots-toggle').addEventListener('click', () => setBots(!botsWanted))
+
+window.addEventListener('keydown', (e) => {
+  if (e.code !== 'KeyB' || e.repeat) return
+  const target = e.target as HTMLElement | null
+  if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return
+  setBots(!botsWanted)
+})
+
 window.addEventListener('keydown', (e) => {
   if (e.code !== 'KeyM' || e.repeat) return
   const target = e.target as HTMLElement | null
@@ -1144,6 +1177,11 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     // relay is; `Profiles.get` queues an unknown npub for the next batch and
     // answers with a placeholder, so calling it once per tank per frame is free.
     renderer.setPictureSource((pubkey) => (pubkey ? profiles.get(pubkey).picture : null))
+    // The stored preference reaches the fresh `Game`. `syncBots` still decides
+    // whether any actually appear — in a couch match player two is a peer of
+    // player one, so the room is never empty and the bots stand down on their
+    // own without this having to know about couch mode.
+    for (const p of players) p.game.botsEnabled = botsWanted
     cockpitAllowed = !twoPlayer
     if (!cockpitAllowed) view = 'board'
     renderer.setView(view)
