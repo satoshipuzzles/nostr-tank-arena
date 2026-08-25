@@ -43,7 +43,7 @@ import {
   roomTag,
 } from './protocol'
 import { BOT_COUNT, killBot, makeBot, stepBot } from './bots'
-import { WALLS, applyCoverBits, coverBits, damageCover, resetCover } from './arena'
+import { WALLS, applyCoverBits, coverBits, damageCover, explodes, resetCover } from './arena'
 import {
   CHOPPER_DAMAGE,
   CHOPPER_HIT_MS,
@@ -1363,21 +1363,25 @@ export class Game {
   private hitCover(shell: Shell): void {
     const rect = WALLS[shell.struck]
     if (!rect || rect.hp === undefined || rect.gone) return
+    const boom = explodes(rect)
     const destroyed = damageCover(shell.struck, shell.damage)
     if (!destroyed) {
       this.sound('hit', { at: { x: shell.x, y: shell.y } })
       return
     }
-    // The shell is spent in the barrel rather than bouncing off a rect that no
+    // The shell is spent in the cover rather than bouncing off a rect that no
     // longer exists. Without this it carries on through the hole it just made,
-    // which reads as the barrel never having been there.
+    // which reads as the thing never having been there.
     shell.dead = true
-    this.blewUp(rect, true)
-    // A barrel is an explosion, not a disappearance: everything close enough
-    // takes the hit, including whoever shot it from too near.
-    const cx = rect.x + rect.w / 2
-    const cy = rect.y + rect.h / 2
-    this.blast(cx, cy, shell.owner)
+    this.blewUp(rect, true, boom)
+    // A barrel is an explosion; a crate is a crate. Splitting them is the
+    // tactical difference between the two: you shoot a barrel because somebody
+    // is standing next to it, and you shoot a crate because you want the lane
+    // behind it. A crate that killed people would make eight shells the best
+    // weapon in the game rather than the slowest.
+    if (boom) {
+      this.blast(rect.x + rect.w / 2, rect.y + rect.h / 2, shell.owner)
+    }
   }
 
   /**
@@ -1389,10 +1393,20 @@ export class Game {
    * late and a delayed explosion under a tank that has already driven through
    * the gap reads as a bug.
    */
-  private blewUp(rect: Rect, mine: boolean): void {
-    this.coverBlasts.push({ x: rect.x + rect.w / 2, y: rect.y + rect.h / 2, at: performance.now(), loud: mine })
+  private blewUp(rect: Rect, mine: boolean, boom = explodes(rect)): void {
+    this.coverBlasts.push({
+      x: rect.x + rect.w / 2,
+      y: rect.y + rect.h / 2,
+      at: performance.now(),
+      loud: mine,
+      // Fire and smoke, or splinters. A crate coming apart in a fireball would
+      // say "stand back" about a thing that is safe to stand next to.
+      fire: boom,
+    })
     if (this.coverBlasts.length > 12) this.coverBlasts.shift()
-    if (mine) this.sound('blast', { at: { x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 } })
+    if (mine) {
+      this.sound(boom ? 'blast' : 'hit', { at: { x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 } })
+    }
   }
 
   /**
@@ -1402,7 +1416,7 @@ export class Game {
    * game state plus its own particle pool, and everything else it draws works
    * this way. Entries are read by timestamp and expire on their own.
    */
-  readonly coverBlasts: { x: number; y: number; at: number; loud: boolean }[] = []
+  readonly coverBlasts: { x: number; y: number; at: number; loud: boolean; fire: boolean }[] = []
 
   /**
    * Everything a barrel takes with it.

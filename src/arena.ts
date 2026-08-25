@@ -82,26 +82,52 @@ const LOW_KINDS: ReadonlySet<CoverKind> = new Set<CoverKind>(['sandbag'])
 export const isLow = (r: Rect): boolean => r.kind !== undefined && LOW_KINDS.has(r.kind)
 
 /**
- * Cover that can be shot away, and how many hits it takes.
+ * Cover that can be shot away, and how many hits each kind takes.
  *
  * Puzz: "Walls and obstacles can be damaged and blown up. Barrels can be blown
- * up after x amount of hits."
+ * up after x amount of hits. Walls can be shot through after x amount of hits."
  *
- * Barrels only, for now. They are the one kind already scattered as single
- * blocks rather than as walls, so removing one opens a lane without turning a
- * board into a different board — and a barrel is the thing on a battlefield
- * everybody already expects to go up. Rocks and hedges are the skeleton of a
- * layout and are what stop a round from dissolving into an open field by
- * minute eight.
+ * Two kinds, and what is *not* on this list matters as much as what is. Rocks
+ * and hedges are the skeleton of a layout — they are what stop a round from
+ * dissolving into an open field by minute eight — and the fence is the board.
+ * Timber and steel drums are the things a player already expects to give way.
  *
- * Three hits: one shell is an accident, three is a decision. It is also a whole
- * magazine minus one, so clearing a lane costs a reload you have to survive.
+ * The two numbers are the design:
+ *
+ *   - A **barrel** is three hits, which is a magazine minus one, and it goes up
+ *     when it does — anything inside a lob's blast radius goes with it. One
+ *     shell is an accident, three is a decision, and clearing a lane costs a
+ *     reload you have to survive.
+ *   - A **crate** is eight, and it just breaks. Two full magazines is most of
+ *     twenty seconds of standing still and shooting a box, which is exactly the
+ *     price a *wall* should carry: breaching one is a plan you commit to at the
+ *     start of a round, not something you do in passing on the way past.
+ *
+ * The split is also the tactical difference between them. You shoot a barrel
+ * because somebody is standing next to it. You shoot a crate because you want
+ * the lane behind it.
  */
-const DESTRUCTIBLE: ReadonlySet<CoverKind> = new Set<CoverKind>(['barrel'])
-export const BARREL_HP = 3
+const DESTRUCTIBLE: ReadonlyMap<CoverKind, number> = new Map<CoverKind, number>([
+  ['barrel', 3],
+  ['crate', 8],
+])
 
-/** Every destructible rect on the current board, in `WALLS` order. */
-export const BARRELS: Rect[] = []
+/** Kept as a name because the blast is a barrel's alone. See `explodes`. */
+export const BARREL_HP = 3
+export const CRATE_HP = 8
+
+/** True if destroying this rect should take everything nearby with it. */
+export const explodes = (r: Rect): boolean => r.kind === 'barrel'
+
+/**
+ * Every destructible rect on the current board, in `WALLS` order.
+ *
+ * The bitmask on the state tick indexes into this, so its length is the number
+ * of bits a round needs. The widest layout carries eight — six crates and two
+ * barrels — against the 31 a JavaScript bitwise operator holds, so there is
+ * room for a board four times as cluttered as anything here.
+ */
+export const BREAKABLE: Rect[] = []
 
 /**
  * Bumped whenever a barrel's state changes, including a layout swap.
@@ -436,14 +462,15 @@ export function setLayout(index: number): void {
   // Stamp identity and hulls. Order is `ring`, then the authored half, then its
   // mirror — the same on every client, because the layout came from the block
   // hash and nothing here is random.
-  BARRELS.length = 0
+  BREAKABLE.length = 0
   for (let i = 0; i < WALLS.length; i++) {
     const w = WALLS[i]
     w.id = i
     w.gone = false
-    if (w.kind !== undefined && DESTRUCTIBLE.has(w.kind)) {
-      w.hp = BARREL_HP
-      BARRELS.push(w)
+    const hp = w.kind === undefined ? undefined : DESTRUCTIBLE.get(w.kind)
+    if (hp !== undefined) {
+      w.hp = hp
+      BREAKABLE.push(w)
     } else {
       w.hp = undefined
     }
@@ -573,7 +600,7 @@ export function damageCover(id: number, n = 1): boolean {
 }
 
 /**
- * Which barrels are gone, as a bitmask over `BARRELS` order.
+ * Which pieces of breakable cover are gone, as a bitmask over `BREAKABLE`.
  *
  * On the wire in every state tick, and unioned rather than replaced on receipt.
  * That choice is the whole consensus design and it is worth stating plainly:
@@ -598,7 +625,7 @@ export function damageCover(id: number, n = 1): boolean {
  */
 export function coverBits(): number {
   let bits = 0
-  for (let i = 0; i < BARRELS.length && i < 31; i++) if (BARRELS[i].gone) bits |= 1 << i
+  for (let i = 0; i < BREAKABLE.length && i < 31; i++) if (BREAKABLE[i].gone) bits |= 1 << i
   return bits
 }
 
@@ -614,10 +641,12 @@ export function coverBits(): number {
  */
 export function resetCover(): void {
   let changed = false
-  for (const w of BARRELS) {
-    if (!w.gone && w.hp === BARREL_HP) continue
+  for (const w of BREAKABLE) {
+    const full = w.kind === undefined ? undefined : DESTRUCTIBLE.get(w.kind)
+    if (full === undefined) continue
+    if (!w.gone && w.hp === full) continue
     w.gone = false
-    w.hp = BARREL_HP
+    w.hp = full
     changed = true
   }
   if (changed) coverEpoch++
@@ -626,11 +655,11 @@ export function resetCover(): void {
 /** Union somebody else's mask into ours. Returns the barrels this took out. */
 export function applyCoverBits(bits: number): Rect[] {
   const taken: Rect[] = []
-  for (let i = 0; i < BARRELS.length && i < 31; i++) {
-    if (!(bits & (1 << i)) || BARRELS[i].gone) continue
-    BARRELS[i].hp = 0
-    BARRELS[i].gone = true
-    taken.push(BARRELS[i])
+  for (let i = 0; i < BREAKABLE.length && i < 31; i++) {
+    if (!(bits & (1 << i)) || BREAKABLE[i].gone) continue
+    BREAKABLE[i].hp = 0
+    BREAKABLE[i].gone = true
+    taken.push(BREAKABLE[i])
   }
   if (taken.length) coverEpoch++
   return taken

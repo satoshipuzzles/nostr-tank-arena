@@ -71,6 +71,47 @@ shell: the *victim* applies it, and the victim cannot see what the caller had
 going on when they earned it. The caller is exempt, and the lane is chosen on
 the far side of the board from them.
 
+### Breakable cover
+
+Two kinds give way, and what is *not* on the list matters as much as what is.
+Rocks and hedges are the skeleton of a layout — they are what stop a round
+dissolving into an open field by minute eight — and the fence is the board.
+Timber and steel drums are what a player already expects to break.
+
+| Cover | Hits | On destruction |
+| --- | --- | --- |
+| Barrel | 3 | Explodes — everything inside a lob's blast radius takes a hit, including whoever shot it |
+| Crate | 8 | Comes apart. Splinters, no damage, and the lane behind it is open |
+
+The two numbers are the design. Three hits is a magazine minus one, so taking a
+barrel costs a reload you have to survive. Eight is two full magazines — most of
+twenty seconds standing still and shooting a box — which is the price a *wall*
+should carry: breaching one is a plan you commit to at the start of a round, not
+something you do in passing. The split is also the tactical difference between
+them: you shoot a barrel because somebody is standing next to it, and you shoot
+a crate because you want the lane behind it.
+
+Everything comes back with the next block. That reset is its own call rather
+than a side effect of loading the layout, because the map is `blockHash % 8` and
+two rounds in a row land on the same board about one time in eight — a round
+inheriting the previous round's holes would be a different board from the one
+its own hash describes, and a late joiner would get a fresh one and disagree
+with everybody.
+
+This is the first thing in the game that changes the shared board without being
+derived from the block hash, so it has to converge on its own. Every client
+re-simulates every shell from the same fire event through the same layout, so
+they all reach the same rect and take the same hits out of it. What that cannot
+cover is a shell one client deleted early — a hit on an interpolated tank lands
+a few pixels apart on different screens — so the destroyed set rides on the
+state tick as `b`, a bitmask that is **unioned rather than replaced**. Order
+does not matter, a lost tick costs nothing, it cannot be un-set, and a late
+joiner is caught up by the next one. Hit counts may drift; the outcome cannot.
+
+A client can clear the board by sending all ones. That is the same trust model
+as everything else here, and a mask that can only *remove* cover is a smaller
+lever than lying about your own position or your own kills.
+
 ### The chopper
 
 Ten in a row and you get out of the tank. Everything below that rung changes a

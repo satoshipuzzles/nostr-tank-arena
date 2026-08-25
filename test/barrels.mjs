@@ -42,10 +42,14 @@ await build({
   logLevel: 'error',
 })
 const {
-  BARRELS, BARREL_HP, WALLS, applyCoverBits, coverBits, coverGeneration,
-  damageCover, resetCover, setLayout, pointInTallWall, isLow,
+  BREAKABLE, BARREL_HP, CRATE_HP, WALLS, applyCoverBits, coverBits, coverGeneration,
+  damageCover, explodes, resetCover, setLayout, pointInTallWall, isLow,
   spawnShell, stepShell,
 } = await import(out)
+
+/** Just the barrels, which is what most of this suite is about. */
+const barrels = () => BREAKABLE.filter((b) => explodes(b))
+const crates = () => BREAKABLE.filter((b) => !explodes(b))
 
 const failures = []
 const check = (name, ok, detail = '') => {
@@ -57,17 +61,18 @@ const check = (name, ok, detail = '') => {
 let layout = -1
 for (let i = 0; i < 8 && layout < 0; i++) {
   setLayout(i)
-  if (BARRELS.length >= 2) layout = i
+  if (barrels().length >= 2 && crates().length >= 2) layout = i
 }
-check('there is a layout with barrels to shoot at', layout >= 0 && BARRELS.length >= 2,
-  `layout ${layout}, ${BARRELS.length} barrels`)
+check('there is a layout with both barrels and crates on it',
+  layout >= 0 && barrels().length >= 2 && crates().length >= 2,
+  `layout ${layout}, ${barrels().length} barrels, ${crates().length} crates`)
 setLayout(layout)
 resetCover()
 
 // -------------------------------------------------------------- the hit count
 
 {
-  const b = BARRELS[0]
+  const b = barrels()[0]
   check('a barrel starts intact and full', b.gone === false && b.hp === BARREL_HP, `hp=${b.hp}`)
 
   // A rock in the same board must not be destructible, or this is a check about
@@ -96,7 +101,7 @@ resetCover()
 
 {
   resetCover()
-  const b = BARRELS[1]
+  const b = barrels()[1]
   const cx = b.x + b.w / 2
   const cy = b.y + b.h / 2
   check('an intact barrel stops a shell', pointInTallWall(cx, cy) !== null)
@@ -112,7 +117,7 @@ resetCover()
 
 {
   resetCover()
-  const b = BARRELS[0]
+  const b = barrels()[0]
   const cx = b.x + b.w / 2
   const cy = b.y + b.h / 2
   // Fire straight into it from clear ground to the west, far enough out that
@@ -149,34 +154,49 @@ resetCover()
 // ----------------------------------------------------------------- the union
 
 {
+  // Indexed by position in `BREAKABLE`, not by "the first barrel". The list
+  // interleaves crates and barrels in `WALLS` order, and the mask is a bitmask
+  // over that list — an earlier version of this section indexed the barrels and
+  // then read bit 0, which happened to be a crate and quietly tested nothing.
   resetCover()
   check('the mask is empty on an intact board', coverBits() === 0)
 
-  damageCover(BARRELS[0].id, BARREL_HP)
-  const oneGone = coverBits()
-  check('and it names the barrel that went', oneGone === 1, `bits=${oneGone}`)
+  const first = BREAKABLE[0]
+  damageCover(first.id, first.hp)
+  check('and it names the piece that went', coverBits() === 1, `bits=${coverBits()}`)
 
   // Somebody else saw a different one go. Union, so both end up destroyed.
-  const taken = applyCoverBits(1 << 1)
-  check('a peer mask takes out a barrel we had not seen go',
-    taken.length === 1 && BARRELS[1].gone === true, `${taken.length} taken`)
+  const other = BREAKABLE.findIndex((b) => !b.gone)
+  const taken = applyCoverBits(1 << other)
+  check('a peer mask takes out a piece we had not seen go',
+    taken.length === 1 && BREAKABLE[other].gone === true, `${taken.length} taken`)
   check('and ours is still gone — a union cannot un-set',
-    BARRELS[0].gone === true && coverBits() === 0b11, `bits=${coverBits()}`)
+    first.gone === true && coverBits() === (1 | (1 << other)), `bits=${coverBits()}`)
 
   // Idempotent and order-independent. Replaying an older, smaller mask must not
   // resurrect anything: relays deliver out of order, and a tick from before a
-  // barrel went is guaranteed to arrive after one from after it.
+  // piece went is guaranteed to arrive after one from after it.
   const before = coverBits()
   const again = applyCoverBits(1)
   check('replaying an older mask changes nothing',
     again.length === 0 && coverBits() === before, `bits=${coverBits()}`)
 
-  // A barrel we have never heard of. The mask is over `BARRELS` order, so a bit
-  // past the end of this board must be ignored rather than throwing or
-  // wrapping onto a real barrel.
+  // A piece we have never heard of. The mask is over `BREAKABLE` order, so a
+  // bit past the end of this board must be ignored rather than throwing or
+  // wrapping onto a real one.
   const overflow = applyCoverBits(1 << 30)
   check('the control: a bit past the end of the board is ignored',
     overflow.length === 0 && coverBits() === before, `bits=${coverBits()}`)
+
+  // Every board fits. The mask is 31 bits and the widest layout carries eight.
+  let widest = 0
+  for (let i = 0; i < 8; i++) {
+    setLayout(i)
+    widest = Math.max(widest, BREAKABLE.length)
+  }
+  check('the control: no layout has more breakable cover than the mask has bits',
+    widest <= 31, `widest board carries ${widest}`)
+  setLayout(layout)
 
   // A late joiner: fresh board, one tick, caught up.
   resetCover()
@@ -190,18 +210,23 @@ resetCover()
 
 {
   resetCover()
-  damageCover(BARRELS[0].id, BARREL_HP)
-  damageCover(BARRELS[1].id, 1)
-  check('a partly-shot board reports its holes', coverBits() === 1 && BARRELS[1].hp === BARREL_HP - 1)
+  const gone = BREAKABLE[0]
+  const dented = BREAKABLE.find((b) => b !== gone)
+  damageCover(gone.id, gone.hp)
+  damageCover(dented.id, 1)
+  check('a partly-shot board reports its holes',
+    coverBits() === 1 && dented.hp === (explodes(dented) ? BARREL_HP : CRATE_HP) - 1,
+    `bits=${coverBits()} dented=${dented.hp}`)
   resetCover()
-  check('a new round puts every barrel back, including the dented one',
-    coverBits() === 0 && BARRELS.every((b) => b.gone === false && b.hp === BARREL_HP))
+  check('a new round puts everything back, including the dented one',
+    coverBits() === 0 &&
+      BREAKABLE.every((b) => b.gone === false && b.hp === (explodes(b) ? BARREL_HP : CRATE_HP)))
 
   // The case that made `resetCover` necessary rather than leaving it to
   // `setLayout`: the map is `blockHash % 8`, so two rounds in a row land on the
   // same board about one time in eight, and `setLayout` returns early when the
   // index has not changed.
-  damageCover(BARRELS[0].id, BARREL_HP)
+  damageCover(BREAKABLE[0].id, BREAKABLE[0].hp)
   setLayout(layout)
   check('the control: re-selecting the same layout does NOT rebuild the board',
     coverBits() === 1, `bits=${coverBits()}`)
@@ -209,12 +234,48 @@ resetCover()
   check('which is why a round reset is its own call', coverBits() === 0)
 }
 
+// ------------------------------------------------------------------- crates
+
+{
+  // A crate is a *wall*, and the price of breaching one is the thing that keeps
+  // it a plan rather than something you do in passing. Eight hits is two full
+  // magazines: most of twenty seconds standing still and shooting a box.
+  resetCover()
+  const c = crates()[0]
+  check('a crate starts at its own hull, not a barrel\'s',
+    c.hp === CRATE_HP && CRATE_HP > BARREL_HP, `crate ${c.hp} against barrel ${BARREL_HP}`)
+
+  const steps = []
+  for (let i = 0; i < CRATE_HP; i++) steps.push(damageCover(c.id, 1))
+  check(`it takes ${CRATE_HP} hits, and only the last one breaks it`,
+    steps.slice(0, -1).every((v) => v === false) && steps[steps.length - 1] === true,
+    `${steps.filter((v) => v === false).length} survived`)
+  check('and the lane behind it is open afterwards',
+    pointInTallWall(c.x + c.w / 2, c.y + c.h / 2) === null)
+
+  // The control that keeps the two kinds distinct. If a crate exploded, eight
+  // shells would be the best weapon in the game rather than the slowest.
+  check('the control: a barrel explodes and a crate does not',
+    explodes(barrels()[0]) === true && explodes(c) === false)
+
+  // And a barrel is still three hits on the same board — the two hulls are per
+  // kind, not a single number the last-registered kind wins.
+  resetCover()
+  const b = barrels()[0]
+  const first = damageCover(b.id, 1)
+  const second = damageCover(b.id, 1)
+  const third = damageCover(b.id, 1)
+  check('and the two hulls do not collide: a barrel is still three on this board',
+    first === false && second === false && third === true)
+  resetCover()
+}
+
 // --------------------------------------------------------------- generation
 
 {
   resetCover()
   const a = coverGeneration()
-  damageCover(BARRELS[0].id, 1)
+  damageCover(barrels()[0].id, 1)
   const b = coverGeneration()
   check('a hit moves the generation, so the renderer knows to look', b !== a, `${a} -> ${b}`)
   const c = coverGeneration()
