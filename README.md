@@ -71,6 +71,46 @@ shell: the *victim* applies it, and the victim cannot see what the caller had
 going on when they earned it. The caller is exempt, and the lane is chosen on
 the far side of the board from them.
 
+### Domination
+
+Puzz, asking about team deathmatch: *"shouldnt we see when capturing a flag and
+taking over a territory or is that not how that mode works"*. It is not — that
+is this, and of the three team modes it is the one that fits this game's netcode
+best.
+
+Three points per board, taken from the pickup pads so they are already mirrored
+through the centre and already clear of the scenery. Stand on one alone for
+three seconds and it turns. Three rather than two or four because an odd number
+cannot be split evenly: somebody is always behind and somebody always has to
+move.
+
+**Ownership is derived, not published.** Every client already receives every
+tank's position ten times a second, so who is standing on a point is a function
+of that stream and nothing else. Nobody sends "I took point B" — each client
+works it out from the same inputs and reaches the same answer, which is the rule
+the map and the pickup schedule already run on. Two clients disagree about the
+*instant* a capture completes by about the interpolation delay, and cannot
+disagree about the outcome, because neither is making a decision the other has
+to accept.
+
+**The score is a capture, not a stopwatch.** Held-time would have to accumulate
+from the round boundary, so anybody joining at minute six could never catch up
+and would have no honest number to publish. A capture is an event: it happens
+once, the client it happened to counts it, and it rides the same `cap` field the
+flag game uses. Both modes therefore score the same way, which is one fewer
+thing on the wire and one fewer thing to explain.
+
+Three rules that are decisions rather than arithmetic:
+
+- **Contested is nobody**, not "the side with more tanks". A headcount would let
+  a duo walk a point out from under a lone defender without shooting them, which
+  makes the mode a race rather than a fight over ground.
+- **Contested stalls, it does not reverse.** A point you nearly took stays
+  nearly taken while you fight over it.
+- **Stepping off decays rather than resets.** Dodging for half a second should
+  not throw away three seconds of work, and a decay means a point left alone
+  drifts back rather than snapping.
+
 ### Teams
 
 Puzz asked for "team deathmatch, duos with 5 teams". There is no host here to

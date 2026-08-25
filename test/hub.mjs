@@ -156,7 +156,11 @@ try {
       on: b.classList.contains('on'),
       disabled: b.disabled,
     })))
-  check('the lobby offers modes rather than only a room name', cards.length === 3,
+  // `>= 3` rather than `=== 3`. This is another session's check and the intent
+  // is unchanged — the lobby offers modes rather than only a room name — but
+  // Domination made it four, and a count that has to be edited every time a
+  // mode ships is a check about the roadmap rather than about the lobby.
+  check('the lobby offers modes rather than only a room name', cards.length >= 3,
     JSON.stringify(cards.map((c) => c.name)))
   check('deathmatch is the one a first visit lands on', cards[0]?.on === true && cards[0]?.id === 'mode-dm',
     JSON.stringify(cards.map((c) => [c.id, c.on])))
@@ -185,7 +189,9 @@ try {
   // A mode card that wraps its name reads as two modes. Measured, not eyeballed.
   const nameFits = await page.evaluate(() =>
     [...document.querySelectorAll('#modes .mode-name')].every((n) => n.scrollWidth <= n.clientWidth + 1))
-  check('every mode name holds one line at three across', nameFits)
+  // At whatever the grid lands on — `auto-fit` puts three across at 520px and
+  // wraps four to two rows, and either way a name that wraps reads as two modes.
+  check('every mode name holds one line, whatever the grid does', nameFits)
 
   // The side picker belongs to team modes only.
   const sideHiddenAtStart = await page.evaluate(() => document.getElementById('row-side').hidden)

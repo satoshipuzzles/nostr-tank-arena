@@ -44,6 +44,8 @@ import {
 } from './protocol'
 import { BOT_COUNT, MAX_BOTS, killBot, makeBot, stepBot } from './bots'
 import { FLAG_TEAMS, canScore, canTake, carriers } from './flags'
+import { freshState, holderOn, points, stepPoint } from './domination'
+import type { Occupant, Point, PointState } from './domination'
 import type { Claim } from './flags'
 import {
   WALLS,
@@ -1470,6 +1472,81 @@ export class Game {
   team = 0
 
   /**
+   * Whether this round is a domination game — points to hold rather than flags.
+   *
+   * Set from the lobby card like `flagsOn`, and for the same reason: a mode is
+   * something players agree on before they join, not something inferred from
+   * what they happen to be doing.
+   */
+  pointsOn = false
+
+  /** The board's capture points, rebuilt when the layout changes. */
+  private capturePoints: Point[] = []
+  /** Their state, one per point, in the same order. */
+  private pointStates: PointState[] = []
+
+  /** The points and who holds them, for the renderer and the HUD. */
+  get territory(): { point: Point; state: PointState }[] {
+    return this.capturePoints.map((point, i) => ({ point, state: this.pointStates[i] }))
+  }
+
+  /**
+   * Work out who is standing where, and turn any point that has been held long
+   * enough.
+   *
+   * Nothing here is published. Every client reads the same tick stream, so
+   * every client derives the same ownership from the same positions — the rule
+   * the map and the pickup schedule already run on. What *is* published is the
+   * capture itself, as a number in `cap`, because a capture is an event that
+   * happened to one client and a stopwatch started at the round boundary is
+   * something a late joiner could never honestly report.
+   */
+  private stepTerritory(dt: number): void {
+    if (!this.pointsOn) return
+    // Rebuilt when the board changed under us. `points()` is derived from the
+    // layout, so comparing the first point's position is enough to notice a new
+    // map without keeping a second copy of the layout index.
+    const fresh = points()
+    if (
+      fresh.length !== this.capturePoints.length ||
+      (fresh.length > 0 &&
+        (fresh[0].x !== this.capturePoints[0].x || fresh[0].y !== this.capturePoints[0].y))
+    ) {
+      this.capturePoints = fresh
+      this.pointStates = fresh.map(() => freshState())
+    }
+    const occupants: Occupant[] = []
+    if (!this.watching && !this.flying) {
+      occupants.push({ x: this.tank.x, y: this.tank.y, team: this.team, dead: this.tank.dead })
+    }
+    for (const peer of this.peers.values()) {
+      if (peer.view.chopperUntil > performance.now()) continue
+      occupants.push({
+        x: peer.view.x,
+        y: peer.view.y,
+        team: peer.view.team,
+        dead: peer.view.dead,
+      })
+    }
+    for (let i = 0; i < this.capturePoints.length; i++) {
+      const holder = holderOn(this.capturePoints[i], occupants)
+      const took = stepPoint(this.pointStates[i], holder, dt)
+      if (!took) continue
+      // Only *we* score it, and only when it is our side that took it. Every
+      // client runs this and reaches the same answer, so a peer counting their
+      // own capture and us counting ours is one capture each rather than the
+      // same one twice.
+      if (took === this.team) {
+        this.captures++
+        this.sound('streak')
+        this.announce('POINT TAKEN', `${this.captures} for your side`, 130)
+      } else {
+        this.pushFeed('a point was taken')
+      }
+    }
+  }
+
+  /**
    * Whether this round is a flag game.
    *
    * Set from the lobby's mode card rather than inferred from anything, because
@@ -1582,7 +1659,14 @@ export class Game {
     }
   }
 
-  /** Captures per side, or null when nobody is playing flags. */
+  /**
+   * Captures per side, or null when nobody is scoring that way.
+   *
+   * Shared by capture the flag and domination on purpose: a flag run home and a
+   * point taken are both "one capture, credited to the client it happened to",
+   * so they ride the same `cap` field and read the same on the scoreboard. One
+   * fewer number on the wire and one fewer thing to explain.
+   */
   flagStandings(): { team: number; captures: number }[] | null {
     const rows: { team: number; captures: number }[] = []
     const add = (team: number, caps: number) => {
@@ -2354,6 +2438,7 @@ export class Game {
     // and report two deaths.
     this.takeChopperFire(now)
     this.stepFlags(now)
+    this.stepTerritory(dt)
     this.refreshPickups()
 
     for (const shell of this.shells.values()) {
@@ -2854,6 +2939,11 @@ export class Game {
     this.carrying = 0
     this.captures = 0
     this.claims.clear()
+    // Every point back to neutral. The board is rebuilt on a new block and a
+    // point owned by a side that earned it on a different map is a claim about
+    // ground that no longer exists.
+    this.capturePoints = []
+    this.pointStates = []
     for (const peer of this.peers.values()) peer.captures = 0
     this.blasts.length = 0
     // Peer tallies are ours to keep, not theirs to send, so they reset here too.
