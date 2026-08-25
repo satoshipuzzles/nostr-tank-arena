@@ -1498,27 +1498,3 @@ button.blocktile:focus-visible {
   .dr-ratio { display: none; }
 }
 
-/* `?diag=1`. Deliberately loud and deliberately on top of everything: the
-   person reading it is holding a phone and screenshotting it. */
-#diag {
-  position: fixed;
-  /* At the bottom, not the top. The thing being investigated is a line about
-     sixteen pixels down, and a diagnostic panel that covers it is a diagnostic
-     that hides its own subject. */
-  bottom: 0;
-  left: 0;
-  right: 0;
-  margin: 0;
-  padding: 6px 8px;
-  max-height: 60vh;
-  overflow: auto;
-  background: rgba(4, 6, 10, 0.94);
-  color: #9ef5c0;
-  font: 10px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
-  white-space: pre-wrap;
-  z-index: 9999;
-  /* Never eats a tap. It sits over the lobby's play button, and with
-     `pointer-events` left alone it swallowed the click and the game never
-     started — the panel is for reading, not for pressing. */
-  pointer-events: none;
-}
