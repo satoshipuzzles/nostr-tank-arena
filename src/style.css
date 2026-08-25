@@ -263,7 +263,15 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
 
 #feed {
   position: absolute;
-  bottom: 84px;
+  /* Above the key hints, whatever height they have wrapped to.
+     `bottom: 84px` was one hint line plus a gap, and it stopped being true the
+     moment the hints started wrapping — every button added to the row on the
+     right makes the row on the left a line taller, and at three lines the feed
+     printed straight through it. `--hint-h` is written by `watchActionsWidth`
+     in main.ts from the real element, for the same reason `--actions-w` is: a
+     constant here is a promise the layout will never change again, and that
+     promise has already been broken twice. */
+  bottom: calc(var(--hint-h, 42px) + 28px);
   left: 14px;
   display: flex;
   flex-direction: column;
@@ -933,6 +941,20 @@ body.hud-compact #hud-actions {
 }
 body.hud-compact #hud-actions button { padding: 11px 12px; font-size: 12px; }
 
+/* No keyboard hints on the touch layout.
+   The `max-width: 640px` rule below was the only thing hiding them, and an
+   iPhone held landscape is 932 CSS pixels wide — so the desktop hint row was
+   being drawn on a phone. With the action row grown to seven buttons the hints
+   had no width left, wrapped to one word per line, and the 999px pill radius
+   turned the whole thing into a large dark circle over the board. `hud-compact`
+   is set when a finger has been seen, which is exactly the audience that has no
+   keyboard to be hinted about. */
+body.hud-compact #controls-hint { display: none; }
+
+/* Too narrow to be worth reading. Set by `watchActionsWidth` in main.ts from
+   the measured gap between the hints and the button row. */
+#controls-hint.cramped { display: none; }
+
 /* The kill feed sits at the bottom on a desk, on top of the action bar's old
    corner. With the bar collapsed the feed is the only thing down there, so it
    gets the room back rather than staying tucked above a bar that is gone. */
@@ -1474,4 +1496,29 @@ button.blocktile:focus-visible {
     grid-template-columns: 20px 26px 1fr 42px 42px 40px;
   }
   .dr-ratio { display: none; }
+}
+
+/* `?diag=1`. Deliberately loud and deliberately on top of everything: the
+   person reading it is holding a phone and screenshotting it. */
+#diag {
+  position: fixed;
+  /* At the bottom, not the top. The thing being investigated is a line about
+     sixteen pixels down, and a diagnostic panel that covers it is a diagnostic
+     that hides its own subject. */
+  bottom: 0;
+  left: 0;
+  right: 0;
+  margin: 0;
+  padding: 6px 8px;
+  max-height: 60vh;
+  overflow: auto;
+  background: rgba(4, 6, 10, 0.94);
+  color: #9ef5c0;
+  font: 10px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre-wrap;
+  z-index: 9999;
+  /* Never eats a tap. It sits over the lobby's play button, and with
+     `pointer-events` left alone it swallowed the click and the game never
+     started — the panel is for reading, not for pressing. */
+  pointer-events: none;
 }
