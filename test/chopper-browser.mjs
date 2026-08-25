@@ -115,7 +115,14 @@ try {
     boarded.streak === 10 && boarded.flying === true, JSON.stringify(boarded))
   check('and it starts over our own tank rather than at a map edge',
     Math.abs(boarded.at.x - 800) < 2 && Math.abs(boarded.at.y - 600) < 2, JSON.stringify(boarded.at))
-  check('with ten seconds on it', boarded.left > 9 && boarded.left <= 10, String(boarded.left))
+  // Read from the build rather than written here. Both of these had a literal
+  // 10 in them and went red when the reward was doubled to twenty seconds —
+  // correct code, stale assertion, which is the same shape of bug as the
+  // countdown bar that divided by a hardcoded 10 and sat pinned full.
+  const CHOPPER_S = (await page.evaluate(() => window.__tuning.CHOPPER_MS)) / 1000
+  check(`with its full ${CHOPPER_S} seconds on it`,
+    boarded.left > CHOPPER_S - 1 && boarded.left <= CHOPPER_S,
+    `${boarded.left} of ${CHOPPER_S}`)
 
   // ------------------------------------------------- 2. it reaches a pixel
 
@@ -162,8 +169,8 @@ try {
   })
   check('driving moves the chopper', flown.moved.x > flown.from.x + 50, JSON.stringify(flown.moved))
   check('the tick carries the time it has left',
-    typeof flown.tick?.c === 'number' && flown.tick.c > 0 && flown.tick.c <= 10_400,
-    String(flown.tick?.c))
+    typeof flown.tick?.c === 'number' && flown.tick.c > 0 && flown.tick.c <= CHOPPER_S * 1000 + 400,
+    `${flown.tick?.c} of ${CHOPPER_S * 1000}`)
   check('and where the rounds are landing',
     typeof flown.tick?.cx === 'number' && typeof flown.tick?.cy === 'number',
     JSON.stringify({ cx: flown.tick?.cx, cy: flown.tick?.cy }))

@@ -1,6 +1,7 @@
 import './style.css'
 import * as arena from './arena'
 import * as flags from './flags'
+import { CHOPPER_MS } from './chopper'
 import { layoutForBlock, layoutName, setLayout } from './arena'
 import { Sfx } from './audio'
 import { BlockClock } from './blocks'
@@ -1507,6 +1508,12 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     // and the only way to check that is to run it twice with the input in a
     // different order.
     ;(window as unknown as { __flags: unknown }).__flags = flags
+    // Tuning constants a suite should not hardcode. `paintChopper` divided the
+    // countdown by a literal 10 and sat pinned full for the first half of a
+    // twenty-second reward; two checks in test/chopper-browser.mjs had the same
+    // literal and went red on correct code. A duration written down in three
+    // places is a duration that will disagree with itself.
+    ;(window as unknown as { __tuning: unknown }).__tuning = { CHOPPER_MS }
 
     // Faces on the tanks. The renderer asks by pubkey and never learns what a
     // relay is; `Profiles.get` queues an unknown npub for the next batch and
@@ -1771,7 +1778,11 @@ function paintChopper(game: Game): void {
   el.innerHTML =
     `<b>CHOPPER</b> <span class="chopper-clock">${left.toFixed(1)}s</span>` +
     `<span class="chopper-hint">drive to fly · hold fire to rake the ground</span>`
-  el.style.setProperty('--left', String(Math.max(0, Math.min(1, left / 10))))
+  // Against the real duration, not a hardcoded ten. Doubling `CHOPPER_MS` to
+  // twenty seconds left this dividing by 10, so the bar clamped to full for the
+  // entire first half of the reward and only started moving at the halfway
+  // point. Caught by P.F. Chang reading the diff rather than by me writing it.
+  el.style.setProperty('--left', String(Math.max(0, Math.min(1, left / (CHOPPER_MS / 1000)))))
 }
 
 /**
