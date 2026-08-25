@@ -341,6 +341,14 @@ export interface RoundResult {
   /** The rules that round played under, banked before the next block changes them. */
   modifier: string
   standings: Standing[]
+  /**
+   * Longest streak of the round, banked here because `endRound` resets it.
+   *
+   * On the result rather than read off the game afterwards for exactly that
+   * reason: anything that publishes this round has to run after the boundary,
+   * by which time the live counter is already counting the next one.
+   */
+  bestStreak: number
   endedAt: number
 }
 
@@ -1540,7 +1548,15 @@ export class Game {
     this.sfx(name, opts.at ? { ...opts, ear: { x: this.tank.x, y: this.tank.y } } : opts)
   }
 
-  private pushFeed(text: string): void {
+  /**
+   * A line in the kill feed.
+   *
+   * Public because the shell has things to say that `Game` has no business
+   * knowing about — "auto-publish is on, your signer will ask once a block" is
+   * a fact about a browser extension, not about a tank. The feed is the only
+   * place in this UI for a sentence that does not deserve a banner.
+   */
+  pushFeed(text: string): void {
     this.feed.push({ text, at: performance.now() })
     if (this.feed.length > 6) this.feed.shift()
   }
@@ -2012,6 +2028,7 @@ export class Game {
       layout: layoutName,
       modifier: this.modifier.name,
       standings: this.scoreboard(),
+      bestStreak: this.bestStreak,
       endedAt: Date.now(),
     }
     this.lastRound = result
