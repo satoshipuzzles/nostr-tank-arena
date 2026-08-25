@@ -273,10 +273,18 @@ try {
     const chipText = await page.evaluate(() => ({
       score: document.querySelector('#chip-score .chip-text').textContent,
       status: document.querySelector('#chip-status .chip-text').textContent,
+      bad: document.getElementById('chip-status').classList.contains('bad'),
     }))
+    // The status chip has two legitimate readings and a headless run can land
+    // on either: the opponent count when the relays are fine, and "relays" when
+    // they are not. Asserting only the first made this check fail on a run
+    // where the chip was doing exactly its job. Both are accepted, and the
+    // trouble reading has to be red — a chip that says "relays" in the ordinary
+    // colour is the warning failing to warn.
     check(
       'the collapsed chips still carry the numbers',
-      /^\d+\/\d+$/.test(chipText.score) && /opp/.test(chipText.status),
+      /^\d+\/\d+$/.test(chipText.score) &&
+        (/^\d+ opps?$/.test(chipText.status) || (chipText.status === 'relays' && chipText.bad)),
       JSON.stringify(chipText),
     )
 

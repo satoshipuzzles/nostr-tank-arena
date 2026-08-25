@@ -64,6 +64,36 @@ export interface StatePayload {
   hp: number
   d: boolean // dead / respawning
   k?: number // kills in a row, for the streak glow
+  /**
+   * The sender's own round tally: kills and deaths.
+   *
+   * These are here because the scoreboard cannot be built out of the death
+   * events alone. Deaths are ephemeral (kind 21002), so nothing stores them:
+   * a client that joins mid-round has received none of the ones that already
+   * happened and shows a room full of veterans at 0/0 forever, and a death
+   * event that reaches three relays out of four is counted by whoever was
+   * subscribed to those three. Every client's tally was its own, and no two
+   * agreed.
+   *
+   * A tick, by contrast, arrives constantly and from the one client that
+   * cannot be missing its own kills. So each tank reports its own score and
+   * everybody else believes it, exactly like `hp` and `k` directly above.
+   * Self-reported means forgeable — the README's "How to cheat this" section
+   * says so plainly, and it is the same exposure the leaderboard already had.
+   */
+  ks?: number // kills this round
+  ds?: number // deaths this round
+  /**
+   * Which block's round `ks`/`ds` belong to.
+   *
+   * Nobody is the host, so every client rolls the round when it personally
+   * sees the new tip, and those moments are seconds apart. Without a round
+   * stamp, a peer who has not rolled yet keeps sending last round's tally into
+   * a scoreboard that has just reset, and everyone reads a stale, inflated
+   * number for as long as the boundary takes to settle. A tally from a round
+   * we are not playing is dropped rather than shown.
+   */
+  r?: number
 }
 
 /**

@@ -335,7 +335,7 @@ subscribes you to an entire match.
 | Kind | Name | Storage | Signed by | Content |
 |------|------|---------|-----------|---------|
 | `21003` | session attestation | ephemeral | **real npub** | `{ s, name, color, exp }` |
-| `21000` | tank state tick | ephemeral | session key | `{ t, x, y, h, g, hp, d, k? }` |
+| `21000` | tank state tick | ephemeral | session key | `{ t, x, y, h, g, hp, d, k?, ks?, ds?, r? }` |
 | `21001` | shell fired | ephemeral | session key | `{ id, t0, x, y, a, b?, d? }` |
 | `21002` | death report | ephemeral | session key | `{ t, k, x, y }` |
 | `30078` | score record | addressable (NIP-78) | **real npub** | `{ kills, deaths, room, at }` |
@@ -365,6 +365,28 @@ your own HUD is not a streak — it is a number. On the wire, everyone can see t
 rainbow ring around the tank that is on a run and decide to do something about
 it. It is exactly as trustworthy as the `hp` beside it: self-reported, and always
 was.
+
+`ks` and `ds` on the state tick are the sender's own kills and deaths this
+round, and `r` is the block height they belong to. The scoreboard is built out
+of these rather than out of the death events, because the death events are
+ephemeral and therefore cannot add up to a shared number: a player who joins
+mid-round has received none of the deaths that already happened and would show
+the whole room at 0/0 forever, and a death event that reaches three relays out
+of four is counted only by whoever was reading those three. Every client had its
+own tally and no two agreed, which is a scoreboard in name only.
+
+A tick, by contrast, arrives ten times a second from the one client that cannot
+be missing its own kills. A peer's locally-counted tally is kept as the fallback
+for a client too old to send one, and it can only ever be short.
+
+`r` is there because nobody is the host: every client rolls the round when it
+personally sees the new tip, and those moments are seconds apart. Without the
+stamp, a peer who has not rolled yet keeps pushing last round's tally into a
+scoreboard that has just reset. A tally from a round we are not playing is
+dropped, which costs that peer about a second of showing 0/0.
+
+Self-reported, therefore forgeable — see [How to cheat this](#how-to-cheat-this),
+where this is item 5 and the trade is written out.
 
 `b` on the fire event is the shell's bounce budget, and it travels with the shell
 rather than being read from the current round's rules when the event arrives.
@@ -498,6 +520,22 @@ Written down rather than assumed, because "signed" is not the same as "true".
    number. Anyone can publish `{ kills: 9999 }` from their own npub. The
    leaderboard is a wall of self-reported scores, and the UI says so.
 4. **Rapid fire.** Reload is enforced client-side only.
+5. **Inflate the in-round scoreboard.** Each tank's state tick carries its own
+   kills and deaths (`ks`/`ds`), and everyone else's scoreboard believes it. A
+   patched client can send any pair it likes. The numbers are clamped to
+   0-9999 so a hostile tick cannot take the panel out, and a tally stamped with
+   a block height we are not playing is dropped — but within those bounds it is
+   a self-reported number, exactly like the `hp` beside it.
+
+   This was a deliberate trade and the alternative was worse. The scoreboard
+   used to be built from the ephemeral death events each client personally
+   received, which needs no trust at all and produced a different scoreboard on
+   every screen: a player who joined mid-round had received none of the deaths
+   that already happened and showed the whole room at 0/0 permanently, and a
+   death event that reached three relays out of four was counted only by
+   whoever read those three. An unforgeable number that no two players agree on
+   is not a scoreboard. The cheat this opens is the one the leaderboard (3) has
+   always had, and the fix is the same fix: countersigned kills.
 
 Fixes exist and each costs something real. Movement plausibility checks (max
 speed between ticks) are cheap and would land 1 and 2 partway. Making kills

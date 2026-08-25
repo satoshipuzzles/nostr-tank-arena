@@ -20,7 +20,8 @@
     "test:pads": "node test/pads.mjs",
     "test:relay-editor": "node test/relay-editor.mjs",
     "test:aim": "node test/aim.mjs",
-    "test:aim-browser": "node test/aim-browser.mjs"
+    "test:aim-browser": "node test/aim-browser.mjs",
+    "test:score": "node test/score.mjs"
   },
   "dependencies": {
     "nostr-tools": "^2.10.4",

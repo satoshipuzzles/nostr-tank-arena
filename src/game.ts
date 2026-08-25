@@ -174,8 +174,24 @@ export interface Peer {
   lastSeen: number
   buffer: StateSample[]
   view: { x: number; y: number; hull: number; gun: number; hp: number; dead: boolean }
+  /** What we counted for them out of the death events we personally received. */
   kills: number
   deaths: number
+  /**
+   * What they say their score is, off their own state tick.
+   *
+   * This is the number the scoreboard shows, and `kills`/`deaths` above are the
+   * fallback for a peer whose client is too old to send one. The locally
+   * counted pair can only ever undercount — it is built from ephemeral death
+   * events, so it is missing every death that happened before we joined and
+   * every one that took a relay we were not reading. The peer's own count is
+   * the only one that cannot be missing their kills.
+   *
+   * Null until their first tick, so "not heard from yet" and "genuinely 0/0"
+   * stay distinguishable and the fallback is only used when it is really the
+   * best we have.
+   */
+  claimed: { kills: number; deaths: number } | null
   /** Their kills in a row, from the state tick, so their glow is visible here too. */
   streak: number
 }
@@ -657,6 +673,7 @@ export class Game {
         view: { x: ARENA_W / 2, y: ARENA_H / 2, hull: 0, gun: 0, hp: this.maxHp, dead: false },
         kills: 0,
         deaths: 0,
+        claimed: null,
         streak: 0,
       }
       this.peers.set(session, peer)
@@ -702,6 +719,21 @@ export class Game {
     // Cosmetic and self-reported, exactly like the HP beside it. A streak you
     // cannot see on the tank that has it is a number in somebody else's HUD.
     peer.streak = typeof p.k === 'number' && p.k > 0 ? Math.min(99, Math.floor(p.k)) : 0
+    // Their own tally, which beats ours. Ours is built from death events and
+    // can only be short — theirs is the count kept by the one client that saw
+    // every one of their kills. Recorded whenever the fields are present, so a
+    // peer who genuinely has 0/0 says so rather than falling through to a
+    // locally-counted zero that means "we have not been listening long enough".
+    // A tally stamped with a round we are not playing is last round's, from a
+    // peer who has not seen the new tip yet. Dropping it costs them a second of
+    // showing 0/0; keeping it would show everybody a wrong number instead.
+    const sameRound = (typeof p.r === 'number' ? p.r : 0) === this.round
+    if (sameRound && typeof p.ks === 'number' && typeof p.ds === 'number') {
+      peer.claimed = {
+        kills: Math.max(0, Math.min(9999, Math.floor(p.ks))),
+        deaths: Math.max(0, Math.min(9999, Math.floor(p.ds))),
+      }
+    }
     // Relays deliver out of order often enough to matter; keep the buffer sorted.
     const b = peer.buffer
     let i = b.length
@@ -758,9 +790,14 @@ export class Game {
       this.kills++
       this.sound('kill')
       this.onOwnKill()
-    } else if (p.k) {
-      const killer = this.peers.get(p.k)
-      if (killer) killer.kills++
+    } else if (typeof p.k === 'string' && p.k.length === 64) {
+      // `ensurePeer`, not `peers.get`. A killer we have not had a tick from yet
+      // is not an unknown player, it is a player whose first event happened to
+      // be somebody else's death — guaranteed for a late joiner, and for anyone
+      // whose first act after joining is a kill, because their tick and their
+      // victim's death report race across relays with no ordering between them.
+      // Looking them up and returning silently threw that kill away.
+      this.ensurePeer(p.k).kills++
     }
 
     this.pushFeed(
@@ -1180,6 +1217,12 @@ export class Game {
       hp: this.tank.hp,
       d: this.tank.dead,
       ...(this.streak > 0 ? { k: this.streak } : {}),
+      // Always sent, including at 0/0. An omitted score is indistinguishable
+      // from a client that has not scored yet, and the whole point of putting
+      // the tally on the tick is that a late joiner can tell those apart.
+      ks: this.kills,
+      ds: this.deaths,
+      r: this.round,
     }
     this.publishAsSession(KIND_STATE, payload)
   }
@@ -1237,6 +1280,9 @@ export class Game {
     for (const peer of this.peers.values()) {
       peer.kills = 0
       peer.deaths = 0
+      // Back to "not heard from this round", not to a claimed zero. Their next
+      // tick carries the new round's tally and re-fills this within 100ms.
+      peer.claimed = null
       peer.streak = 0
     }
     this.sound('block')
@@ -1497,10 +1543,14 @@ export class Game {
         you: true,
         pubkey: this.identity.pubkey,
       },
+      // A peer's own count beats ours. See `Peer.claimed`: ours is assembled
+      // from ephemeral death events and is short by everything that happened
+      // before we joined, so preferring it is how four clients end up showing
+      // four different scoreboards for the same round.
       ...[...this.peers.values()].map((p) => ({
         name: p.name,
-        kills: p.kills,
-        deaths: p.deaths,
+        kills: p.claimed?.kills ?? p.kills,
+        deaths: p.claimed?.deaths ?? p.deaths,
         color: p.displayColor,
         you: false,
         pubkey: p.pubkey,
