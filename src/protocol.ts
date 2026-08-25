@@ -119,6 +119,20 @@ export interface StatePayload {
    */
   b?: number
   /**
+   * How chewed up each surviving piece of cover looks, three bits each.
+   *
+   * A thermometer code, so `|` is `max` and this unions exactly like `b` —
+   * see `coverDamageBits` in `arena.ts`. Its own field rather than more bits in
+   * `b` on purpose: a client that is already deployed ignores what it does not
+   * know and simply draws no scuffs, where widening `b` would have made it read
+   * "this crate is damaged" as "these crates are destroyed" and blank cover
+   * that is still standing.
+   *
+   * Omitted while the board is untouched, which is the first minute of most
+   * rounds.
+   */
+  cd?: number
+  /**
    * Milliseconds of chopper time this client has left, when it is flying one.
    *
    * The whole gunship rides on this tick rather than on events of its own. A
