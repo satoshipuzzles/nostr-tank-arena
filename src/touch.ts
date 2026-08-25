@@ -80,6 +80,22 @@ export class TouchSticks {
   private drive: Stick | null = null
   private aim: Stick | null = null
   /**
+   * The resting pads: a D-pad ghost on the left, a turret ring on the right.
+   *
+   * Drawn only between touches, and they are furniture, not controls — the
+   * floating stick underneath is still what reads the thumb, so landing a
+   * centimetre off the picture costs nothing. They exist because the floating
+   * design's one real cost is that a new player sees an empty screen: nothing
+   * says "put your thumbs here" until a thumb has already guessed right. Puzz
+   * asked for the picture by name — "transparent D-pad drawn on the left,
+   * stick on the right" — and the analogue blend stays underneath it, so
+   * steer and drive mix instead of snapping to eight directions.
+   */
+  private ghostDrive: HTMLElement
+  private ghostAim: HTMLElement
+  /** Whether a match is on. Set from outside; the lobby gets no pads. */
+  private resting = false
+  /**
    * Whether this device has ever produced a touch contact.
    *
    * Not `'ontouchstart' in window`, which is true on plenty of desks — every
@@ -106,6 +122,34 @@ export class TouchSticks {
     window.addEventListener('pointermove', this.onMove, { passive: false })
     window.addEventListener('pointerup', this.onUp)
     window.addEventListener('pointercancel', this.onUp)
+
+    this.ghostDrive = document.createElement('div')
+    this.ghostDrive.className = 'tghost drive'
+    this.ghostDrive.innerHTML =
+      '<div class="dpad"><span class="da up">▲</span><span class="da down">▼</span>' +
+      '<span class="da west">◀</span><span class="da east">▶</span></div>'
+    this.ghostAim = document.createElement('div')
+    this.ghostAim.className = 'tghost aim'
+    this.ghostAim.innerHTML = '<div class="tcross"></div>'
+    this.ghostDrive.hidden = true
+    this.ghostAim.hidden = true
+    layer.appendChild(this.ghostDrive)
+    layer.appendChild(this.ghostAim)
+  }
+
+  /**
+   * Show or hide the resting pads. Called with "is a match on" — the pads make
+   * no sense over the lobby, and inside a match each one yields to the live
+   * stick in its half and comes back when the thumb lifts.
+   */
+  rest(on: boolean): void {
+    this.resting = on
+    this.paintGhosts()
+  }
+
+  private paintGhosts(): void {
+    this.ghostDrive.hidden = !this.resting || this.drive !== null
+    this.ghostAim.hidden = !this.resting || this.aim !== null
   }
 
   /** True once a finger has been on the glass. Drives every mobile-only affordance. */
@@ -132,6 +176,7 @@ export class TouchSticks {
     else if (!this.aim) this.aim = this.begin(e, 'aim')
     else if (!this.drive) this.drive = this.begin(e, 'drive')
     else return
+    this.paintGhosts()
     e.preventDefault()
   }
 
@@ -182,6 +227,7 @@ export class TouchSticks {
     stick.base.remove()
     if (this.drive === stick) this.drive = null
     if (this.aim === stick) this.aim = null
+    this.paintGhosts()
   }
 
   private find(id: number): Stick | null {
@@ -217,6 +263,8 @@ export class TouchSticks {
     this.aim?.base.remove()
     this.drive = null
     this.aim = null
+    this.ghostDrive.remove()
+    this.ghostAim.remove()
   }
 }
 

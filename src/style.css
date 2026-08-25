@@ -865,6 +865,80 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
 }
 
 /*
+ * The resting pads: where your thumbs go, drawn before any thumb arrives.
+ *
+ * Furniture, not controls — the floating stick underneath is what reads the
+ * touch, so these are deliberately fainter than a live stick and dashed where
+ * a live stick is solid. Anchored inside the safe areas so a notch or a home
+ * bar never eats one, and low in the corners where thumbs actually rest on a
+ * phone held sideways.
+ */
+.tghost {
+  position: absolute;
+  width: 140px;
+  height: 140px;
+  border-radius: 50%;
+  border: 2px dashed rgba(10, 14, 22, 0.4);
+  background: radial-gradient(circle, rgba(10, 14, 22, 0.14) 0%, rgba(10, 14, 22, 0.03) 72%);
+  display: grid;
+  place-items: center;
+  bottom: max(56px, calc(env(safe-area-inset-bottom) + 42px));
+}
+.tghost[hidden] { display: none; }
+.tghost.drive { left: max(56px, calc(env(safe-area-inset-left) + 42px)); }
+.tghost.aim {
+  right: max(56px, calc(env(safe-area-inset-right) + 42px));
+  border-color: rgba(255, 196, 77, 0.5);
+}
+
+/* A classic D-pad cross, drawn transparent. The picture says eight ways; the
+   analogue stick underneath blends steer and drive continuously, and the
+   picture lying a little is better than the controls snapping a lot. */
+.dpad {
+  position: relative;
+  width: 92px;
+  height: 92px;
+}
+.dpad::before,
+.dpad::after {
+  content: '';
+  position: absolute;
+  background: rgba(10, 14, 22, 0.22);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 9px;
+}
+.dpad::before { left: 0; right: 0; top: 31px; height: 30px; }
+.dpad::after { top: 0; bottom: 0; left: 31px; width: 30px; }
+.da {
+  position: absolute;
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 12px;
+  line-height: 1;
+  z-index: 1;
+}
+.da.up { top: 6px; left: 50%; transform: translateX(-50%); }
+.da.down { bottom: 6px; left: 50%; transform: translateX(-50%); }
+.da.west { left: 6px; top: 50%; transform: translateY(-50%); }
+.da.east { right: 6px; top: 50%; transform: translateY(-50%); }
+
+/* The turret ring's crosshair — the accent says "this side shoots". */
+.tcross {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 196, 77, 0.7);
+  position: relative;
+}
+.tcross::before,
+.tcross::after {
+  content: '';
+  position: absolute;
+  background: rgba(255, 196, 77, 0.7);
+}
+.tcross::before { left: 50%; top: -8px; bottom: -8px; width: 2px; transform: translateX(-50%); }
+.tcross::after { top: 50%; left: -8px; right: -8px; height: 2px; transform: translateY(-50%); }
+
+/*
  * Top centre, not bottom centre.
  *
  * The bottom of a phone screen is where the four HUD buttons live, and a

@@ -323,6 +323,48 @@ try {
     const dismissed = await until(async () => ((await shown('status')) ? null : true))
     check('and touching the board puts the sheet away', !!dismissed)
 
+    // --- the resting pads --------------------------------------------------
+    //
+    // With no thumb down, both halves show where a thumb should go: a D-pad
+    // ghost on the left, a turret ring on the right. Checked on *computed*
+    // style and geometry, not on the elements existing — a div with no CSS
+    // behind it renders as invisible nothing and passes every existence check,
+    // which is exactly how the tooltip bug shipped.
+    const ghosts = await page.evaluate(() => {
+      const read = (sel) => {
+        const el = document.querySelector(sel)
+        if (!el || el.hidden) return null
+        const cs = getComputedStyle(el)
+        const r = el.getBoundingClientRect()
+        return {
+          dashed: cs.borderStyle.includes('dashed'),
+          w: Math.round(r.width),
+          cx: r.x + r.width / 2,
+          cy: r.y + r.height / 2,
+        }
+      }
+      const bar = getComputedStyle(document.querySelector('.dpad'), '::before')
+      return {
+        drive: read('.tghost.drive'),
+        aim: read('.tghost.aim'),
+        arrows: document.querySelectorAll('.tghost.drive .da').length,
+        crossBar: parseFloat(bar.height) > 0 && bar.content !== 'none',
+        vw: window.innerWidth,
+        vh: window.innerHeight,
+      }
+    })
+    check('the resting D-pad is drawn, dashed, and thumb-sized on the left',
+      !!ghosts.drive && ghosts.drive.dashed && ghosts.drive.w === 140 &&
+        ghosts.drive.cx < ghosts.vw / 2 && ghosts.drive.cy > ghosts.vh / 2,
+      JSON.stringify(ghosts.drive))
+    check('and the turret ring mirrors it on the right',
+      !!ghosts.aim && ghosts.aim.dashed && ghosts.aim.cx > ghosts.vw / 2 &&
+        ghosts.aim.cy > ghosts.vh / 2,
+      JSON.stringify(ghosts.aim))
+    check('and the D-pad cross is really painted, arrows and bars both',
+      ghosts.arrows === 4 && ghosts.crossBar === true,
+      JSON.stringify({ arrows: ghosts.arrows, crossBar: ghosts.crossBar }))
+
     // --- driving -----------------------------------------------------------
     //
     // The tank's own coordinates, before and after a thumb drag. Screen-right is
@@ -334,6 +376,14 @@ try {
     await page.touchscreen.touchMove(180, 300)
     const stickDrawn = await page.evaluate(() => document.querySelectorAll('#touch .tstick').length)
     check('a thumb on the left half raises a stick under it', stickDrawn === 1, `${stickDrawn} sticks`)
+    // The ghost yields to the live stick — two pictures of the same control at
+    // once reads as two controls — while the untouched half keeps its invite.
+    const yielded = await page.evaluate(() => ({
+      drive: document.querySelector('.tghost.drive').hidden,
+      aim: document.querySelector('.tghost.aim').hidden,
+    }))
+    check('and the D-pad ghost yields to it while the turret ring stays',
+      yielded.drive === true && yielded.aim === false, JSON.stringify(yielded))
     // Polled rather than waited on: under swiftshader this loop runs at a
     // fraction of real time and any fixed sleep is a guess about the machine.
     const moved = await until(async () => {
@@ -367,6 +417,8 @@ try {
     await page.touchscreen.touchEnd()
     const cleared = await page.evaluate(() => document.querySelectorAll('#touch .tstick').length)
     check('lifting the thumb takes the stick away', cleared === 0, `${cleared} left on screen`)
+    const ghostBack = await page.evaluate(() => document.querySelector('.tghost.drive').hidden)
+    check('and the D-pad ghost comes back', ghostBack === false, `hidden=${ghostBack}`)
 
     // --- aiming and firing -------------------------------------------------
     //

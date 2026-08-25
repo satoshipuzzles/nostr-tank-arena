@@ -135,6 +135,9 @@ function paintTouchAffordances(): void {
   // furniture — and on a 393px-tall phone it is furniture sitting on top of the
   // buttons.
   $('touch-hint').hidden = sticks.used
+  // The resting pads want "is a match on", not "has a finger been seen" — the
+  // lobby reads fine without a D-pad floating over it.
+  sticks.rest(!hud.hidden)
   paintRotate()
   // A touchscreen that also reports a fine pointer only becomes knowable here.
   paintHudCompact()
