@@ -71,6 +71,48 @@ shell: the *victim* applies it, and the victim cannot see what the caller had
 going on when they earned it. The caller is exempt, and the lane is chosen on
 the far side of the board from them.
 
+### Teams
+
+Puzz asked for "team deathmatch, duos with 5 teams". There is no host here to
+assign sides, so the interesting question is not friendly fire, it is **who
+decides which side you are on**. Two of the three answers are worse:
+
+- Derive it from the roster and two clients with different relay visibility
+  compute different sides for the same player, which is worse than lopsided
+  teams: it is two people who each believe the other is a teammate on only one
+  of their screens.
+- Derive it from the pubkey and it always agrees, and takes away the choice,
+  which is the half of team play people actually want.
+
+So a side is **self-declared**, on the state tick as `tm`, exactly as
+trustworthy as the `hp` beside it. Press `T` to cycle none, Red, Blue, Green,
+Gold, Violet. A room is in team mode when the people in it say it is; one player
+on a side is still a deathmatch, which is what should happen when you pick a
+team and nobody joins you.
+
+**Which makes it the one self-reported field with no exploit in it.** Think
+about what a liar gets. The rule is applied by whoever is being *shot*, so
+claiming somebody's side makes their shells pass through you and yours pass
+through them, because they are running the same check against your tick. A false
+claim buys a mutual truce, not immunity, and a truce with somebody who did not
+agree to it is a fight you cannot win rather than one you cannot lose.
+
+Every damage path honours it: shells, lob craters, barrel explosions, air
+strikes and chopper fire. A teammate's shell is *consumed* rather than passed
+through, so it does not sail on and kill somebody behind you.
+
+Zero is nobody's side, and two players who have not picked are not teammates. A
+`0 === 0` shortcut in the friendly check would silently turn friendly fire off
+for the whole room.
+
+On the board a teammate gets a green ring on the felt and an enemy gets nothing.
+A mark on everybody is a mark on nobody: the question a player is answering in
+the half second before pulling a trigger is not "which of five sides is that",
+it is "can I shoot it", and the tank without a ring is the one you shoot. The
+hue stays the player's own, because it is how you find yourself and how you tell
+eight tanks apart, and painting a side colour over it would cost the most
+load-bearing piece of legibility in the game.
+
 ### How big a room gets
 
 Eight seats, and the number is bounded by the relay rather than by the game.
@@ -501,7 +543,7 @@ subscribes you to an entire match.
 | Kind | Name | Storage | Signed by | Content |
 |------|------|---------|-----------|---------|
 | `21003` | session attestation | ephemeral | **real npub** | `{ s, name, color, exp }` |
-| `21000` | tank state tick | ephemeral | session key | `{ t, x, y, h, g, hp, d, k?, ks?, ds?, r?, a?, sh?, b?, c?, cx?, cy? }` |
+| `21000` | tank state tick | ephemeral | session key | `{ t, x, y, h, g, hp, d, k?, ks?, ds?, r?, a?, sh?, b?, c?, cx?, cy?, tm? }` |
 | `21001` | shell fired | ephemeral | session key | `{ id, t0, x, y, a, b?, d? }` |
 | `21002` | death report | ephemeral | session key | `{ t, k, x, y }` |
 | `21004` | air strike | ephemeral | session key | `{ t0, y, dir, n, d }` |
@@ -527,7 +569,9 @@ been destroyed this round, **unioned** rather than replaced on receipt: a union
 is order-independent, idempotent, impossible to un-set, and catches a late
 joiner up on the next tick, which a one-off "barrel destroyed" event could never
 do. `c`, `cx` and `cy` are the chopper — see [The chopper](#the-chopper) — and
-while `c` is present, `x`/`y` are the gunship rather than the tank.
+while `c` is present, `x`/`y` are the gunship rather than the tank. `tm` is
+the side this tank has declared, 1-5, absent in a free-for-all - see
+[Teams](#teams) for why self-declaring it is safe.
 
 `role` is `seat`, `queue` or `watch`. See [Finding a game](#finding-a-game).
 

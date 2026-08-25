@@ -982,6 +982,20 @@ interface TankView {
   skin: SkinId
   /** True for the local player, whose ring is always drawn. */
   mine: boolean
+  /**
+   * Declared side, 1..5, or 0. Drawn as a ring on the felt when it matches
+   * ours, and not at all when it does not.
+   *
+   * A friend marked and an enemy unmarked, rather than a colour per side on
+   * every tank. Two reasons. The hue is how you find yourself and how you tell
+   * eight tanks apart, and painting a second colour over it costs the thing
+   * that matters most; and what a player actually needs to know in the half
+   * second before pulling a trigger is not "which of five sides is that", it is
+   * "can I shoot it".
+   */
+  team: number
+  /** Our own side, so a rig can tell whether `team` is a friend or a stranger. */
+  ourTeam: number
 }
 
 /**
@@ -2004,6 +2018,8 @@ export class Renderer {
       streak: game.streak,
       skin: game.skin,
       mine: true,
+      team: game.team,
+      ourTeam: game.team,
     }, true)
     // A spectator's tank exists in the simulation — it is where the board
     // camera and `toWorld` measure from — but it must never reach a pixel.
@@ -2044,6 +2060,8 @@ export class Renderer {
         streak: peer.streak,
         skin: peer.skin,
         mine: localSessions?.has(peer.session) ?? false,
+        team: peer.view.team,
+        ourTeam: game.team,
       })
     }
 
@@ -2270,11 +2288,22 @@ export class Renderer {
 
     const ringMat = rig.ring.material as THREE.MeshBasicMaterial
     const hot = v.streak >= 3
-    rig.ring.visible = !dead && (v.mine || hot)
+    // A ring on a teammate, so "can I shoot this" is answerable at a glance
+    // rather than by reading a name plate. Not on an enemy: a mark on everybody
+    // is a mark on nobody, and the tank without one is the one you shoot.
+    const friend = v.ourTeam > 0 && v.team === v.ourTeam && !v.mine
+    rig.ring.visible = !dead && (v.mine || hot || friend)
     if (hot) {
       ringMat.color.setHSL(((now / 12) % 360) / 360, 0.9, 0.6)
       ringMat.opacity = 0.85
       rig.ring.scale.setScalar(1.15 + Math.sin(now / 140) * 0.08)
+    } else if (friend) {
+      // Green rather than the side's own colour. The question the ring answers
+      // is binary — friend or not — and five shades of ring would put the
+      // player back to matching hues under fire.
+      ringMat.color.setHex(0x6ee7a0)
+      ringMat.opacity = 0.8
+      rig.ring.scale.setScalar(1.1)
     } else {
       ringMat.color.setHex(0xffffff)
       ringMat.opacity = 0.55
@@ -2518,6 +2547,17 @@ export class Renderer {
   /** Whether our own tank is being drawn at all. Also for the suites. */
   youVisible(): boolean {
     return this.you.root.visible
+  }
+
+  /**
+   * A peer's rig, for test/teams.mjs.
+   *
+   * The claim there is that a teammate is *marked on the felt* and a stranger
+   * is not — which is a mesh being visible, not a flag in game state. Same
+   * reasoning as `coverMeshAt` and `chopperRigAt`.
+   */
+  rigFor(session: string): { ring: THREE.Object3D } | null {
+    return this.rigs.get(session) ?? null
   }
 
   private wear(rig: TankRig, v: TankView, now: number, dt: number, inside = false): void {
