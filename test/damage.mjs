@@ -93,6 +93,15 @@ try {
     const g = window.__game
     g.beginRound(900000, 'ab'.repeat(30) + '0300')
     g.beginRound = () => {}
+    // And nobody else on the board. The subject is parked and photographed for
+    // the whole suite, and the practice bots treat a parked tank as what it
+    // is — target practice. They shot the "healthy" control down to one hull
+    // (a thousand flame pixels in a control frame) and killed it outright
+    // before the shield probe, where a dead hull is grey and the bubble hides,
+    // which is exactly {off: 0, on: 0}. This suite measures paint, not
+    // marksmanship, and the flake arrived with the bots rather than with
+    // anything under test here.
+    g.botsWanted = 0
   })
   const maxHp = await page.evaluate(() => window.__game.maxHp)
   check('the pinned round gives a hull worth damaging', maxHp >= 3, `maxHp=${maxHp}`)
@@ -227,11 +236,24 @@ try {
    * Count smoke-coloured and flame-coloured pixels around the tank.
    *
    * Two boxes, because the two things live in different places. Flame is short
-   * (under 0.7s) and barely drifts, so it is read at the nozzle. Smoke lives
-   * for two seconds and rides the wind, so it is read a good way downwind —
-   * and it has to be, because the first version of this check read one box over
-   * the hull and scored 6015 on a **healthy** tank. That was the tank's own
-   * black ink outline, and no plume was ever going to double it.
+   * (under 0.7s) and barely drifts, so it is read at the nozzle. Smoke is read
+   * in a box straight over the rear deck, because that is where the photograph
+   * says the plume actually hangs — the middle tier's puffs fade before they
+   * have drifted anywhere, and the old box 62 units downwind read the same
+   * number on a smoking tank as on a healthy one while a fat grey cloud sat
+   * over the deck in plain sight.
+   *
+   * What counts as smoke is a *rendered* puff, not a spawned one. The puffs
+   * spawn dark (L 16-38%) but draw translucent over bright green felt, so on
+   * screen the plume is a desaturated grey at middling brightness — measured
+   * with a histogram: damaged-minus-healthy lives almost entirely in
+   * saturation < 20 at max 60-165, over twenty-to-one against the control.
+   * The old rule (`max < 105`, the ink-outline band) only ever matched the
+   * burning tier's densest overlaps, which is why the middle tier "never
+   * rose": the feature was on screen and the classifier was blind to it. The
+   * band's edges both earn their keep — below 55 is the tank's own black ink
+   * outline (the first version of this check scored 6015 on a *healthy* tank
+   * off exactly that), above 165 is the cream sky.
    *
    * Sampled repeatedly and accumulated rather than read once: the emitter is a
    * rate, and a single frame under swiftshader can easily fall between two
@@ -257,22 +279,22 @@ try {
             const [red, green, blue] = [px[i], px[i + 1], px[i + 2]]
             const max = Math.max(red, green, blue)
             const min = Math.min(red, green, blue)
-            // Grey and dark: exhaust. The felt behind it is a saturated green
-            // and the sky is a pale cream, so neither can be mistaken for this.
-            if (max < 105 && max - min < 26) smoke++
+            // Grey at middling brightness: a translucent puff over the felt.
+            // The felt is a saturated green, the sky is brighter than 165, and
+            // the tank's ink outline is darker than 55 — see the note above.
+            if (max >= 55 && max <= 165 && max - min < 20) smoke++
             // Hot: strongly red-dominant and bright, which nothing else on the
             // board is — the shells are pale and the pads are their own hues.
             else if (red > 165 && red - blue > 95 && red - green > 40) flame++
           }
           return { smoke, flame }
         }
-        // Downwind and up the column, clear of the hull, the driver's head and
-        // the name plate.
-        const drift = count(bx + 62, 92, bz - 20, 96, 84)
+        // Over the rear deck, where the plume hangs — see the note above.
+        const column = count(bx, 60, bz, 96, 84)
         // At the nozzle, where the flame actually is.
         const nozzle = count(bx, 60, bz, 56, 48)
-        if (!drift || !nozzle) return null
-        return { smoke: drift.smoke, flame: nozzle.flame }
+        if (!column || !nozzle) return null
+        return { smoke: column.smoke, flame: nozzle.flame }
       })
       if (one) {
         smoke += one.smoke
@@ -295,17 +317,44 @@ try {
     { x: 800, y: 600 }, { x: 560, y: 760 }, { x: 980, y: 880 }, { x: 380, y: 520 },
     { x: 1120, y: 420 }, { x: 700, y: 320 }, { x: 1040, y: 660 }, { x: 460, y: 980 },
   ]
+  // Scored on everything the spot has to be quiet for, not just smoke. This
+  // scorer originally minimised the control's smoke count alone, and the suite
+  // still failed about one run in two — at 460,980 one run it read 1010 flame
+  // pixels off a *healthy* tank and zero blue off a shielded one, because the
+  // camera angle put a rock column between the lens and the tank: the nozzle
+  // box was full of dark-red ink and the bubble box was full of rock. A spot
+  // only qualifies if the hull itself reaches the screen (the same blue probe
+  // the shield check uses — the hull is pinned to hue 190, so a visible tank
+  // is a few hundred blue pixels), and among qualifiers the quietest
+  // smoke-and-flame control wins.
   let healthy = null
+  let bestScore = Infinity
   const scored = []
   for (const candidate of CANDIDATES) {
     spot = candidate
     await park(maxHp)
     await new Promise((r) => setTimeout(r, 250))
     const control = await readPlume(4)
-    scored.push(`${candidate.x},${candidate.y}=${control.smoke}`)
-    // Scale to the full-length reading the cases below take.
-    if (!healthy || control.smoke < healthy.smoke) {
-      healthy = control
+    const hull = await page.evaluate(() => {
+      const g = window.__game
+      const r = window.__renderer
+      r.draw(g)
+      const p = r.toScreen(g.tank.x, 26, g.tank.y)
+      if (!p) return 0
+      const px = r.probePixels(Math.round(p.x) - 40, Math.round(p.y) - 40, 80, 80)
+      let blue = 0
+      for (let i = 0; i < px.length; i += 4) {
+        if (px[i + 2] > 120 && px[i + 2] - px[i] > 40 && px[i + 2] >= px[i + 1]) blue++
+      }
+      return blue
+    })
+    const occluded = hull < 200
+    const score = occluded ? Infinity : control.smoke + control.flame * 4
+    scored.push(
+      `${candidate.x},${candidate.y}=${control.smoke}/${control.flame}${occluded ? ' occluded' : ''}`,
+    )
+    if (score < bestScore) {
+      bestScore = score
       best = candidate
     }
   }
@@ -437,7 +486,7 @@ try {
 
   // And it reaches a pixel. `visible === true` is exactly the assertion that
   // passed for weeks over a ring buried in the felt.
-  const bubblePixels = await page.evaluate(() => {
+  const bubblePixels = await page.evaluate(async () => {
     const g = window.__game
     const r = window.__renderer
     g.tank.hp = g.maxHp
@@ -455,7 +504,18 @@ try {
       return blue
     }
     g.buffs.shieldUntil = 0
-    const off = count()
+    // The tank has just spent up to twenty-five seconds on fire for the flame
+    // check above, and the plume outlives the repair: freshly back at full
+    // hull it is still standing in its own smoke, which is grey, which is not
+    // blue — the probe read {off: 0, on: 0} and the check failed on a shield
+    // that was rendering perfectly. So wait for the hull to read as a tank
+    // again before asking whether a bubble adds anything on top of it.
+    const t0 = performance.now()
+    let off = count()
+    while (off < 200 && performance.now() - t0 < 6000) {
+      await new Promise((res) => setTimeout(res, 200))
+      off = count()
+    }
     g.buffs.shieldUntil = performance.now() + 9000
     const on = count()
     g.buffs.shieldUntil = 0
