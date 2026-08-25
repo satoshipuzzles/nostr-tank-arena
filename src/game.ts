@@ -44,6 +44,14 @@ import {
 } from './protocol'
 import { BOT_COUNT, killBot, makeBot, stepBot } from './bots'
 import { WALLS, applyCoverBits, coverBits, damageCover, resetCover } from './arena'
+import {
+  CHOPPER_DAMAGE,
+  CHOPPER_HIT_MS,
+  CHOPPER_MS,
+  chopperAim,
+  stepChopper,
+  underFire,
+} from './chopper'
 import type { Rect } from './arena'
 import type { Bot } from './bots'
 import {
@@ -180,7 +188,6 @@ const STREAK_JUGGERNAUT = 20
 /** A second, longer air strike. Nothing beyond this changes; 25 is the top. */
 const STREAK_CARPET = 25
 /** How long the streak reward's rapid fire lasts. */
-const STREAK_RAPID_MS = 14_000
 const STREAK_SIEGE_MS = 20_000
 const STREAK_JUGGER_MS = 12_000
 
@@ -251,6 +258,17 @@ export interface Peer {
     ammo: number
     /** True while their ticks say a shield is up. See `StatePayload.sh`. */
     shield: boolean
+    /**
+     * When their chopper comes down, in our clock, or 0.
+     *
+     * A deadline here even though the wire carries a duration: the tick says
+     * "eight more seconds" and every receiver turns that into its own `now`
+     * plus eight, which needs no clock agreement between them. See
+     * `StatePayload.c`.
+     */
+    chopperUntil: number
+    /** Where their chopper's rounds are landing, or null. */
+    chopperAt: { x: number; y: number } | null
   }
   /** What we counted for them out of the death events we personally received. */
   kills: number
@@ -317,6 +335,10 @@ interface StateSample {
   dead: boolean
   ammo: number
   shield: boolean
+  /** Deadline in our clock, or 0. See `StatePayload.c`. */
+  chopperUntil: number
+  /** Ground point their rounds are landing on, or null. */
+  chopperAt: { x: number; y: number } | null
 }
 
 export interface FeedEntry {
@@ -821,6 +843,8 @@ export class Game {
         // joins, and "empty" is the reading that changes how you play.
         ammo: MAG_SIZE,
         shield: false,
+        chopperUntil: 0,
+        chopperAt: null,
       },
         kills: 0,
         deaths: 0,
@@ -877,6 +901,20 @@ export class Game {
       // shot held back for a shield that was never there is a worse lie than a
       // shield that goes unadvertised.
       shield: p.sh === 1,
+      // Clamped, and turned into a deadline in *our* clock. A hostile client
+      // claiming an hour of gunship is claiming a tank nobody can shoot for an
+      // hour, so the ceiling is the same window everybody else gets plus a
+      // tick's worth of slack for the round trip.
+      chopperUntil:
+        typeof p.c === 'number' && p.c > 0
+          ? performance.now() + Math.min(CHOPPER_MS + 400, p.c)
+          : 0,
+      // Clamped again on the way in, by the same function the shooter used.
+      // A reach enforced only by whoever is flying is not enforced.
+      chopperAt:
+        typeof p.c === 'number' && p.c > 0 && typeof p.cx === 'number' && typeof p.cy === 'number'
+          ? chopperAim(p.x, p.y, p.cx, p.cy)
+          : null,
     }
     // Cosmetic and self-reported, exactly like the HP beside it. A streak you
     // cannot see on the tank that has it is a number in somebody else's HUD.
@@ -1054,11 +1092,13 @@ export class Game {
         this.announce(`${STREAK_STRIKE} IN A ROW`, 'air strike inbound', 20)
         return
       case STREAK_OVERDRIVE:
+        // Puzz asked for a chopper at ten, and a chopper is not a buff — it
+        // takes the tank away and hands over a different vehicle. The rung used
+        // to give Overdrive, which still exists as a pickup; what it does not
+        // do any more is duplicate a pickup as a reward.
         this.sound('streak')
-        this.tank.hp = this.maxHp
-        this.repairedAt = now
-        this.buffs.rapidUntil = Math.max(this.buffs.rapidUntil, now) + STREAK_RAPID_MS
-        this.announce(`${STREAK_OVERDRIVE} IN A ROW`, 'overdrive — full hull, rapid fire', 20)
+        this.boardChopper(now)
+        this.announce(`${STREAK_OVERDRIVE} IN A ROW`, 'chopper — ten seconds of gun', 20)
         return
       case STREAK_SIEGE:
         this.sound('streak')
@@ -1285,6 +1325,8 @@ export class Game {
       peer.view.dead = bot.tank.dead
       peer.view.ammo = MAG_SIZE
       peer.view.shield = false
+      peer.view.chopperUntil = 0
+      peer.view.chopperAt = null
     }
   }
 
@@ -1400,6 +1442,150 @@ export class Game {
     // stands next to a barrel they are shooting has self-destructed, and the
     // feed should say so rather than blaming the last person who hit them.
     if (this.tank.hp <= 0) this.die(owner === this.identity.sessionPubkey ? null : owner)
+  }
+
+  // ------------------------------------------------------------------ chopper
+
+  /**
+   * When our chopper comes down, or 0 when we are in the tank.
+   *
+   * The tank is *out of play* for the whole window: it cannot be shot, it does
+   * not collide, and it is not drawn. That is deliberate. The reward is being
+   * dangerous and untouchable for ten seconds, and the cost is that your tank is
+   * holding no ground while you enjoy it — you respawn on the way down.
+   */
+  chopperUntil = 0
+  /** Where the chopper is. Not the tank's position; the tank is parked. */
+  readonly chopper = { x: 0, y: 0 }
+  /** Where its rounds are landing this frame, or null when it is not firing. */
+  chopperAt: { x: number; y: number } | null = null
+  /** When each victim may next be hit, keyed by chopper owner then victim. */
+  private chopperHitAt = new Map<string, number>()
+
+  /** Are we flying? Read by the renderer, the HUD and the input router. */
+  get flying(): boolean {
+    return this.chopperUntil > performance.now()
+  }
+
+  /** Seconds of gunship left, for the HUD. 0 when not flying. */
+  get chopperLeft(): number {
+    return Math.max(0, (this.chopperUntil - performance.now()) / 1000)
+  }
+
+  /**
+   * Get in. Called from the streak ladder, and from nowhere else.
+   *
+   * Starts over our own tank rather than at a map edge: the ten seconds are the
+   * reward, and spending two of them flying in from a corner is two seconds of
+   * the reward spent on travel.
+   */
+  private boardChopper(now: number): void {
+    this.chopperUntil = now + CHOPPER_MS
+    this.chopper.x = this.tank.x
+    this.chopper.y = this.tank.y
+    this.chopperAt = null
+    // Out of play. Not `dead` — dead books a respawn and puts a wreck on the
+    // board, and neither is what is happening. `landChopper` respawns properly.
+    this.tank.dead = false
+    this.pushFeed('chopper — ten seconds of gun')
+  }
+
+  /**
+   * Fly, shoot, and get out when the clock runs down.
+   *
+   * The aim point is clamped by `chopperAim` on the way in, and clamped again
+   * by every client that reads it off the tick — a reach enforced only by the
+   * shooter is a reach a modified client does not have.
+   */
+  private stepOwnChopper(dt: number, now: number, controls: Controls): void {
+    if (now >= this.chopperUntil) {
+      this.landChopper()
+      return
+    }
+    stepChopper(this.chopper, controls.throttle, controls.steer, dt)
+    if (controls.fire && controls.aimAt) {
+      this.chopperAt = chopperAim(
+        this.chopper.x,
+        this.chopper.y,
+        controls.aimAt.x,
+        controls.aimAt.y,
+      )
+      this.rakeBots(now)
+    } else {
+      this.chopperAt = null
+    }
+  }
+
+  /**
+   * Put the tank back on the board.
+   *
+   * A respawn rather than a return to where it was parked. Ten seconds is long
+   * enough that the ground under the old spot belongs to somebody else now, and
+   * `respawn` already knows how to find the corner nobody is looking at.
+   */
+  private landChopper(): void {
+    if (!this.chopperUntil) return
+    this.chopperUntil = 0
+    this.chopperAt = null
+    this.respawn()
+    this.pushFeed('back in the tank')
+  }
+
+  /** Bots under our own chopper. They are ours, so we apply it. */
+  private rakeBots(now: number): void {
+    if (!this.chopperAt) return
+    for (const bot of this.bots) {
+      if (bot.tank.dead) continue
+      if (!underFire(this.chopperAt.x, this.chopperAt.y, bot.tank.x, bot.tank.y)) continue
+      const key = 'self:' + bot.session
+      if (now < (this.chopperHitAt.get(key) ?? 0)) continue
+      this.chopperHitAt.set(key, now + CHOPPER_HIT_MS)
+      bot.tank.hp -= CHOPPER_DAMAGE
+      if (bot.tank.hp > 0) {
+        this.sound('hit', { at: { x: bot.tank.x, y: bot.tank.y } })
+        continue
+      }
+      killBot(bot, now, this.modifier.respawn)
+      this.botKills++
+      this.sound('kill')
+      this.onOwnKill()
+      this.pushFeed(`you killed ${bot.name}`)
+    }
+  }
+
+  /**
+   * Are we standing in somebody else's chopper fire?
+   *
+   * Asked rather than told, which is the same rule as a shell: our own hull is
+   * the one number this client decides. Nobody sends "I hit you"; every client
+   * reads the choppers it can see off the tick stream and works out for itself
+   * whether it is underneath one.
+   *
+   * Per-chopper cooldown, keyed by owner, so two gunships up at once are twice
+   * as dangerous rather than one being ignored — and so a single one cannot be
+   * made to hit faster by publishing its tick more often.
+   */
+  private takeChopperFire(now: number): void {
+    if (this.tank.dead || this.watching || this.flying) return
+    for (const peer of this.peers.values()) {
+      const at = peer.view.chopperAt
+      if (!at || peer.view.chopperUntil <= now) continue
+      if (!underFire(at.x, at.y, this.tank.x, this.tank.y)) continue
+      if (now < (this.chopperHitAt.get(peer.session) ?? 0)) continue
+      this.chopperHitAt.set(peer.session, now + CHOPPER_HIT_MS)
+      if (hasBuff(this.buffs, 'shieldUntil', now)) {
+        this.buffs.shieldUntil = 0
+        this.sound('shield')
+        this.announce('SHIELD BROKE', 'that one was free', 200)
+        continue
+      }
+      this.tank.hp -= CHOPPER_DAMAGE
+      if (this.tank.hp > 0) this.sound('hit')
+      if (this.tank.hp <= 0) {
+        this.die(peer.session)
+        return
+      }
+    }
   }
 
   /** Everything in the crater that is a bot. Same rules as `hitBot`. */
@@ -1570,6 +1756,10 @@ export class Game {
       // No tank to step, no pad to sweep, nothing to say. The rest of `update`
       // still runs: shells, interpolation, the roster and the pickup schedule
       // are what a spectator came to see.
+    } else if (this.chopperUntil) {
+      // Flying. The tank is out of play — not stepped, not collided with, not
+      // drawn — so none of the branch below applies and none of it should run.
+      this.stepOwnChopper(dt, now, controls)
     } else if (this.tank.dead) {
       if (now >= this.tank.respawnAt) this.respawn()
     } else {
@@ -1595,6 +1785,10 @@ export class Game {
       this.sweepPickups(now)
     }
     this.syncBots(dt, now)
+    // Everybody else's gunships, before the shells: a hull that is about to be
+    // taken to zero by a chopper should not also eat a shell in the same frame
+    // and report two deaths.
+    this.takeChopperFire(now)
     this.refreshPickups()
 
     for (const shell of this.shells.values()) {
@@ -1878,6 +2072,8 @@ export class Game {
         peer.view.dead = newest.dead
         peer.view.ammo = newest.ammo
         peer.view.shield = newest.shield
+        peer.view.chopperUntil = newest.chopperUntil
+        peer.view.chopperAt = newest.chopperAt
         continue
       }
 
@@ -1902,6 +2098,13 @@ export class Game {
       // step, not a slope, and half a shell is not a thing to draw.
       peer.view.ammo = bb.ammo
       peer.view.shield = bb.shield
+      // The newer sample, like HP and ammo. A gunship is up or it is not, and
+      // half a chopper is not a thing to draw or to be shot by. The *aim point*
+      // is deliberately not interpolated either: it is where rounds are landing
+      // right now, and a blend between two of them is a place nobody was
+      // shooting at.
+      peer.view.chopperUntil = bb.chopperUntil
+      peer.view.chopperAt = bb.chopperAt
       while (b.length > 2 && b[1].t < renderAt) b.shift()
     }
   }
@@ -1956,8 +2159,11 @@ export class Game {
     if (this.watching) return
     const payload: StatePayload = {
       t: now,
-      x: Math.round(this.tank.x * 10) / 10,
-      y: Math.round(this.tank.y * 10) / 10,
+      // The chopper's position while it is up, not the tank's. The tank is out
+      // of play for those ten seconds and drawing it where it was parked would
+      // put a target on the board that cannot be hit.
+      x: Math.round((this.flying ? this.chopper.x : this.tank.x) * 10) / 10,
+      y: Math.round((this.flying ? this.chopper.y : this.tank.y) * 10) / 10,
       h: Math.round(this.tank.hull * 1000) / 1000,
       g: Math.round(this.tank.gun * 1000) / 1000,
       hp: this.tank.hp,
@@ -1981,6 +2187,17 @@ export class Game {
       // round. Unioned by whoever receives it, so a tick lost on the way costs
       // nothing and a late joiner is caught up by the next one.
       ...(coverBits() ? { b: coverBits() } : {}),
+      // The whole gunship, on a tick that was going out anyway. A duration, so
+      // a receiver adds it to its own clock and nobody has to agree on a
+      // deadline. Absent for every tick of a round nobody earned one in.
+      ...(this.flying
+        ? {
+            c: Math.round(this.chopperUntil - now),
+            ...(this.chopperAt
+              ? { cx: Math.round(this.chopperAt.x), cy: Math.round(this.chopperAt.y) }
+              : {}),
+          }
+        : {}),
     }
     this.publishAsSession(KIND_STATE, payload)
   }
@@ -2041,6 +2258,11 @@ export class Game {
     clearBuffs(this.buffs)
     // A strike called under the old block does not keep bombing the new one.
     this.strikes.clear()
+    // Nor does a gunship. Ten seconds is a rung on a streak, and the streak is
+    // reset three lines above this — carrying the reward across the boundary
+    // would be a tank nobody can shoot on a board it did not earn.
+    if (this.chopperUntil) this.landChopper()
+    this.chopperHitAt.clear()
     this.blasts.length = 0
     // Peer tallies are ours to keep, not theirs to send, so they reset here too.
     for (const peer of this.peers.values()) {

@@ -1381,7 +1381,13 @@ function loop(now = performance.now()): void {
   for (const p of players) p.game.update(dt, p.input.read(p.game.tank))
   const local = new Set(players.map((p) => p.game.identity.sessionPubkey))
   renderer.draw(players[0].game, local)
+  // The cockpit is a tank's eye. While the chopper is up there is no tank to
+  // sit in, and the view a gunship needs is the one that shows the whole board
+  // anyway — so it switches, and switches back on landing. The player's choice
+  // is remembered and restored rather than overwritten.
+  syncFlyingView(players[0].game, renderer)
   paintCrosshair(players[0].game, renderer.viewMode)
+  paintChopper(players[0].game)
   paintDamage(players[0].game, renderer.viewMode)
   paintAmmo(players[0].game)
   drawHud(players[0].game)
@@ -1419,6 +1425,76 @@ function paintCrosshair(game: Game, view: ViewMode): void {
   // shot and zero at the moment the gun is ready.
   const frac = loading ? Math.min(1, remaining / (RELOAD * 1000)) : 0
   el.style.setProperty('--bloom', `${(frac * RELOAD_BLOOM).toFixed(1)}px`)
+}
+
+/**
+ * Keep the key hints clear of the action buttons, whatever is in the row.
+ *
+ * Both are absolutely positioned along the bottom of the screen from opposite
+ * sides and neither can see the other, so the hints used to be painted behind
+ * the buttons. Reserving a fixed width in CSS fixed it for exactly one push —
+ * the next button added put them back on top of each other by 145px. Measuring
+ * the row and publishing it as `--actions-w` makes the reserve a fact rather
+ * than a promise that nobody will add another button.
+ *
+ * A `ResizeObserver`, not a resize listener: the row changes width when its
+ * *contents* change — a label going from "Bots: on" to "Bots: off", a button
+ * appearing — and the window has not moved at all when that happens.
+ */
+function watchActionsWidth(): void {
+  const row = $('hud-actions')
+  const publish = () => {
+    const w = Math.round(row.getBoundingClientRect().width)
+    if (w > 0) document.documentElement.style.setProperty('--actions-w', `${w}px`)
+  }
+  publish()
+  if (typeof ResizeObserver === 'function') new ResizeObserver(publish).observe(row)
+  window.addEventListener('resize', publish)
+}
+watchActionsWidth()
+
+/**
+ * The board camera, for as long as the chopper is up.
+ *
+ * The cockpit is a tank's eye, and while flying there is no tank to sit in.
+ * What is stored is what the player *chose*, so a cockpit player is put back in
+ * the cockpit the moment they land rather than quietly converted to a board
+ * player by a reward.
+ */
+let viewBeforeFlight: ViewMode | null = null
+function syncFlyingView(game: Game, renderer: Renderer): void {
+  if (game.flying) {
+    if (viewBeforeFlight === null && renderer.viewMode === 'cockpit') {
+      viewBeforeFlight = 'cockpit'
+      setView('board')
+    }
+    return
+  }
+  if (viewBeforeFlight !== null) {
+    const back = viewBeforeFlight
+    viewBeforeFlight = null
+    if (cockpitAllowed) setView(back)
+  }
+}
+
+/**
+ * The gunship clock, and what to do with it.
+ *
+ * Painted every frame rather than from `drawHud`: this is a ten-second window
+ * and the HUD repaints on a 120ms throttle, which would show it counting down
+ * in eight visible steps. The reticle bloom is on the same rule for the same
+ * reason.
+ */
+function paintChopper(game: Game): void {
+  const el = $('chopper')
+  const left = game.chopperLeft
+  const up = left > 0
+  el.hidden = !up
+  if (!up) return
+  el.innerHTML =
+    `<b>CHOPPER</b> <span class="chopper-clock">${left.toFixed(1)}s</span>` +
+    `<span class="chopper-hint">drive to fly · hold fire to rake the ground</span>`
+  el.style.setProperty('--left', String(Math.max(0, Math.min(1, left / 10))))
 }
 
 /**

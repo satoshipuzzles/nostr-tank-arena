@@ -293,17 +293,20 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
   display: flex;
   gap: 16px;
   flex-wrap: wrap;
-  /* Wrap rather than run under the buttons.
-     Both this and `#hud-actions` are absolutely positioned at the bottom of the
-     screen, one from the left and one from the right, and neither knows the
-     other is there — so the row of hints simply grew until it was painted
-     *behind* the action buttons. Measured at 1280px: the hints were 792px wide,
-     the buttons 687px, and they overlapped by 228px, which is where "gamepad
-     supported" went. It got worse with every key this game added — Q for the
-     lob and B for the bots both landed in that overlap. 720px is the button row
-     with room to breathe; below that the hints wrap onto a second line and grow
-     upward, which costs nothing because the board behind them is sky. */
-  max-width: calc(100% - 720px);
+  /* Wrap rather than run under the buttons, against a reserve that is measured
+     rather than guessed.
+     Both this and `#hud-actions` are absolutely positioned along the bottom,
+     one from each side, and neither knows the other is there — so the hints
+     simply grew until they were painted *behind* the buttons. At 1280px the
+     hints were 792px against 687px of buttons, overlapping by 228, which is
+     where "gamepad supported" had gone.
+     The first fix reserved a flat 720px and lasted exactly one push: the
+     auto-publish button widened the row to 837 and they overlapped by 145
+     again. A constant here is a promise that nobody will ever add a button.
+     `--actions-w` is written by `watchActionsWidth` in main.ts from the real
+     element, so the reserve grows with the row and the next button costs
+     nothing. The fallback is only for the frame before the observer fires. */
+  max-width: calc(100% - var(--actions-w, 720px) - 30px);
   color: var(--dim);
   background: var(--panel);
   border: 1px solid var(--line);
@@ -1089,6 +1092,50 @@ body.hud-compact #feed { bottom: max(10px, env(safe-area-inset-bottom)); }
 .sn-name { font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sn-won { font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; }
 .seasoncard .fine { margin-top: 8px; }
+
+/* The chopper clock.
+   Top-centre, under the rules banner, because that is the one strip of screen a
+   player flying a gunship is not looking at — they are watching the ground.
+   `--left` runs 1 to 0 over the ten seconds and drives the bar underneath, so
+   the number and the width say the same thing and either one is enough.
+   `[hidden] { display: none !important }` at the top of this file is what keeps
+   `display: grid` here from pinning it on screen the rest of the round. */
+#chopper {
+  position: fixed;
+  top: 96px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: grid;
+  gap: 3px;
+  justify-items: center;
+  padding: 8px 18px 10px;
+  border-radius: 12px;
+  background: rgba(20, 14, 8, 0.86);
+  border: 1px solid #ffb14d;
+  box-shadow: 0 0 22px rgba(255, 150, 60, 0.28);
+  color: #ffd9a8;
+  font-size: 13px;
+  letter-spacing: 0.5px;
+  pointer-events: none;
+  z-index: 4;
+}
+#chopper b { color: #ffb14d; letter-spacing: 2px; }
+.chopper-clock { font-variant-numeric: tabular-nums; font-weight: 700; }
+.chopper-hint { color: #b99a78; font-size: 11px; letter-spacing: 0; }
+/* The bar. An `::after` rather than an element, because the contents are
+   rewritten every frame and a child would be thrown away with them. */
+#chopper::after {
+  content: '';
+  grid-column: 1;
+  width: 168px;
+  height: 3px;
+  border-radius: 2px;
+  background: linear-gradient(
+    to right,
+    #ffb14d calc(var(--left, 1) * 100%),
+    rgba(255, 177, 77, 0.16) calc(var(--left, 1) * 100%)
+  );
+}
 
 /* Damage, from inside the tank.
    The board view says this with the tank itself: soot, then a smoke column off

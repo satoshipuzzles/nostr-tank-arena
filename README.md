@@ -48,7 +48,7 @@ Kills in a row, without dying:
 | --- | --- |
 | 3 | Hull repaired to full |
 | 5 | **Air strike** — a line of bombs walks across the far half of the board |
-| 10 | Overdrive — full hull and rapid fire |
+| 10 | **Chopper** — ten seconds out of the tank, flying a gun over the board |
 | 15 | Siege shells — every shot takes two hull points |
 | 20 | Juggernaut — full hull, shielded and fast |
 | 25 | Carpet bombing — a longer air strike |
@@ -56,8 +56,8 @@ Kills in a row, without dying:
 Separately, eight seconds without taking a hit gives one hull point back;
 `Game.regenAfter` is the knob.
 
-Everything on that ladder except the air strike is **self-authoritative**, and
-that is the point: your own HP and your own buffs are already the numbers this
+Everything on that ladder except the air strike and the chopper is
+**self-authoritative**, and that is the point: your own HP and your own buffs are already the numbers this
 client decides, so no rung needed a new event kind, a new trust assumption, or
 agreement with anybody. They ride out in the next state tick like any other HP
 change, and a cheater who hands themselves hull points was always able to.
@@ -70,6 +70,43 @@ fourteen. Damage travels in the payload for the same reason it travels on a
 shell: the *victim* applies it, and the victim cannot see what the caller had
 going on when they earned it. The caller is exempt, and the lane is chosen on
 the far side of the board from them.
+
+### The chopper
+
+Ten in a row and you get out of the tank. Everything below that rung changes a
+number on your tank; this takes the tank away and gives you a different vehicle
+with a different job, which is the whole appeal and also why it needed a design
+rather than another case in a switch.
+
+For ten seconds you fly a gunship over the board. It moves at twice a tank's
+speed, the gun reaches 520 units ahead of it, and the rounds land in a 54-unit
+circle marked on the felt. One hull point per 520ms per target, so three
+intervals kill a full tank and somebody who starts running the moment the ring
+lands on them lives. Your tank is **out of play** for the whole window — it is
+not drawn, not collided with and cannot be shot — and you respawn on the way
+down. The reward is being dangerous and untouchable; the cost is that your tank
+is holding no ground while you enjoy it.
+
+**The chopper cannot be shot down.** Tanks in this game have no elevation and no
+anti-air, and inventing one for a ten-second window would be a whole weapon
+nobody asked for. If that ever changes it will be because someone played against
+it and said so.
+
+Nothing new goes on the wire for any of it. A machinegun is ten rounds a second,
+and ten fire events a second on top of a position stream that is already 10Hz is
+past what most public relays will accept at all — so the gunship rides the state
+tick that was going out anyway: `c` counts the milliseconds left, `cx`/`cy` are
+the point on the ground it is shooting at, and while it is up `x`/`y` are the
+chopper instead of the parked tank. The tracers in between are drawn by each
+client for itself. Damage is applied by the **victim**, exactly like a shell:
+nobody is told they were hit, each client reads the gunships it can see and asks
+whether it is standing underneath one.
+
+Two clamps, and the second is the one that matters. `c` is clamped on receipt,
+because a hostile client claiming an hour of gunship is claiming a tank nobody
+can shoot for an hour. And the reach is clamped by the same function on the
+shooter *and* on every receiver — a reach enforced only by the client doing the
+shooting is a reach a modified client does not have.
 
 The bombs are spaced to leave **no gaps**. The first version dropped nine across
 a 1728-unit run — one every 216 units against a 64-unit blast radius — so two
@@ -386,7 +423,7 @@ subscribes you to an entire match.
 | Kind | Name | Storage | Signed by | Content |
 |------|------|---------|-----------|---------|
 | `21003` | session attestation | ephemeral | **real npub** | `{ s, name, color, exp }` |
-| `21000` | tank state tick | ephemeral | session key | `{ t, x, y, h, g, hp, d, k?, ks?, ds?, r?, a? }` |
+| `21000` | tank state tick | ephemeral | session key | `{ t, x, y, h, g, hp, d, k?, ks?, ds?, r?, a?, sh?, b?, c?, cx?, cy? }` |
 | `21001` | shell fired | ephemeral | session key | `{ id, t0, x, y, a, b?, d? }` |
 | `21002` | death report | ephemeral | session key | `{ t, k, x, y }` |
 | `21004` | air strike | ephemeral | session key | `{ t0, y, dir, n, d }` |
@@ -406,6 +443,13 @@ presence beacon uses the constant `nostr-tank-arena/here` — one slot per playe
 so moving rooms replaces rather than stacks. Presence is additionally indexed
 under `["t", "tankarena-live"]`, which is what makes the whole lobby one `#t`
 query, and carries a NIP-40 `expiration` 120 seconds out.
+
+`sh` is a shield that is currently up. `b` is a bitmask of which barrels have
+been destroyed this round, **unioned** rather than replaced on receipt: a union
+is order-independent, idempotent, impossible to un-set, and catches a late
+joiner up on the next tick, which a one-off "barrel destroyed" event could never
+do. `c`, `cx` and `cy` are the chopper — see [The chopper](#the-chopper) — and
+while `c` is present, `x`/`y` are the gunship rather than the tank.
 
 `role` is `seat`, `queue` or `watch`. See [Finding a game](#finding-a-game).
 

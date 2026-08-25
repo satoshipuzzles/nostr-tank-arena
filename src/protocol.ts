@@ -119,6 +119,25 @@ export interface StatePayload {
    */
   b?: number
   /**
+   * Milliseconds of chopper time this client has left, when it is flying one.
+   *
+   * The whole gunship rides on this tick rather than on events of its own. A
+   * machinegun is ten rounds a second and ten fire events a second on top of an
+   * already-10Hz position stream is past what most public relays will accept —
+   * so while `c` is set, `x`/`y` are the chopper instead of the tank and
+   * `cx`/`cy` are the point on the ground it is shooting at. The tracers in
+   * between are drawn by each client for itself and are not on the wire at all.
+   *
+   * A duration rather than a deadline, so it needs no clock agreement: a
+   * receiver adds it to its own `now`. It is clamped on receipt, because a
+   * hostile client claiming an hour of gunship is claiming a tank nobody can
+   * shoot for an hour.
+   */
+  c?: number
+  /** Where its rounds are landing, absent when it is flying but not firing. */
+  cx?: number
+  cy?: number
+  /**
    * Shells left in the sender's magazine, 0 while reloading.
    *
    * On the wire for a gameplay reason rather than a bookkeeping one: an empty

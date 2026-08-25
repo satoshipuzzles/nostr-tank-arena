@@ -31,7 +31,9 @@
     "test:pwa": "node test/pwa.mjs",
     "test:barrels": "node test/barrels.mjs",
     "test:barrels-browser": "node test/barrels-browser.mjs",
-    "test:autopublish": "node test/autopublish.mjs"
+    "test:autopublish": "node test/autopublish.mjs",
+    "test:chopper": "node test/chopper.mjs",
+    "test:chopper-browser": "node test/chopper-browser.mjs"
   },
   "dependencies": {
     "nostr-tools": "^2.10.4",
