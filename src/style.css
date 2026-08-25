@@ -439,6 +439,45 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
 #rules span { font-size: 11px; color: var(--dim); }
 
 /*
+ * The flag race, stacked under the rules banner. `--rules-h` is the banner's
+ * measured height, written by `drawRules` and zero on a standard round, so
+ * this pill sits directly below the banner when there is one and takes its
+ * place when there is not — no constant that is true on exactly one screen.
+ */
+#ctf {
+  position: absolute;
+  top: calc(14px + var(--rules-h, 0px));
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: min(420px, max(calc(100vw - 480px), 240px));
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+  padding: 6px 14px;
+  border-radius: 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  pointer-events: none;
+  text-align: center;
+  z-index: 4;
+  font-size: 12px;
+  white-space: nowrap;
+}
+#ctf .ctf-race { display: flex; align-items: baseline; gap: 7px; font-weight: 700; font-size: 13px; }
+#ctf .ctf-dash { font-style: normal; color: var(--dim); font-weight: 400; }
+#ctf .ctf-run { color: var(--dim); }
+#ctf .ctf-run i { font-style: normal; }
+/* Your flag leaving is the one line that must not read like furniture. */
+#ctf .ctf-run.ours { color: #ff9d9d; font-weight: 700; }
+/* On a phone the chip row owns the top edge, so the race drops below it (48px
+   of chip plus breathing room) and still stacks under the rules banner via the
+   same measured `--rules-h`. */
+body.hud-compact #ctf {
+  top: calc(max(10px, env(safe-area-inset-top)) + 58px + var(--rules-h, 0px));
+  max-width: min(420px, calc(100vw - 20px));
+}
+
+/*
  * Player two, on one screen. Not a second HUD — just the numbers that are
  * theirs: hull, score, and whatever is ticking down on them. Their name, kills
  * and deaths are already on the scoreboard, because to player one's client they

@@ -2008,6 +2008,7 @@ function drawHud(game: Game): void {
       .join('')
 
   drawRules(game)
+  drawCtf(game)
   drawClockAlarm()
 
   const others = game.peers.size
@@ -2242,11 +2243,75 @@ function drawRules(game: Game): void {
   const mod = game.modifier
   if (mod.id === 'standard') {
     node.hidden = true
+    // Zero, not unset: `#ctf` sits at `--rules-h` below the same anchor, and a
+    // stale height would leave a banner-sized hole under a banner that is gone.
+    document.documentElement.style.setProperty('--rules-h', '0px')
     return
   }
   node.hidden = false
   node.style.setProperty('--rules-hue', String(mod.hue))
   node.innerHTML = `<b>${escapeHtml(mod.name)}</b><span>${escapeHtml(mod.blurb)}</span>`
+  // Measured, not guessed, for the same reason as `--hint-h`: the banner wraps
+  // differently at every width, and anything stacked under it needs the real
+  // number rather than a constant that was true on one screen.
+  document.documentElement.style.setProperty(
+    '--rules-h',
+    `${Math.round(node.getBoundingClientRect().height) + 6}px`,
+  )
+}
+
+/**
+ * The flag race, where your eyes already are.
+ *
+ * The scoreboard grows a captures tally once somebody has scored, but a flag
+ * round is won or lost in the thirty seconds *before* that — and "somebody is
+ * running our flag home" is exactly the fact the arena does not shout. Puzz
+ * asked for both halves by name: the capture count, and the flag that is
+ * being taken, COD-style. This strip is those two things and nothing else:
+ * the capture race for every side that has anybody on it (zeros included,
+ * because 0–0 is a score the moment the mode is flags), and one line per
+ * flag currently off its pole, naming the runner when their tick gave us a
+ * name. Your own flag's line is the loud one.
+ */
+function drawCtf(game: Game): void {
+  const node = $('ctf')
+  if (!game.flagsOn) {
+    node.hidden = true
+    return
+  }
+  const caps = new Map<number, number>()
+  const note = (team: number, n: number) => {
+    if (team) caps.set(team, (caps.get(team) ?? 0) + n)
+  }
+  note(game.team, game.captures)
+  for (const p of game.peers.values()) note(p.view.team, p.captures)
+  const race = [...caps.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0] - b[0])
+    .map(
+      ([team, n]) =>
+        `<span class="ctf-side" style="color:hsl(${TEAM_HUES[team]} 72% 62%)">` +
+        `${escapeHtml(TEAM_NAMES[team] ?? String(team))} ${n}</span>`,
+    )
+    .join('<i class="ctf-dash">—</i>')
+
+  const you = game.identity.sessionPubkey
+  const runs = [...game.flagCarriers().entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([flag, who]) => {
+      const side = escapeHtml(TEAM_NAMES[flag] ?? String(flag))
+      const runner = who === you ? game.name : (game.peers.get(who)?.name ?? '')
+      const ours = flag === game.team
+      const label = ours ? 'YOUR flag is out' : `${side} flag taken`
+      return (
+        `<span class="ctf-run${ours ? ' ours' : ''}">` +
+        `<i style="color:hsl(${TEAM_HUES[flag]} 72% 62%)">&#9873;</i> ${label}` +
+        `${runner ? ` · ${escapeHtml(runner)}` : ''}</span>`
+      )
+    })
+    .join('')
+
+  node.hidden = false
+  node.innerHTML = `<span class="ctf-race">${race || '<span class="ctf-side">no sides yet</span>'}</span>${runs}`
 }
 
 /**
