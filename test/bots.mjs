@@ -84,28 +84,40 @@ const still = (x, y) => ({ x, y, vx: 0, vy: 0, dead: false })
   // run of it finished *closer to the corner than the hunter did* while the
   // hunter was working correctly. One sample of a quantity that moves for
   // unrelated reasons cannot carry the claim; the difference in the means can.
+  //
+  // The window matters as much as the averaging. At ten seconds the two
+  // populations still overlap: a wanderer starting in the near corner drifts
+  // *toward* the far one, because from a corner almost every direction is
+  // toward it, and this check used to fail on that about every other run. At
+  // twenty seconds the hunter has arrived and holds engagement range while the
+  // wanderer is still anywhere, so the claim is made on where each bot *ends
+  // up* — the mean over the final five seconds — not on where a snapshot
+  // caught it.
   const far = still(ARENA_W - 120, ARENA_H - 120)
   const N = 8
-  const finals = (withTarget) => {
+  const SECONDS = 20
+  const TAIL = 5
+  const mean = (a) => a.reduce((s, v) => s + v, 0) / a.length
+  const settled = (withTarget) => {
     const out = []
     for (let i = 0; i < N; i++) {
       const b = makeBot(0, 0)
       b.tank.x = 120
       b.tank.y = 120
-      run(b, withTarget ? far : null, 10)
-      out.push(Math.hypot(far.x - b.tank.x, far.y - b.tank.y))
+      const { path } = run(b, withTarget ? far : null, SECONDS)
+      const tail = path.slice(-Math.round(TAIL / DT))
+      out.push(mean(tail.map((p) => Math.hypot(far.x - p.x, far.y - p.y))))
     }
     return out
   }
   const start = Math.hypot(far.x - 120, far.y - 120)
-  const mean = (a) => a.reduce((s, v) => s + v, 0) / a.length
-  const hunters = finals(true)
-  const wanderers = finals(false)
+  const hunters = settled(true)
+  const wanderers = settled(false)
   check(
     'a bot closes on a target it can see, and one with no target does not',
-    mean(hunters) < start - 400 && mean(hunters) < mean(wanderers) - 150,
-    `from ${Math.round(start)}: hunters mean ${Math.round(mean(hunters))} ` +
-      `(worst ${Math.round(Math.max(...hunters))}), wanderers mean ${Math.round(mean(wanderers))}`,
+    mean(hunters) < 700 && mean(wanderers) > mean(hunters) + 300,
+    `from ${Math.round(start)}: hunters settle at mean ${Math.round(mean(hunters))} ` +
+      `(worst ${Math.round(Math.max(...hunters))}), wanderers at mean ${Math.round(mean(wanderers))}`,
   )
 }
 

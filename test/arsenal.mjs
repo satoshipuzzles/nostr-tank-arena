@@ -304,6 +304,7 @@ try {
       g.buffs.siegeUntil = 0
       g.buffs.shieldUntil = 0
       g.buffs.speedUntil = 0
+      g.chopperUntil = 0
       g.onOwnKill()
       const now = performance.now()
       out[i] = {
@@ -311,20 +312,21 @@ try {
         rapid: g.buffs.rapidUntil > now,
         siege: g.buffs.siegeUntil > now,
         shield: g.buffs.shieldUntil > now,
+        chopper: g.chopperUntil > now,
         strikes: strikes.length,
         notice: g.notice?.sub ?? '',
       }
     }
     g.publishAsSession = real
     g.streak = 0
+    g.chopperUntil = 0
     return { rungs: out, maxHp }
   })
   const rung = ladder.rungs
   const fullHull = ladder.maxHp
   check('3 in a row repairs the hull', rung[3].hp === fullHull, JSON.stringify(rung[3]))
   check('5 calls an air strike', rung[5].strikes === 1, JSON.stringify(rung[5]))
-  check('10 is overdrive: full hull and rapid fire', rung[10].hp === fullHull && rung[10].rapid,
-    JSON.stringify(rung[10]))
+  check('10 boards the chopper', rung[10].chopper, JSON.stringify(rung[10]))
   check('15 is siege shells', rung[15].siege, JSON.stringify(rung[15]))
   check('20 is the juggernaut: shielded and repaired', rung[20].shield && rung[20].hp === fullHull,
     JSON.stringify(rung[20]))
