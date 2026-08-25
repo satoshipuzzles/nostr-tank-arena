@@ -42,6 +42,8 @@ import {
   parsePayload,
   roomTag,
 } from './protocol'
+import { BOT_COUNT, killBot, makeBot, stepBot } from './bots'
+import type { Bot } from './bots'
 import {
   LOB_BLAST,
   LOB_CHARGE_MS,
@@ -270,6 +272,15 @@ export interface Peer {
   streak: number
   /** The finish they picked. Purely cosmetic; see `src/skins.ts`. */
   skin: SkinId
+  /**
+   * A local practice tank rather than somebody on a relay.
+   *
+   * Read by the renderer, which otherwise draws the `?` it puts on any peer
+   * whose npub attestation has not landed. On a bot that mark is true and
+   * useless: it says "this name is unverified" about a name this client made
+   * up, and a player reads it as a stranger who has not signed in yet.
+   */
+  bot?: boolean
 }
 
 /** One air strike being re-simulated locally. See `StrikePayload`. */
@@ -1163,6 +1174,166 @@ export class Game {
   private lobFrom = 0
 
   /**
+   * Local practice opponents. Empty whenever a real player is in the room.
+   *
+   * Held here rather than in `peers` because a bot needs a full `LocalTank` to
+   * be stepped against, and a `Peer` only carries the interpolated `view` a
+   * remote client publishes. `syncBots` writes one into the other every frame,
+   * which is what makes the renderer, the scoreboard and the spawn search treat
+   * a bot as an opponent with no code of their own.
+   */
+  private bots: Bot[] = []
+
+  /**
+   * Whether to fill an empty room with bots. On by default.
+   *
+   * A solo player joining a string nobody else has typed is the overwhelmingly
+   * common first run of this game, and an empty arena is not a game. Off is
+   * still one click away for anyone who wants the room they actually asked for.
+   */
+  botsEnabled = true
+
+  /** Kills against bots. Deliberately not `kills` — see the note in bots.ts. */
+  botKills = 0
+
+  /** Is this session key one of ours rather than a person on a relay? */
+  isBot(session: string | null): boolean {
+    return typeof session === 'string' && session.startsWith('b0') && session.endsWith('0'.repeat(8))
+  }
+
+  /** How many bots are in the arena right now. Read by the HUD and the tests. */
+  get botCount(): number {
+    return this.bots.length
+  }
+
+  /**
+   * Spawn, step and retire the practice opponents.
+   *
+   * The retire branch is the load-bearing one. Bots are local: nobody else can
+   * see them, so the instant a real player's tick arrives the two clients are
+   * looking at different arenas, and the only honest fix is for the bots to
+   * leave. Checked against peers that are *not* bots, because the bots are
+   * themselves in `peers` by the time this runs a second time.
+   */
+  private syncBots(dt: number, now: number): void {
+    const humans = [...this.peers.keys()].filter((k) => !this.isBot(k))
+    const wanted = this.botsEnabled && humans.length === 0 && !this.watching ? BOT_COUNT : 0
+
+    if (this.bots.length > wanted) {
+      for (const bot of this.bots) this.peers.delete(bot.session)
+      this.bots = []
+      if (wanted === 0 && humans.length > 0) this.pushFeed('a real player joined — bots stood down')
+    }
+    while (this.bots.length < wanted) this.bots.push(makeBot(this.bots.length, now))
+    if (!this.bots.length) return
+
+    // Velocity for the lead, measured rather than read off the controls: what a
+    // bot has to solve for is where the tank will *be*, and throttle is not that
+    // once a wall is involved.
+    const target = this.watching
+      ? null
+      : {
+          x: this.tank.x,
+          y: this.tank.y,
+          vx: dt > 0 ? (this.tank.x - this.lastTankAt.x) / dt : 0,
+          vy: dt > 0 ? (this.tank.y - this.lastTankAt.y) / dt : 0,
+          dead: this.tank.dead,
+        }
+    this.lastTankAt = { x: this.tank.x, y: this.tank.y }
+
+    for (const bot of this.bots) {
+      const action = stepBot(bot, target, dt, now, this.maxHp, this.modifier.reload)
+      if (action.fire !== null) this.fireBot(bot, action.fire)
+
+      // Straight into the peer record the renderer reads. No interpolation and
+      // no buffer: a bot is stepped in this frame, on this machine, so the
+      // freshest sample is also the correct one — the interpolation delay exists
+      // to smooth a network, and there is no network here.
+      const peer = this.ensurePeer(bot.session)
+      peer.name = bot.name
+      peer.color = bot.color
+      peer.bot = true
+      peer.lastSeen = now
+      peer.claimed = { kills: bot.kills, deaths: bot.deaths }
+      peer.view.x = bot.tank.x
+      peer.view.y = bot.tank.y
+      peer.view.hull = bot.tank.hull
+      peer.view.gun = bot.tank.gun
+      peer.view.hp = bot.tank.hp
+      peer.view.dead = bot.tank.dead
+      peer.view.ammo = MAG_SIZE
+      peer.view.shield = false
+    }
+  }
+
+  private lastTankAt = { x: 0, y: 0 }
+
+  /** A bot pulls its trigger. Same shell everybody else fires, different owner. */
+  private fireBot(bot: Bot, angle: number): void {
+    const x = bot.tank.x + Math.cos(angle) * MUZZLE_OFFSET
+    const y = bot.tank.y + Math.sin(angle) * MUZZLE_OFFSET
+    const shell = spawnShell(randomId(), bot.session, x, y, angle, this.modifier.bounces, 1, 0)
+    this.shells.set(shell.id, shell)
+    this.sound('fire', { at: { x, y } })
+  }
+
+  /** Everything in the crater that is a bot. Same rules as `hitBot`. */
+  private blastBots(shell: Shell): void {
+    const r = LOB_BLAST + TANK_RADIUS
+    for (const bot of this.bots) {
+      if (bot.tank.dead) continue
+      if ((bot.tank.x - shell.x) ** 2 + (bot.tank.y - shell.y) ** 2 > r * r) continue
+      bot.tank.hp -= shell.damage
+      if (bot.tank.hp > 0) continue
+      killBot(bot, performance.now(), this.modifier.respawn)
+      this.sound('death', { at: { x: bot.tank.x, y: bot.tank.y } })
+      if (shell.owner === this.identity.sessionPubkey) {
+        this.botKills++
+        this.sound('kill')
+        this.onOwnKill()
+        this.pushFeed(`you killed ${bot.name}`)
+      }
+    }
+  }
+
+  /**
+   * A shell of ours hitting a bot.
+   *
+   * We are the authority on a bot in a way we are never the authority on a
+   * person: it exists only here. So this applies the damage rather than merely
+   * removing the shell, which is what `collide` does for a remote tank.
+   *
+   * The kill does not touch `kills`. Free kills are available in unlimited
+   * quantity to anyone willing to sit in an empty room, and a leaderboard that
+   * counted them would be ranking patience. It does feed the streak, because
+   * practising a streak is most of what a bot room is for, and it does go in
+   * the feed so the player can see it happened.
+   */
+  private hitBot(shell: Shell): boolean {
+    if (this.isBot(shell.owner)) return false
+    for (const bot of this.bots) {
+      if (bot.tank.dead) continue
+      if (!shellHits(shell, bot.tank.x, bot.tank.y)) continue
+      this.shells.delete(shell.id)
+      bot.tank.hp -= shell.damage
+      if (bot.tank.hp > 0) {
+        this.sound('hit', { at: { x: bot.tank.x, y: bot.tank.y } })
+        return true
+      }
+      killBot(bot, performance.now(), this.modifier.respawn)
+      this.sound('death', { at: { x: bot.tank.x, y: bot.tank.y } })
+      if (shell.owner === this.identity.sessionPubkey) {
+        this.botKills++
+        this.sound('kill')
+        this.onOwnKill()
+        this.pushFeed(`you killed ${bot.name}`)
+      }
+      return true
+    }
+    return false
+  }
+
+  /**
    * Where a charging lob would land right now, for the aiming ring, or null.
    *
    * Read by the renderer every frame. This is the honest half of the weapon:
@@ -1290,6 +1461,7 @@ export class Game {
       }
       this.sweepPickups(now)
     }
+    this.syncBots(dt, now)
     this.refreshPickups()
 
     for (const shell of this.shells.values()) {
@@ -1352,6 +1524,11 @@ export class Game {
    */
   private detonate(shell: Shell): void {
     this.sound('blast', { at: { x: shell.x, y: shell.y } })
+    // Bots are inside the blast like anybody else. Separately from the branch
+    // below, not instead of it: a lob is an area weapon, so one crater can take
+    // a bot and the player who threw it standing too close, and an early return
+    // after the first casualty would drop the rest.
+    this.blastBots(shell)
     if (shell.owner === this.identity.sessionPubkey || this.tank.dead || this.watching) return
     const r = LOB_BLAST + TANK_RADIUS
     if ((this.tank.x - shell.x) ** 2 + (this.tank.y - shell.y) ** 2 > r * r) return
@@ -1394,8 +1571,15 @@ export class Game {
       return
     }
 
+    // Bots first. A bot's peer record is in the loop below, and that branch only
+    // deletes the shell — correct for a remote player, who decides their own
+    // hull, and wrong for a bot, which has no client of its own to decide
+    // anything. Reaching the loop first would swallow every shot fired at one.
+    if (this.hitBot(shell)) return
+
     for (const peer of this.peers.values()) {
       if (peer.session === shell.owner || peer.view.dead) continue
+      if (this.isBot(peer.session)) continue
       if (shellHits(shell, peer.view.x, peer.view.y)) {
         this.shells.delete(shell.id)
         return
@@ -1453,15 +1637,24 @@ export class Game {
     this.streak = 0
     clearBuffs(this.buffs)
     this.tank.respawnAt = performance.now() + RESPAWN_DELAY * 1000 * this.modifier.respawn
-    this.deaths++
-    this.sound('death')
-    const payload: DeathPayload = {
-      t: performance.now(),
-      k: killer,
-      x: this.tank.x,
-      y: this.tank.y,
+    // A bot killing you costs you the round and the streak, which is the part
+    // that makes practice mean anything — but it does not go on the wire and it
+    // does not go in `deaths`. The symmetry with `hitBot` is the point: bot
+    // kills do not inflate your score, so bot deaths must not deflate it, or
+    // sitting in an empty room becomes a way to farm a K/D in the other
+    // direction.
+    const fromBot = this.isBot(killer)
+    if (!fromBot) {
+      this.deaths++
+      const payload: DeathPayload = {
+        t: performance.now(),
+        k: killer,
+        x: this.tank.x,
+        y: this.tank.y,
+      }
+      this.publishAsSession(KIND_DEATH, payload)
     }
-    this.publishAsSession(KIND_DEATH, payload)
+    this.sound('death')
     const killerName = killer ? (this.peers.get(killer)?.name ?? 'someone') : null
     this.pushFeed(killerName ? `${killerName} killed you` : 'you self-destructed')
   }

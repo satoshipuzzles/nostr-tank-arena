@@ -293,6 +293,17 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
   display: flex;
   gap: 16px;
   flex-wrap: wrap;
+  /* Wrap rather than run under the buttons.
+     Both this and `#hud-actions` are absolutely positioned at the bottom of the
+     screen, one from the left and one from the right, and neither knows the
+     other is there — so the row of hints simply grew until it was painted
+     *behind* the action buttons. Measured at 1280px: the hints were 792px wide,
+     the buttons 687px, and they overlapped by 228px, which is where "gamepad
+     supported" went. It got worse with every key this game added — Q for the
+     lob and B for the bots both landed in that overlap. 720px is the button row
+     with room to breathe; below that the hints wrap onto a second line and grow
+     upward, which costs nothing because the board behind them is sky. */
+  max-width: calc(100% - 720px);
   color: var(--dim);
   background: var(--panel);
   border: 1px solid var(--line);
