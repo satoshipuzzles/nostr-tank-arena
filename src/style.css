@@ -647,6 +647,93 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
 .fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .fields label { margin-bottom: 12px; }
 
+/* ------------------------------------------------------------- the hub */
+
+/*
+ * Mode cards.
+ *
+ * Auto-fit rather than a fixed three columns: at 520px they are three across,
+ * on a phone they stack, and neither case needs a breakpoint of its own. The
+ * minimum is 150px and the name is 13px, which is what it takes for "Team
+ * Deathmatch" to hold one line at three-across — a mode name that wraps reads
+ * as two modes.
+ */
+.modes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+  margin: 0 0 16px;
+}
+.mode {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+  padding: 12px;
+  text-align: left;
+  background: #0b0f18;
+  border: 1px solid var(--line);
+  color: var(--text);
+}
+.mode:hover:not(:disabled) { background: #121a29; filter: none; }
+.mode.on {
+  border-color: var(--accent);
+  background: linear-gradient(180deg, rgba(255, 196, 77, 0.16), rgba(255, 196, 77, 0.04));
+}
+.mode-name { font-size: 13px; font-weight: 700; white-space: nowrap; }
+.mode.on .mode-name { color: var(--accent); }
+.mode-fine {
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.35;
+  color: var(--dim);
+  white-space: normal;
+}
+/* Not-yet rather than broken: it says what it is and refuses the click. */
+.mode:disabled { opacity: 0.55; cursor: default; }
+.mode:disabled .mode-fine { color: #8a7a4e; }
+
+/* Each side in its own colour, because "Blue" written in grey is a word and a
+   blue chip is the thing you will be looking for on the board. */
+#side button[data-value] { color: hsl(var(--side-hue) 70% 72%); }
+#side button[aria-pressed='true'] {
+  background: hsl(var(--side-hue) 62% 52%);
+  border-color: hsl(var(--side-hue) 62% 52%);
+  color: #10141c;
+}
+
+/*
+ * The garage: the preview beside the picker it belongs to.
+ *
+ * The canvas gets a fixed height rather than an aspect ratio, because it is a
+ * WebGL surface that has to be resized in JS anyway, and a height that moves
+ * with the column width makes the lobby jump every time the skin row wraps.
+ */
+.garage {
+  display: flex;
+  gap: 14px;
+  align-items: stretch;
+  margin-bottom: 10px;
+}
+#tank-cam {
+  flex: 0 0 132px;
+  width: 132px;
+  height: 132px;
+  border-radius: 10px;
+  background: radial-gradient(circle at 50% 40%, #16202f 0%, #0a0e16 70%);
+  border: 1px solid var(--line);
+}
+.garage-pick { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.garage-pick .seg-label { width: auto; }
+.garage-pick .fine { margin: 0; }
+@media (max-width: 460px) {
+  /* On a phone the picker under the tank rather than beside it: six finishes
+     next to a 132px canvas is two words per line. */
+  .garage { flex-direction: column; }
+  #tank-cam { flex: 0 0 auto; width: 100%; height: 150px; }
+}
+
 .seg-row {
   display: flex;
   align-items: center;
