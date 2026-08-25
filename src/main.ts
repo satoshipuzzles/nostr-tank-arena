@@ -9,7 +9,7 @@ import { TouchSticks } from './touch'
 
 import { DEFAULT_RELAYS, Identity, Net, mergeRelays } from './nostr'
 import { type RelayProbe, checkRelay, parseRelayList } from './relays'
-import { Renderer, type ViewMode } from './render'
+import { Renderer, TankPreview, type ViewMode } from './render'
 import type { ClockDirection } from './nostr'
 import { modifierForBlock } from './modifiers'
 import { MAG_SIZE, RELOAD } from './sim'
@@ -446,6 +446,113 @@ window.addEventListener('keydown', (e) => {
   if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return
   setTeam(teamPick + 1)
 })
+
+/* -------------------------------------------------------------- the hub */
+
+/**
+ * Mode select, on the way in.
+ *
+ * Puzz: "Players should be able to start different types of game modes CTF,
+ * team death match, etc." The modes already existed — a team is a self-declared
+ * number and `T` cycles it — but they existed as a button on the HUD, which
+ * means you found out this game had teams after you were already in a
+ * deathmatch. A mode you can only discover mid-match is a mode most people
+ * never play.
+ *
+ * There is deliberately no new wire format here and no room-level agreement. A
+ * room is still just a name two people said out loud; picking Team Deathmatch
+ * picks *your* side before you spawn, exactly as pressing `T` would, and one
+ * player on a side is still a deathmatch — which is the right thing to happen
+ * when you pick a side and nobody joins you. Whatever a real mode negotiation
+ * looks like, it is a protocol change and it is not this.
+ */
+type Mode = 'dm' | 'tdm'
+
+/** Remembered, and consistent with the side that was remembered next to it. */
+let mode: Mode = ((): Mode => {
+  const v = stored('tank.mode')
+  if (v === 'tdm' || v === 'dm') return v
+  // First run after this shipped: somebody who had already picked a side with
+  // `T` is plainly playing a team game, so do not throw that away.
+  return teamPick ? 'tdm' : 'dm'
+})()
+
+for (let i = 1; i < TEAM_NAMES.length; i++) {
+  const b = document.createElement('button')
+  b.type = 'button'
+  b.dataset.value = String(i)
+  b.textContent = TEAM_NAMES[i]
+  b.style.setProperty('--side-hue', String(TEAM_HUES[i]))
+  $('side').appendChild(b)
+}
+
+function paintModes(): void {
+  for (const id of ['dm', 'tdm', 'ctf'] as const) {
+    const on = id === mode
+    const card = $(`mode-${id}`)
+    card.classList.toggle('on', on)
+    card.setAttribute('aria-pressed', String(on))
+  }
+  $('row-side').hidden = mode !== 'tdm'
+  for (const b of $('side').querySelectorAll('button')) {
+    const on = b.dataset.value === String(teamPick)
+    b.setAttribute('aria-pressed', String(on))
+  }
+}
+
+function setMode(next: Mode): void {
+  mode = next
+  store('tank.mode', mode)
+  // The mode is not a third piece of state — it *is* the side, expressed the
+  // way somebody picking a game thinks about it. Deathmatch means no side;
+  // team deathmatch means a side, and Red if you have never picked one.
+  setTeam(mode === 'tdm' ? teamPick || 1 : 0)
+  paintModes()
+}
+
+$('mode-dm').addEventListener('click', () => setMode('dm'))
+$('mode-tdm').addEventListener('click', () => setMode('tdm'))
+$('side').addEventListener('click', (e) => {
+  const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-value]')
+  if (!b) return
+  setTeam(Number(b.dataset.value))
+  paintModes()
+})
+paintModes()
+
+/**
+ * The tank in the garage.
+ *
+ * The real rig, the real `applySkin`, spinning slowly in its own small WebGL
+ * context — not a picture of a tank. A drawing of "chrome" is a second
+ * description of a number in `SKINS`, and second descriptions drift.
+ *
+ * One honest limitation, said out loud under the picker rather than papered
+ * over: the *colour* is dealt from your pubkey when you sit down, so the
+ * garage cannot know it. A preview that invented a colour would be lying about
+ * the one thing on a tank that is not cosmetic — your hue is how eight players
+ * tell each other apart. So the garage shows the finish, and says so.
+ */
+const PREVIEW_HUE = 48
+let preview: TankPreview | null = null
+try {
+  preview = new TankPreview($<HTMLCanvasElement>('tank-cam'))
+} catch {
+  // No WebGL in the lobby is survivable — the canvas simply stays empty and
+  // every other control still works. Failing to start the *game* is a
+  // different matter and is reported where it happens.
+  $('tank-cam').hidden = true
+}
+
+function paintPreview(): void {
+  if (!preview) return
+  preview.setSkin(asSkin(skinInput.value), PREVIEW_HUE)
+  preview.setDriver(nameInput.value.trim() || 'tank', null, PREVIEW_HUE)
+}
+$('skin').addEventListener('click', paintPreview)
+nameInput.addEventListener('input', paintPreview)
+window.addEventListener('resize', () => preview?.resize())
+paintPreview()
 
 /**
  * Practice tanks, on or off.
@@ -1304,6 +1411,11 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     const scheme = schemeInput.value as Scheme
     for (const p of players) p.input.scheme = scheme
     store('tank.scheme', scheme)
+    // The garage hands its WebGL context back the moment a match starts. A
+    // lobby preview still spinning behind a firefight is exactly the kind of
+    // thing that surfaces as "the game got laggy".
+    preview?.dispose()
+    preview = null
     running = { players, renderer, clock, profiles }
     // The ladder, once, in the feed. The strip on the HUD says what is next;
     // this says what exists, which is a question you ask on the way in and

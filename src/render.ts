@@ -3011,5 +3011,116 @@ export class Renderer {
   }
 }
 
+/**
+ * The tank on the lobby, in the flesh.
+ *
+ * Puzz: "Skins should show a preview png, svg or whatever media file of what
+ * the tank will look like." A picture would be a *second* description of the
+ * tank, and second descriptions drift — the six finishes are numbers in
+ * `SKINS`, and a hand-drawn swatch of "chrome" is a promise that nobody will
+ * ever retune `metalness`. So this renders the real rig with the real
+ * `applySkin`, in its own small context. What you see in the garage is the
+ * mesh the board will draw, because it is literally the same code.
+ *
+ * Its own WebGL context, which is the cost. One extra context is well inside
+ * every browser cap, and `dispose()` gives it back the moment a match starts —
+ * a lobby preview still holding a context during a firefight is exactly the
+ * kind of thing that shows up as "the game got laggy".
+ */
+export class TankPreview {
+  private readonly renderer: THREE.WebGLRenderer
+  private readonly scene = new THREE.Scene()
+  private readonly camera: THREE.PerspectiveCamera
+  private readonly rig: TankRig
+  private raf = 0
+  private disposed = false
+
+  constructor(canvas: HTMLCanvasElement) {
+    // `preserveDrawingBuffer` so the canvas can be *read*. Without it the
+    // buffer is cleared on composite and `toDataURL` hands back a blank
+    // image — which is how a preview that renders nothing at all would sail
+    // through a test that only checked the canvas exists. It costs a copy of a
+    // 132px surface and it also makes the tank right-click-saveable, which is
+    // the closest thing to the "preview png" that was asked for.
+    this.renderer = new THREE.WebGLRenderer({
+      canvas,
+      antialias: true,
+      alpha: true,
+      preserveDrawingBuffer: true,
+    })
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace
+
+    // The same two lights the board uses, at the same colours. A preview lit
+    // differently from the arena is a preview that lies about the finish,
+    // which is the one thing this element exists to be honest about.
+    this.scene.add(new THREE.HemisphereLight(0xc6d9ea, 0x5f7742, 1.35))
+    const sun = new THREE.DirectionalLight(0xfff0d2, 2.15)
+    sun.position.set(120, 180, 90)
+    this.scene.add(sun, sun.target)
+
+    this.rig = makeTank()
+    // The ring and the name plate belong to a tank on a board with other
+    // tanks in the way; in a garage they are furniture. The driver stays —
+    // your own face in the hatch is half of why a skin is worth choosing.
+    this.rig.ring.visible = false
+    this.rig.label.visible = false
+    // Hull pips too. Three white squares floating over a tank in a garage read
+    // as damage on a tank that has not been anywhere, and they were the only
+    // thing the first framing managed to clip against the top of the canvas.
+    for (const p of this.rig.pips) p.visible = false
+    this.scene.add(this.rig.root)
+
+    // Framed by measurement, not by eye: the driver's head is a billboard at
+    // roughly y=60 and the first cut cropped it against the top of the canvas,
+    // which is a preview of a tank with no driver in it.
+    this.camera = new THREE.PerspectiveCamera(32, 1, 1, 2000)
+    this.camera.position.set(132, 96, 146)
+    this.camera.lookAt(0, 26, 0)
+
+    this.resize()
+    const spin = () => {
+      if (this.disposed) return
+      // Slow, and never stopped. A still three-quarter view hides what a
+      // finish does with a moving highlight, which is most of what separates
+      // chrome from matte.
+      this.rig.root.rotation.y += 0.006
+      this.rig.turret.rotation.y = Math.sin(this.rig.root.rotation.y * 0.7) * 0.35
+      this.renderer.render(this.scene, this.camera)
+      this.raf = requestAnimationFrame(spin)
+    }
+    spin()
+  }
+
+  /** Point it at a finish and a player colour. */
+  setSkin(skin: SkinId, hue: number): void {
+    if (this.disposed) return
+    applySkin(this.rig, SKINS[skin] ?? SKINS[DEFAULT_SKIN], hue)
+  }
+
+  /** Who is driving: the callsign's initials, or the npub's picture once it lands. */
+  setDriver(name: string, picture: string | null, hue: number): void {
+    if (this.disposed) return
+    this.rig.avatar.set(name, picture, hue)
+  }
+
+  resize(): void {
+    if (this.disposed) return
+    const el = this.renderer.domElement
+    const w = el.clientWidth || 280
+    const h = el.clientHeight || 170
+    this.renderer.setSize(w, h, false)
+    this.camera.aspect = w / Math.max(1, h)
+    this.camera.updateProjectionMatrix()
+  }
+
+  dispose(): void {
+    if (this.disposed) return
+    this.disposed = true
+    cancelAnimationFrame(this.raf)
+    this.renderer.dispose()
+  }
+}
+
 /** Re-exported so callers can keep treating the peer view as opaque. */
 export type { Peer }
