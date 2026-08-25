@@ -1788,7 +1788,7 @@ export class Renderer {
       streak: game.streak,
       skin: game.skin,
       mine: true,
-    })
+    }, true)
     // A spectator's tank exists in the simulation — it is where the board
     // camera and `toWorld` measure from — but it must never reach a pixel.
     // Everything under `this.you` comes off together, including the ring, the
@@ -1943,7 +1943,12 @@ export class Renderer {
     }
   }
 
-  private applyTank(rig: TankRig, dt: number, now: number, v: TankView): void {
+  /**
+   * `eye` marks the one rig the cockpit camera is sitting inside. Everything a
+   * tank wears has to come off for that rig in cockpit view, and the plume is
+   * the one piece of it that is not a child of the rig — see `wear`.
+   */
+  private applyTank(rig: TankRig, dt: number, now: number, v: TankView, eye = false): void {
     const { x, y, hull, gun, hp, dead, hue, name, verified } = v
     rig.root.position.set(x, 0, y)
     rig.hull.rotation.y = -hull
@@ -1958,7 +1963,7 @@ export class Renderer {
       rig.body.emissive.setHex(0x000000)
     } else {
       applySkin(rig, SKINS[v.skin] ?? SKINS[DEFAULT_SKIN], hue)
-      this.wear(rig, v, now, dt)
+      this.wear(rig, v, now, dt, eye && this.view === 'cockpit')
     }
 
     if (dead) rig.smokeOwed = 0
@@ -2073,8 +2078,25 @@ export class Renderer {
    * air above a tank in this game — the driver's head, the hull pips and the
    * name plate stack from y=7 to y=133 — so smoke drawn straight up would
    * spend its life behind three sprites. Behind the hull it is against felt.
+   *
+   * `inside` is set for the tank the cockpit camera is sitting in, and it takes
+   * the plume and the fire glow off. This is not a nicety. The rear deck is 20
+   * units behind the hull; the eye is at y=50, `EYE_BACK` units back along the
+   * barrel, near plane 3 — so a burning tank in first person spawns 46 puffs a
+   * second directly into its own lens. Photographed, the whole 1280x800 frame
+   * was cream and orange with one corner of green felt showing: not "hard to
+   * see through", *no board at all*. Puzz reported it as "the damaged tanks UI
+   * in first person is too much cant see", which is exactly what the picture
+   * shows.
+   *
+   * The information does not get dropped, it moves to where a cockpit can carry
+   * it — `paintDamage` in main.ts puts the same three tiers on the screen edges,
+   * the same way this view already replaced the ground reload bar with a bloom
+   * on the reticle. Other tanks keep every bit of their smoke: reading which of
+   * the three in front of you dies to one more shell is the whole feature, and
+   * none of them are inside your lens.
    */
-  private wear(rig: TankRig, v: TankView, now: number, dt: number): void {
+  private wear(rig: TankRig, v: TankView, now: number, dt: number, inside = false): void {
     const ratio = v.maxHp > 0 ? Math.max(0, v.hp) / v.maxHp : 1
     if (ratio >= 1) {
       rig.smokeOwed = 0
@@ -2089,10 +2111,19 @@ export class Renderer {
     rig.body.color.multiplyScalar(soot)
     rig.trim.color.multiplyScalar(soot)
 
-    if (burning) {
+    if (burning && !inside) {
       // Flicker, so it reads as fire rather than as a tank painted orange.
       const flare = 0.42 + Math.sin(now / 70) * 0.12 + Math.sin(now / 23) * 0.06
       rig.body.emissive.lerp(FIRE_GLOW, Math.max(0, Math.min(1, flare)))
+    }
+
+    // The soot above is kept from inside — it is on the hull under the reticle,
+    // it darkens rather than adds, and it is the one damage cue in this view
+    // that costs no pixels of board. Everything below this line spawns geometry
+    // in front of the eye, so it stops here.
+    if (inside) {
+      rig.smokeOwed = 0
+      return
     }
 
     // Behind the hull, along its heading. Forward is +cos/+sin here, which is

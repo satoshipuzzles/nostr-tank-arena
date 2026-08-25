@@ -1079,6 +1079,55 @@ body.hud-compact #feed { bottom: max(10px, env(safe-area-inset-bottom)); }
 .sn-won { font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; }
 .seasoncard .fine { margin-top: 8px; }
 
+/* Damage, from inside the tank.
+   The board view says this with the tank itself: soot, then a smoke column off
+   the rear deck, then flame. None of that survives the move to first person,
+   because the rear deck is *behind the near plane* — the emitter puts 46 puffs
+   a second straight into the lens and the arena disappears. So the same three
+   tiers move to the edges of the frame, which is the one part of a cockpit
+   nobody is aiming through.
+
+   `--wear` is 0 at full hull and 1 at one hit from dead; `.burning` is the top
+   tier. An inset shadow only, no fill: the middle of the screen stays exactly
+   as clear at one hull as it is at three, which is the entire point of the fix.
+   `[hidden] { display: none !important }` at the top of this file is what keeps
+   `display: block` here from pinning it on screen in board view. */
+#damage {
+  position: fixed;
+  inset: 0;
+  display: block;
+  pointer-events: none;
+  z-index: 2;
+  /* Two shadows: a wide soft wash and a tight bright lip, so it reads as heat
+     at the edge of the glass rather than as a blurred border. */
+  box-shadow:
+    inset 0 0 calc(38px + var(--wear, 0) * 120px) calc(var(--wear, 0) * 26px)
+      rgba(216, 92, 40, calc(0.16 + var(--wear, 0) * 0.42)),
+    inset 0 0 12px rgba(255, 168, 92, calc(var(--wear, 0) * 0.3));
+  transition: box-shadow 260ms ease-out;
+}
+/* One hull from dead. Brighter, redder, and it pulses — the pulse is the tell,
+   because a static edge glow reads as a style and a moving one reads as an
+   alarm. 1.15s, slow enough not to strobe. */
+#damage.burning {
+  animation: damage-pulse 1.15s ease-in-out infinite;
+}
+@keyframes damage-pulse {
+  0%, 100% {
+    box-shadow:
+      inset 0 0 150px 26px rgba(224, 74, 32, 0.56),
+      inset 0 0 14px rgba(255, 186, 110, 0.34);
+  }
+  50% {
+    box-shadow:
+      inset 0 0 190px 44px rgba(238, 88, 34, 0.74),
+      inset 0 0 18px rgba(255, 208, 140, 0.5);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  #damage.burning { animation: none; }
+}
+
 /* The cockpit crosshair.
    Dead centre is exactly where the gun points, not an approximation of it: in
    cockpit view the camera's yaw *is* the gun angle, so the pixel at the middle
