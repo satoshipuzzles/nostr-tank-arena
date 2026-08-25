@@ -222,6 +222,99 @@ try {
     check('the phone is told about thumbs, not about WASD', hints.touch && !hints.keyboard, JSON.stringify(hints))
     check('and two-players-on-one-screen is not offered on a phone', hints.players)
 
+    // --- the compact hud ---------------------------------------------------
+    //
+    // Puzz's ask: default to the full board canvas, collapse the stats and the
+    // relay info, open them on a tap.
+    //
+    // Every assertion here reads the *computed* style rather than the `hidden`
+    // attribute. That is not belt-and-braces — `[hidden] { display: none }` in
+    // the UA stylesheet loses to any author rule that sets `display`, and both
+    // `.panel` and `#hud-actions` set one. This project has shipped that exact
+    // bug twice, both times with a green test asserting the attribute.
+    const shown = (id) =>
+      page.evaluate((i) => getComputedStyle(document.getElementById(i)).display !== 'none', id)
+
+    check(
+      'the stats and relay panels start collapsed on a phone',
+      !(await shown('scoreboard')) && !(await shown('status')),
+      `scoreboard ${await shown('scoreboard')}, status ${await shown('status')}`,
+    )
+    check('and so does the button bar', !(await shown('hud-actions')))
+    check('the chip row is there instead', await shown('hud-chips'))
+
+    // The claim is about pixels, not about the DOM. Sample a grid across the
+    // board and ask the browser what is actually on top at each point: a panel
+    // that is present, correct and covering the arena passes every structural
+    // check ever written and is the entire bug.
+    const covered = await page.evaluate(() => {
+      const panels = ['scoreboard', 'status', 'hud-actions', 'controls-hint']
+      const hits = []
+      for (let x = 0.08; x <= 0.92; x += 0.12) {
+        for (let y = 0.08; y <= 0.92; y += 0.12) {
+          const el = document.elementFromPoint(
+            Math.round(innerWidth * x),
+            Math.round(innerHeight * y),
+          )
+          const id = el?.closest('[id]')?.id ?? ''
+          if (panels.includes(id)) hits.push(`${id}@${x.toFixed(2)},${y.toFixed(2)}`)
+        }
+      }
+      return hits
+    })
+    check(
+      'and nothing covers the board — the canvas is the screen',
+      covered.length === 0,
+      covered.length ? covered.slice(0, 5).join(' ') : '64 sample points, all board',
+    )
+
+    // A chip that says "stats" tells a player nothing they could not guess. The
+    // point of the collapsed state is that the panel keeps doing its job shut.
+    const chipText = await page.evaluate(() => ({
+      score: document.querySelector('#chip-score .chip-text').textContent,
+      status: document.querySelector('#chip-status .chip-text').textContent,
+    }))
+    check(
+      'the collapsed chips still carry the numbers',
+      /^\d+\/\d+$/.test(chipText.score) && /opp/.test(chipText.status),
+      JSON.stringify(chipText),
+    )
+
+    // Centre of the chip, computed. A hardcoded coordinate here would be a test
+    // that passes because the chip happens to be where it was last week.
+    const chipAt = (id) =>
+      page.evaluate((i) => {
+        const r = document.getElementById(i).getBoundingClientRect()
+        return [Math.round(r.left + r.width / 2), Math.round(r.top + r.height / 2)]
+      }, id)
+    const scoreChip = await chipAt('chip-score')
+    await page.touchscreen.tap(...scoreChip)
+    const opened = await until(async () => ((await shown('scoreboard')) ? true : null))
+    check('tapping the score chip opens the scoreboard', !!opened)
+    check(
+      'and it has the players in it, not an empty box',
+      (await page.evaluate(() => document.querySelectorAll('#scoreboard .score-row').length)) > 0,
+    )
+    // The other direction. A toggle that only ever opens passes "does it open".
+    await page.touchscreen.tap(...scoreChip)
+    const closedAgain = await until(async () => ((await shown('scoreboard')) ? null : true))
+    check('tapping it again puts it away', !!closedAgain)
+
+    // One sheet at a time: a phone in landscape has room for exactly one, and
+    // two open panels is the covered-board bug again by a different route.
+    await page.touchscreen.tap(...scoreChip)
+    await until(async () => ((await shown('scoreboard')) ? true : null))
+    await page.touchscreen.tap(...(await chipAt('chip-status')))
+    const swapped = await until(async () =>
+      (await shown('status')) && !(await shown('scoreboard')) ? true : null)
+    check('opening the relay panel closes the scoreboard', !!swapped)
+
+    // The sheet takes pointer events, so a panel left open is not merely in the
+    // way of the board — it eats the driving thumb for the rest of the round.
+    await page.touchscreen.tap(430, 320)
+    const dismissed = await until(async () => ((await shown('status')) ? null : true))
+    check('and touching the board puts the sheet away', !!dismissed)
+
     // --- driving -----------------------------------------------------------
     //
     // The tank's own coordinates, before and after a thumb drag. Screen-right is
@@ -332,6 +425,15 @@ try {
     deskState.rotate === 'none', deskState.rotate)
   check('the touch layer is not drawn on a desk', deskState.layer === 'none', deskState.layer)
   check('and two-player couch mode is still offered', !deskState.players)
+  // The compact HUD is a phone layout, not a new layout. A desk window this
+  // size keeps the panels it always had and never sees a chip.
+  const deskHud = await desk.evaluate(() => {
+    const d = (i) => getComputedStyle(document.getElementById(i)).display
+    return { chips: d('hud-chips'), score: d('scoreboard'), status: d('status') }
+  })
+  check('a desk keeps its scoreboard and status panel', deskHud.score !== 'none' && deskHud.status !== 'none',
+    JSON.stringify(deskHud))
+  check('and never sees the phone chips', deskHud.chips === 'none', deskHud.chips)
   await desk.close()
 } catch (err) {
   check('the run completed', false, err.message)

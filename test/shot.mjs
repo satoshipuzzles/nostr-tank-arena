@@ -50,7 +50,12 @@ const browser = await puppeteer.launch({
 })
 try {
   const page = await browser.newPage()
-  await page.setViewport({ width: 1280, height: 800 })
+  // `TANK_VIEWPORT=852x393 node test/shot.mjs phone.png` photographs the phone
+  // layout. A screenshot at 1280x800 cannot show the compact HUD at all, so
+  // without this the picture and the claim are about different builds.
+  const [vw, vh] = (process.env.TANK_VIEWPORT ?? '1280x800').split('x').map(Number)
+  const phone = vw <= 900
+  await page.setViewport({ width: vw, height: vh, hasTouch: phone, isMobile: phone })
   const url = process.env.TANK_URL ?? 'http://localhost:4173/'
   await page.goto(`${url}?room=shot${Math.floor(Math.random() * 1e6)}`)
   await page.type('#name', 'shot')

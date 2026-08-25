@@ -28,6 +28,21 @@
     <div id="touch"></div>
 
     <div id="hud" hidden>
+      <!-- The compact HUD. On a phone these three chips are the entire HUD
+           chrome: the board is the screen, and a panel only exists while a
+           thumb has asked for it. Present on every viewport and hidden by CSS
+           on a desk, so nothing here depends on JS having run. -->
+      <div id="hud-chips">
+        <button id="chip-score" class="chip" type="button" aria-expanded="false" aria-controls="scoreboard">
+          <span class="chip-ico" aria-hidden="true">&#9876;</span><span class="chip-text">0/0</span>
+        </button>
+        <button id="chip-status" class="chip" type="button" aria-expanded="false" aria-controls="status">
+          <span class="chip-ico" aria-hidden="true">&#9679;</span><span class="chip-text">relays</span>
+        </button>
+        <button id="chip-menu" class="chip" type="button" aria-expanded="false" aria-controls="hud-actions">
+          <span class="chip-ico" aria-hidden="true">&#8943;</span>
+        </button>
+      </div>
       <div class="panel" id="scoreboard"></div>
       <div class="panel" id="status"></div>
       <div id="crosshair" hidden><i></i></div>

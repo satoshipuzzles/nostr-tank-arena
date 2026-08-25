@@ -765,6 +765,91 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
   #lobby-note, .advanced { display: none; }
 }
 
+/* --------------------------------------------------- the compact hud */
+
+/*
+ * The board is the game. Everything else is a chip until asked for.
+ *
+ * On a phone the scoreboard and the status panel are two opaque rectangles in
+ * the two corners a top-down arena most needs, and between them they cover a
+ * quarter of a 393px-tall screen. Puzz's ask was blunt and correct: default to
+ * the full canvas, collapse the rest, open it on a tap.
+ *
+ * `body.hud-compact` is set from JS (see `paintHudCompact` in main.ts) rather
+ * than by a media query alone, because the trigger is partly "a finger has been
+ * seen" and no media query can answer that. The rules live here so the layout
+ * is one thing to read.
+ */
+
+#hud-chips {
+  position: absolute;
+  top: max(10px, env(safe-area-inset-top));
+  left: max(10px, env(safe-area-inset-left));
+  display: none;
+  gap: 8px;
+  z-index: 2;
+}
+body.hud-compact #hud-chips { display: flex; }
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  /* 40px is the smallest target a thumb hits reliably on the first try, and a
+     chip that needs two taps to open is worse than a panel that never closed. */
+  min-height: 40px;
+  padding: 0 13px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.chip:hover { background: #1b2536; filter: none; }
+.chip[aria-expanded='true'] { border-color: var(--accent); color: var(--accent); }
+.chip .chip-ico { font-size: 13px; opacity: 0.85; }
+/* Trouble is the one thing worth colouring in a collapsed HUD: a player who
+   cannot see the relay line still needs to know their ticks are not landing. */
+.chip.bad { border-color: #e26a6a; color: #e26a6a; }
+
+/*
+ * The open sheet. All three chips open into the same place, directly under the
+ * chip row, so where a panel appears is never a surprise — and only one is ever
+ * open, because a phone in landscape has room for exactly one.
+ */
+body.hud-compact #scoreboard,
+body.hud-compact #status,
+body.hud-compact #hud-actions {
+  top: calc(max(10px, env(safe-area-inset-top)) + 48px);
+  bottom: auto;
+  left: max(10px, env(safe-area-inset-left));
+  right: auto;
+  text-align: left;
+  max-width: min(340px, 76vw);
+  max-height: calc(100vh - max(10px, env(safe-area-inset-top)) - 68px);
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+body.hud-compact #hud-actions {
+  flex-direction: column;
+  align-items: stretch;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px;
+}
+body.hud-compact #hud-actions button { padding: 11px 12px; font-size: 12px; }
+
+/* The kill feed sits at the bottom on a desk, on top of the action bar's old
+   corner. With the bar collapsed the feed is the only thing down there, so it
+   gets the room back rather than staying tucked above a bar that is gone. */
+body.hud-compact #feed { bottom: max(10px, env(safe-area-inset-bottom)); }
+
 /* ----------------------------------------------------- the leaderboard wall */
 
 /*

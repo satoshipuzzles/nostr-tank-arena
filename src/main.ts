@@ -115,6 +115,8 @@ function paintTouchAffordances(): void {
   // buttons.
   $('touch-hint').hidden = sticks.used
   paintRotate()
+  // A touchscreen that also reports a fine pointer only becomes knowable here.
+  paintHudCompact()
 }
 
 /**
@@ -171,6 +173,106 @@ roomInput.value = params.get('room') ?? stored('tank.room') ?? 'lobby'
 relayInput.value = mergeRelays(stored('tank.relays'), stored('tank.relays.offered')).join('\n')
 schemeInput.value = stored('tank.scheme') === 'tank' ? 'tank' : 'direct'
 playersInput.value = stored('tank.players') === '2' ? '2' : '1'
+
+/* ------------------------------------------------------- the compact hud */
+
+/**
+ * On a phone the board is the screen and everything else is a chip.
+ *
+ * The scoreboard and the status panel are two opaque rectangles in the two
+ * corners a top-down arena most needs. Collapsed, they become a row of chips
+ * that still carry the one number each panel exists for — your K/D, and
+ * whether the relays are behaving — so the collapsed state is informative
+ * rather than merely absent.
+ */
+type HudPanel = '' | 'score' | 'status' | 'menu'
+
+const HUD_SHEETS: Record<Exclude<HudPanel, ''>, string> = {
+  score: 'scoreboard',
+  status: 'status',
+  menu: 'hud-actions',
+}
+
+/** Which sheet is open, or none. Persisted; none is the default, deliberately. */
+let hudOpen: HudPanel = (() => {
+  const v = stored('tank.hud.open')
+  return v === 'score' || v === 'status' || v === 'menu' ? v : ''
+})()
+
+/** Whether the HUD is in its collapsed form at all. */
+let hudCompactOn = false
+
+/**
+ * Three signals, and each catches a case the others miss.
+ *
+ * A coarse pointer is what a phone reports *before* anybody touches it, which
+ * is what keeps the HUD from painting open on the first frame and collapsing a
+ * moment later. A seen finger catches a touchscreen that reports a fine pointer
+ * because a mouse is also attached. And a viewport this small has the problem
+ * whatever it is being pointed at — a 600px browser window has the panels over
+ * the board exactly as a phone does, so it gets the same answer.
+ */
+function hudShouldCompact(): boolean {
+  let coarse = false
+  try {
+    coarse = window.matchMedia('(pointer: coarse)').matches
+  } catch {
+    /* older engines: fall through to the other two signals */
+  }
+  return sticks.touched || coarse || window.innerWidth <= 700 || window.innerHeight <= 480
+}
+
+/**
+ * Paint the collapsed/expanded state.
+ *
+ * Note this sets `hidden` rather than a class: `[hidden] { display: none
+ * !important }` at the top of the stylesheet is what makes that stick against
+ * `.panel`'s own `display`, and it is there because this exact bug has shipped
+ * twice in this repo.
+ */
+function paintHudCompact(): void {
+  hudCompactOn = hudShouldCompact()
+  document.body.classList.toggle('hud-compact', hudCompactOn)
+  for (const [panel, id] of Object.entries(HUD_SHEETS) as [Exclude<HudPanel, ''>, string][]) {
+    const open = !hudCompactOn || hudOpen === panel
+    $(id).hidden = hudCompactOn && !open
+    $(`chip-${panel}`).setAttribute('aria-expanded', String(hudCompactOn && hudOpen === panel))
+  }
+}
+
+/** Open a sheet, or close it if it is the one already open. One at a time. */
+function toggleHudPanel(panel: Exclude<HudPanel, ''>): void {
+  hudOpen = hudOpen === panel ? '' : panel
+  store('tank.hud.open', hudOpen)
+  paintHudCompact()
+}
+
+for (const panel of ['score', 'status', 'menu'] as const) {
+  $(`chip-${panel}`).addEventListener('click', () => toggleHudPanel(panel))
+}
+
+/*
+ * A sheet closes the moment a thumb goes back to the board.
+ *
+ * Without this the panel a player opened to read is the panel their driving
+ * thumb lands on for the rest of the round — the sheet takes pointer events,
+ * so it is not merely in the way, it eats the input. Opening it is a glance,
+ * not a mode.
+ */
+canvas.addEventListener(
+  'pointerdown',
+  () => {
+    if (!hudCompactOn || !hudOpen) return
+    hudOpen = ''
+    store('tank.hud.open', hudOpen)
+    paintHudCompact()
+  },
+  { passive: true },
+)
+
+window.addEventListener('resize', paintHudCompact)
+window.addEventListener('orientationchange', paintHudCompact)
+paintHudCompact()
 
 /**
  * One AudioContext for the page, built on the first real click.
@@ -1233,6 +1335,16 @@ function drawHud(game: Game): void {
   ]
     .filter(Boolean)
     .join('<br>')
+
+  // The chips carry the one fact each collapsed panel exists for. A chip
+  // reading "relays" tells a player nothing they could not have guessed; a chip
+  // reading "2 opp" or going red is the panel doing its job while shut.
+  $('chip-score').querySelector('.chip-text')!.textContent = `${game.kills}/${game.deaths}`
+  const statusChip = $('chip-status')
+  statusChip.querySelector('.chip-text')!.textContent = trouble
+    ? 'relays'
+    : `${others} opp${others === 1 ? '' : 's'}`
+  statusChip.classList.toggle('bad', Boolean(trouble) || Boolean(ghosted))
 
   $('feed').innerHTML = game.feed
     .map((f) => `<div>${escapeHtml(f.text)}</div>`)
