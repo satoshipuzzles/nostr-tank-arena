@@ -68,8 +68,25 @@ button:disabled { opacity: 0.5; cursor: default; }
 }
 #lobby[hidden], #board[hidden], #hud[hidden] { display: none; }
 
+/*
+ * `min-width: 0` is the whole reason this card fits on a phone.
+ *
+ * The card is a grid item of `#lobby`/`#board`, and a grid item's automatic
+ * minimum size is its *min-content* width — which quietly outranks the `width`
+ * above it. One wide row inside (the block wall, a relay URL, a live-games row)
+ * therefore pushed the card out to 591px inside a 390px screen: still centred
+ * by `place-items`, but wider than the glass, so the right-hand half of the
+ * leaderboard was simply off the side of the phone. It reads as "the panel is
+ * not centred" because the visible part is not.
+ *
+ * With the floor at zero the card obeys `width` again and the wide thing inside
+ * scrolls or wraps on its own, which is what each of them was already built to
+ * do. Verified by measurement, not by eye: `test/board.mjs` and
+ * `test/mobile.mjs` both assert the card's right edge is inside the viewport.
+ */
 .card {
   width: min(520px, 100%);
+  min-width: 0;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 14px;
@@ -586,9 +603,22 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
   margin-bottom: 10px;
 }
 .seg-label { color: var(--dim); font-size: 13px; flex: none; width: 66px; }
+/*
+ * Wrapping, because the skin row grew past six.
+ *
+ * A segmented control with two options is a row; with six it is a row on a
+ * desktop and a paragraph on a phone. It used to force the whole lobby card
+ * wider than the screen instead of wrapping — the card had no `min-width: 0`,
+ * so this row's min-content became the card's width and pushed "Rust" and
+ * everything after it off the side of the phone. The card floor is fixed
+ * above; this is the other half, and without it the buttons would simply be
+ * clipped rather than reachable.
+ */
 .seg {
   display: flex;
   flex: 1 1 auto;
+  flex-wrap: wrap;
+  min-width: 0;
   gap: 4px;
   padding: 4px;
   background: #0b0f18;
