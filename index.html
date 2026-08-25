@@ -68,12 +68,17 @@
       <div id="rules" hidden></div>
       <div id="alarm" hidden></div>
       <div id="buffs" hidden></div>
+      <!-- What the next kill buys you. Outside the collapsible panels for the
+           same reason the magazine is: it is read during a fight, not glanced
+           at between them. -->
+      <div id="streak" hidden></div>
       <div id="p2" hidden></div>
       <div id="feed"></div>
       <div id="controls-hint">
         <span><b>WASD</b> drive</span><span><b>mouse</b> aim</span><span><b>click / space</b> fire</span
         ><span><b>R</b> reload</span><span><b>Q</b> hold to lob</span><span><b>V</b> cockpit</span
-        ><span><b>B</b> bots</span><span><b>gamepad</b> supported</span
+        ><span><b>B</b> bots</span><span><b>[ ]</b> fewer / more</span
+        ><span><b>gamepad</b> supported</span
         ><span id="hint-p2" hidden><b>P2:</b> arrows + enter, or pad 2</span>
       </div>
       <div id="touch-hint" hidden>
@@ -96,7 +101,16 @@
       <div id="hud-actions">
         <button id="view-toggle" class="ghost" title="Board view or cockpit (V)">View: board</button>
         <button id="sound-toggle" class="ghost" title="Sound on or off (M)">Sound: on</button>
-        <button id="bots-toggle" class="ghost" title="Fill an empty room with practice tanks (B)">Bots: on</button>
+        <!-- A stepper rather than a toggle: "add to the game and while in
+             game" was the ask, and on/off cannot say three. The middle button
+             keeps the old behaviour — click it to clear the arena, click again
+             to get your count back — so `B` and one click still do the simple
+             thing. -->
+        <span class="stepper">
+          <button id="bots-less" class="ghost" type="button" aria-label="One fewer bot">&minus;</button>
+          <button id="bots-toggle" class="ghost" title="Practice tanks on or off (B)">Bots: 3</button>
+          <button id="bots-more" class="ghost" type="button" aria-label="One more bot">+</button>
+        </span>
         <button id="autopublish-toggle" class="ghost" title="Publish your score when each block closes">Auto-publish: on</button>
         <button id="team-toggle" class="ghost" title="Pick a side, or none for a free-for-all (T)">Team: none</button>
         <button id="copy-link" class="ghost">Copy invite link</button>
@@ -126,13 +140,50 @@
           <h1>Tank Arena</h1>
         </div>
         <p class="tag">
-          Four-player deathmatch, no game server. Your npub is your identity, relays are the
+          Eight-player deathmatch, no game server. Your npub is your identity, relays are the
           netcode, every round is a Bitcoin block.
         </p>
+
+        <!-- Mode first, because the mode is the game. The old lobby asked for a
+             room name and hid everything this thing had grown behind a Play
+             button; a hub says what you can play before it asks who you are.
+             Cards rather than a dropdown: a dropdown item is a word, a card can
+             say what the mode *is* to somebody who has never played it. -->
+        <div class="modes" id="modes" role="group" aria-label="Game mode">
+          <button type="button" class="mode" id="mode-dm" data-mode="dm">
+            <span class="mode-name">Deathmatch</span>
+            <span class="mode-fine">Everyone for themselves. The block goes to the most kills.</span>
+          </button>
+          <button type="button" class="mode" id="mode-tdm" data-mode="tdm">
+            <span class="mode-name">Team Deathmatch</span>
+            <span class="mode-fine">Pick a side. Your own side's shells pass straight through you.</span>
+          </button>
+          <button type="button" class="mode" id="mode-ctf" data-mode="ctf">
+            <span class="mode-name">Capture the Flag</span>
+            <span class="mode-fine">Run their flag home. Yours has to be home too.</span>
+          </button>
+        </div>
+
+        <!-- Only in team modes. A side picker on a deathmatch is a control that
+             does nothing, which is worse than a control that is not there. -->
+        <div class="seg-row" id="row-side" hidden>
+          <span class="seg-label">Side</span>
+          <div class="seg" id="side" role="group" aria-label="Side"></div>
+        </div>
 
         <div class="fields">
           <label>Callsign<input id="name" maxlength="16" placeholder="tank" autocomplete="off" /></label>
           <label>Room<input id="room" maxlength="24" placeholder="lobby" autocomplete="off" /></label>
+        </div>
+
+        <!-- How many practice tanks to open with. They only appear while the
+             room has nobody real in it, so this is a preference rather than a
+             spawn button — and it is on the lobby because deciding you want
+             seven of them after you have already spawned is a worse moment to
+             be reading a menu. -->
+        <div class="seg-row" id="row-bots">
+          <span class="seg-label">Bots</span>
+          <div class="seg" id="bots" role="group" aria-label="Practice tanks"></div>
         </div>
 
         <div class="seg-row" id="row-players">
@@ -143,14 +194,26 @@
           </div>
         </div>
 
-        <!-- Skins are cosmetic only: the finish changes, the player's colour
-             never does. Filled from `SKINS` in src/skins.ts so the markup and
-             the renderer cannot drift apart. -->
-        <div class="seg-row" id="row-skin">
-          <span class="seg-label">Skin</span>
-          <div class="seg" id="skin" role="group" aria-label="Tank skin"></div>
+        <!-- The garage. Skins are cosmetic only: the finish changes, the
+             player's colour never does. Filled from `SKINS` in src/skins.ts so
+             the markup and the renderer cannot drift apart — and the preview
+             beside it is the *real* rig with the real `applySkin`, not a
+             drawing of one, for exactly the same reason. -->
+        <div class="garage">
+          <canvas id="tank-cam" aria-label="Preview of your tank"></canvas>
+          <div class="garage-pick">
+            <span class="seg-label">Skin</span>
+            <div class="seg" id="skin" role="group" aria-label="Tank skin"></div>
+            <p class="fine" id="skin-blurb"></p>
+            <!-- Said out loud rather than faked. The finish is what you are
+                 choosing here; the colour is dealt from your npub when you sit
+                 down, and a preview that invented one would be lying about the
+                 only thing on a tank that is not cosmetic. -->
+            <p class="fine" id="garage-note">
+              Your colour is dealt from your npub at the table. The finish is yours to pick.
+            </p>
+          </div>
         </div>
-        <p class="fine" id="skin-blurb"></p>
 
         <div class="seg-row">
           <span class="seg-label">Steering</span>

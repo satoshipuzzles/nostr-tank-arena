@@ -31,7 +31,7 @@
 // most of what a bot room is for; they do not count for `ks`, `ds` or the block
 // winner. `Game` owns that split — see `isBot`.
 
-import { ARENA_H, ARENA_W, SPAWNS, hasLineOfSight, pointInTallWall } from './arena'
+import { ARENA_H, ARENA_W, SPAWNS, groundSpeed, hasLineOfSight, pointInTallWall } from './arena'
 import {
   GUN_TURN_RATE,
   MAX_HP,
@@ -41,10 +41,28 @@ import {
   TANK_RADIUS,
   angleDelta,
 } from './sim'
+import { SEATS } from './rooms'
 import type { LocalTank } from './sim'
 
-/** How many tanks a solo player is dropped in with. Fills the four-player board. */
+/**
+ * How many tanks a solo player is dropped in with, unless they say otherwise.
+ *
+ * Three because that is what a four-player board wanted, and it stayed three
+ * when a room grew to eight — which is the right default rather than an
+ * oversight: three is a firefight you can win, and seven is a firing squad.
+ * The number is now a preference, so anybody who wants the squad can have it.
+ */
 export const BOT_COUNT = 3
+
+/**
+ * The most a player can ask for.
+ *
+ * `SEATS - 1`, because a bot fills a seat and the player is in one of them.
+ * Deriving it rather than writing 7 is the lesson from the last time a room
+ * grew: four seats and four spawn points were the same number for no reason,
+ * and eight players stacked two tanks on one spawn.
+ */
+export const MAX_BOTS = SEATS - 1
 
 /**
  * The range a bot tries to hold.
@@ -292,7 +310,11 @@ export function stepBot(
   const throttle = Math.max(0.18, 1 - Math.abs(off) * 0.62)
 
   t.hull += steer * 2.5 * dt
-  const speed = throttle * 175
+  // The same ground rule the player drives on. A bot that crossed a breach at
+  // full speed would make rubble a rule that only applies to humans, which is
+  // both unfair and the kind of asymmetry that reads as the feature being
+  // broken rather than as the bot cheating.
+  const speed = throttle * 175 * groundSpeed(t.x, t.y)
   const dx = Math.cos(t.hull) * speed * dt
   const dy = Math.sin(t.hull) * speed * dt
   const beforeX = t.x

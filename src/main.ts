@@ -4,13 +4,14 @@ import * as flags from './flags'
 import { layoutForBlock, layoutName, setLayout } from './arena'
 import { Sfx } from './audio'
 import { BlockClock } from './blocks'
-import { Game } from './game'
+import { BOT_COUNT, MAX_BOTS } from './bots'
+import { Game, STREAK_LADDER, nextRung, rungFloor } from './game'
 import { Input, PLAYER_TWO, SOLO, type Scheme } from './input'
 import { TouchSticks } from './touch'
 
 import { DEFAULT_RELAYS, Identity, Net, mergeRelays } from './nostr'
 import { type RelayProbe, checkRelay, parseRelayList } from './relays'
-import { Renderer, type ViewMode } from './render'
+import { Renderer, TankPreview, type ViewMode } from './render'
 import type { ClockDirection } from './nostr'
 import { modifierForBlock } from './modifiers'
 import { MAG_SIZE, RELOAD } from './sim'
@@ -448,37 +449,196 @@ window.addEventListener('keydown', (e) => {
   setTeam(teamPick + 1)
 })
 
+/* -------------------------------------------------------------- the hub */
+
 /**
- * Practice tanks, on or off.
+ * Mode select, on the way in.
  *
- * On by default and remembered, because the common first run of this game is
- * one person joining a room string nobody else has typed, and an empty arena is
- * not a game. The `Game` decides whether the three actually appear — they only
- * exist while no real player is in the room — so this is a preference rather
- * than a spawn button, and the label says what is *wanted*, not what is on the
- * board this second.
+ * Puzz: "Players should be able to start different types of game modes CTF,
+ * team death match, etc." The modes already existed — a team is a self-declared
+ * number and `T` cycles it — but they existed as a button on the HUD, which
+ * means you found out this game had teams after you were already in a
+ * deathmatch. A mode you can only discover mid-match is a mode most people
+ * never play.
+ *
+ * There is deliberately no new wire format here and no room-level agreement. A
+ * room is still just a name two people said out loud; picking Team Deathmatch
+ * picks *your* side before you spawn, exactly as pressing `T` would, and one
+ * player on a side is still a deathmatch — which is the right thing to happen
+ * when you pick a side and nobody joins you. Whatever a real mode negotiation
+ * looks like, it is a protocol change and it is not this.
  */
-let botsWanted = stored('tank.bots') !== 'off'
+type Mode = 'dm' | 'tdm' | 'ctf'
+
+/** Remembered, and consistent with the side that was remembered next to it. */
+let mode: Mode = ((): Mode => {
+  const v = stored('tank.mode')
+  if (v === 'tdm' || v === 'dm' || v === 'ctf') return v
+  // First run after this shipped: somebody who had already picked a side with
+  // `T` is plainly playing a team game, so do not throw that away.
+  return teamPick ? 'tdm' : 'dm'
+})()
+
+for (let i = 1; i < TEAM_NAMES.length; i++) {
+  const b = document.createElement('button')
+  b.type = 'button'
+  b.dataset.value = String(i)
+  b.textContent = TEAM_NAMES[i]
+  b.style.setProperty('--side-hue', String(TEAM_HUES[i]))
+  $('side').appendChild(b)
+}
+
+function paintModes(): void {
+  for (const id of ['dm', 'tdm', 'ctf'] as const) {
+    const on = id === mode
+    const card = $(`mode-${id}`)
+    card.classList.toggle('on', on)
+    card.setAttribute('aria-pressed', String(on))
+  }
+  // Both team modes need a side; only capture the flag puts flags out.
+  $('row-side').hidden = mode === 'dm'
+  for (const b of $('side').querySelectorAll('button')) {
+    const on = b.dataset.value === String(teamPick)
+    b.setAttribute('aria-pressed', String(on))
+  }
+}
+
+function setMode(next: Mode): void {
+  mode = next
+  store('tank.mode', mode)
+  // The mode is not a third piece of state — it *is* the side, expressed the
+  // way somebody picking a game thinks about it. Deathmatch means no side;
+  // team deathmatch means a side, and Red if you have never picked one.
+  setTeam(mode === 'dm' ? 0 : teamPick || 1)
+  if (running) for (const p of running.players) p.game.flagsOn = mode === 'ctf'
+  paintModes()
+}
+
+$('mode-dm').addEventListener('click', () => setMode('dm'))
+$('mode-tdm').addEventListener('click', () => setMode('tdm'))
+$('mode-ctf').addEventListener('click', () => setMode('ctf'))
+$('side').addEventListener('click', (e) => {
+  const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-value]')
+  if (!b) return
+  setTeam(Number(b.dataset.value))
+  paintModes()
+})
+paintModes()
+
+/**
+ * The tank in the garage.
+ *
+ * The real rig, the real `applySkin`, spinning slowly in its own small WebGL
+ * context — not a picture of a tank. A drawing of "chrome" is a second
+ * description of a number in `SKINS`, and second descriptions drift.
+ *
+ * One honest limitation, said out loud under the picker rather than papered
+ * over: the *colour* is dealt from your pubkey when you sit down, so the
+ * garage cannot know it. A preview that invented a colour would be lying about
+ * the one thing on a tank that is not cosmetic — your hue is how eight players
+ * tell each other apart. So the garage shows the finish, and says so.
+ */
+const PREVIEW_HUE = 48
+let preview: TankPreview | null = null
+try {
+  preview = new TankPreview($<HTMLCanvasElement>('tank-cam'))
+} catch {
+  // No WebGL in the lobby is survivable — the canvas simply stays empty and
+  // every other control still works. Failing to start the *game* is a
+  // different matter and is reported where it happens.
+  $('tank-cam').hidden = true
+}
+
+function paintPreview(): void {
+  if (!preview) return
+  preview.setSkin(asSkin(skinInput.value), PREVIEW_HUE)
+  preview.setDriver(nameInput.value.trim() || 'tank', null, PREVIEW_HUE)
+}
+$('skin').addEventListener('click', paintPreview)
+nameInput.addEventListener('input', paintPreview)
+window.addEventListener('resize', () => preview?.resize())
+paintPreview()
+
+/**
+ * Practice tanks: how many, before the match and during it.
+ *
+ * Puzz: "ability to add bots to the game both in pre game screen and while in
+ * game." It was a boolean, which cannot say three — and three was the only
+ * number the game had, chosen when a room held four. A room holds eight now,
+ * so seven is a legitimate thing to want and it was unreachable.
+ *
+ * Remembered, because the common first run of this game is one person joining
+ * a room string nobody else has typed and an empty arena is not a game. The
+ * `Game` decides whether any of them actually appear — bots only exist while no
+ * real player is in the room — so this is a preference, and the label says what
+ * is *wanted* rather than what is on the board this second.
+ *
+ * Changing it mid-match is free by construction: bots are entirely local and
+ * publish nothing, so adding one is not a thing anybody else has to agree to.
+ * That is the whole reason this can be a live control rather than a setting you
+ * restart for.
+ */
+let botsWanted = ((): number => {
+  const raw = stored('tank.bots')
+  // `'on'`/`'off'` are what this preference used to be. Somebody who set it
+  // before today still has one of those in storage, and reading it as NaN
+  // would silently hand them an empty arena.
+  if (raw === 'off') return 0
+  if (raw === 'on' || raw === null) return BOT_COUNT
+  const n = Number(raw)
+  return Number.isFinite(n) ? Math.max(0, Math.min(MAX_BOTS, Math.floor(n))) : BOT_COUNT
+})()
+/** What the middle button restores when it is clicked back on. */
+let botsLast = botsWanted || BOT_COUNT
+
+for (let i = 0; i <= MAX_BOTS; i++) {
+  const b = document.createElement('button')
+  b.type = 'button'
+  b.dataset.value = String(i)
+  b.textContent = String(i)
+  $('bots').appendChild(b)
+}
+const botsInput = segmented('bots')
 
 function paintBotsButton(): void {
-  $('bots-toggle').textContent = botsWanted ? 'Bots: on' : 'Bots: off'
+  $('bots-toggle').textContent = botsWanted ? `Bots: ${botsWanted}` : 'Bots: off'
+  // A control that cannot go further should say so rather than doing nothing.
+  $<HTMLButtonElement>('bots-less').disabled = botsWanted <= 0
+  $<HTMLButtonElement>('bots-more').disabled = botsWanted >= MAX_BOTS
+  botsInput.value = String(botsWanted)
 }
+
+function setBots(n: number): void {
+  botsWanted = Math.max(0, Math.min(MAX_BOTS, Math.floor(n)))
+  if (botsWanted) botsLast = botsWanted
+  store('tank.bots', String(botsWanted))
+  paintBotsButton()
+  if (running) for (const p of running.players) p.game.botsWanted = botsWanted
+}
+// `paintBotsButton`, not `setBots`: `setBots` reaches for `running`, which is
+// declared further down this file, and calling it during module init is a
+// temporal-dead-zone crash that takes the whole lobby with it. Nothing needs
+// setting here anyway — the value was just read from storage.
 paintBotsButton()
 
-function setBots(on: boolean): void {
-  botsWanted = on
-  store('tank.bots', on ? 'on' : 'off')
-  paintBotsButton()
-  if (running) for (const p of running.players) p.game.botsEnabled = on
-}
-
-$('bots-toggle').addEventListener('click', () => setBots(!botsWanted))
+$('bots-toggle').addEventListener('click', () => setBots(botsWanted ? 0 : botsLast))
+$('bots-less').addEventListener('click', () => setBots(botsWanted - 1))
+$('bots-more').addEventListener('click', () => setBots(botsWanted + 1))
+$('bots').addEventListener('click', (e) => {
+  const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-value]')
+  if (b) setBots(Number(b.dataset.value))
+})
 
 window.addEventListener('keydown', (e) => {
-  if (e.code !== 'KeyB' || e.repeat) return
+  if (e.repeat) return
   const target = e.target as HTMLElement | null
   if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return
-  setBots(!botsWanted)
+  // B still toggles, because that is the thing people press mid-fight. The
+  // brackets are the fine adjustment, next to each other on every layout this
+  // game has been played on.
+  if (e.code === 'KeyB') setBots(botsWanted ? 0 : botsLast)
+  else if (e.code === 'BracketLeft') setBots(botsWanted - 1)
+  else if (e.code === 'BracketRight') setBots(botsWanted + 1)
 })
 
 window.addEventListener('keydown', (e) => {
@@ -1305,7 +1465,16 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     const scheme = schemeInput.value as Scheme
     for (const p of players) p.input.scheme = scheme
     store('tank.scheme', scheme)
+    // The garage hands its WebGL context back the moment a match starts. A
+    // lobby preview still spinning behind a firefight is exactly the kind of
+    // thing that surfaces as "the game got laggy".
+    preview?.dispose()
+    preview = null
     running = { players, renderer, clock, profiles }
+    // The ladder, once, in the feed. The strip on the HUD says what is next;
+    // this says what exists, which is a question you ask on the way in and
+    // never again.
+    announceLadder(game)
     $('hint-p2').hidden = !twoPlayer
     // A profile landing has to repaint immediately: the HUD throttles itself to
     // eight frames a second and would otherwise show the npub for another beat
@@ -1347,11 +1516,14 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     // whether any actually appear — in a couch match player two is a peer of
     // player one, so the room is never empty and the bots stand down on their
     // own without this having to know about couch mode.
-    for (const p of players) p.game.botsEnabled = botsWanted
+    for (const p of players) p.game.botsWanted = botsWanted
     // The remembered side reaches the fresh `Game`, and player two shares it —
     // two people on one couch are on one team unless they say otherwise, which
     // is what a couch is.
     for (const p of players) p.game.team = teamPick
+    // The mode reaches the fresh `Game`. Flags are only on in the one mode that
+    // has them, which is why this is not derived from `team`.
+    for (const p of players) p.game.flagsOn = mode === 'ctf'
     // Repainted here rather than at module load: the default depends on whether
     // this session is a guest, and that is not known until a game exists.
     paintAutoPublish()
@@ -1505,20 +1677,56 @@ function watchActionsWidth(): void {
   const publish = () => {
     const w = Math.round(row.getBoundingClientRect().width)
     if (w > 0) document.documentElement.style.setProperty('--actions-w', `${w}px`)
-    // And how tall the hints ended up, which the kill feed sits above. Every
-    // button added on the right makes the hints one line taller on the left,
-    // and the feed's `bottom` was a constant sized for one line — at three the
-    // feed printed straight through them.
+
+    // Hidden outright when the reserve leaves too little to read. Clearing the
+    // overlap is not the same as being legible: at a 1024px window with seven
+    // buttons the hints had 51px of width, wrapped to one word a line and stood
+    // 488px tall — a column of single words up the side of the board, with the
+    // 999px pill radius rounding it into a dark circle. Below a readable width
+    // they are worth less than the space they take.
+    const room = document.documentElement.clientWidth - w - 30
+    // 320, not 220. The bar has grown again — a bots stepper and a team button
+    // since that number was picked — and at 240px of room the hints still
+    // wrapped to five lines. The threshold is "enough to read a couple of hints
+    // on one line", and it will need raising again the next time a button
+    // lands, which is why the radius above no longer depends on it.
+    hint.classList.toggle('cramped', room < 320)
+
+    // And how tall they ended up, which the kill feed sits above. Every button
+    // added on the right makes the hints one line taller on the left, and the
+    // feed's `bottom` was a constant sized for one line — at three the feed
+    // printed straight through them.
+  }
+
+  /**
+   * The hint row's own height, published from its own observer.
+   *
+   * Separate from `publish` on purpose, and the two attempts before this are
+   * why. Measuring in the same pass that toggles `cramped` reads the box as it
+   * was — it wrote 56px for a row that had just become 102px. Deferring that
+   * read to `requestAnimationFrame` swapped one bug for a worse one: `publish`
+   * runs several times as the bar settles, so an early frame's callback lands
+   * *after* a later one and overwrites the right answer with a stale one.
+   *
+   * A ResizeObserver on the element itself has neither problem. It fires after
+   * layout, by definition, and only when this box actually changed size — which
+   * includes the frame `cramped` takes it to zero and the frame it comes back.
+   */
+  const publishHeight = () => {
     const h = Math.round(hint.getBoundingClientRect().height)
-    if (h > 0) document.documentElement.style.setProperty('--hint-h', `${h}px`)
+    document.documentElement.style.setProperty('--hint-h', `${h}px`)
   }
+
   publish()
+  publishHeight()
   if (typeof ResizeObserver === 'function') {
-    const ro = new ResizeObserver(publish)
-    ro.observe(row)
-    ro.observe(hint)
+    new ResizeObserver(publish).observe(row)
+    new ResizeObserver(publishHeight).observe(hint)
   }
-  window.addEventListener('resize', publish)
+  window.addEventListener('resize', () => {
+    publish()
+    publishHeight()
+  })
 }
 watchActionsWidth()
 
@@ -1816,6 +2024,7 @@ function drawHud(game: Game): void {
 
   drawNotice(game, now)
   drawBuffs(game, now)
+  drawStreak(game)
 }
 
 /**
@@ -2081,6 +2290,63 @@ function drawBuffs(game: Game, now: number): void {
   }
   node.hidden = live.length === 0
   node.innerHTML = live.join('')
+}
+
+/**
+ * What the next kill buys you.
+ *
+ * cloudfodder asked "how am I supposed to get to the choppa?" in the middle of
+ * a match, which is the whole bug: the ladder worked and nothing on the screen
+ * admitted it existed. A reward you cannot see coming is a surprise once and
+ * invisible forever after — and a player who knows the chopper is four kills
+ * away plays the next four kills differently, which is the actual point.
+ *
+ * Always on screen during a round, including at zero, because zero is exactly
+ * when a new player needs to be told there is a ladder at all. It reads as one
+ * line and a bar rather than as a list of six tiers: a HUD element you have to
+ * *study* during a firefight is decoration.
+ *
+ * The rung names come from `STREAK_LADDER` in game.ts — the same table
+ * `onOwnKill` awards from — so retuning the ladder cannot leave this promising
+ * a chopper the game does not hand over.
+ */
+function drawStreak(game: Game): void {
+  const node = $('streak')
+  const rung = nextRung(game.streak)
+  if (!rung) {
+    // Past the top of the ladder there is nothing left to earn, so the strip
+    // stops making promises and just keeps count.
+    node.hidden = false
+    node.className = 'top'
+    node.innerHTML =
+      `<div class="streak-line"><b>${game.streak}</b> in a row` +
+      `<span class="streak-next">unstoppable</span></div>`
+    return
+  }
+  const floor = rungFloor(game.streak)
+  const span = rung.at - floor
+  const done = game.streak - floor
+  const left = rung.at - game.streak
+  node.hidden = false
+  // One away is the moment worth lighting up: it is the difference between a
+  // meter you ignore and a decision about whether to push.
+  node.className = left === 1 ? 'close' : ''
+  node.innerHTML =
+    `<div class="streak-line">` +
+    (game.streak > 0 ? `<b>${game.streak}</b> in a row` : `<span class="dim">no streak</span>`) +
+    `<span class="streak-next">${left} more &rarr; ${escapeHtml(rung.name)}</span></div>` +
+    `<div class="streak-bar"><i style="width:${Math.round((done / span) * 100)}%"></i></div>`
+}
+
+/**
+ * The whole ladder, once, on the way in.
+ *
+ * The strip above answers "what is next"; this answers "what is there", which
+ * is a question you only ask once per session. Six seconds in the feed rather
+ * than a permanent panel, because a legend that never goes away is furniture.
+ */
+function announceLadder(game: Game): void {
+  game.pushFeed('streaks: ' + STREAK_LADDER.map((r) => `${r.at} ${r.name}`).join(' · '))
 }
 
 // ------------------------------------------------------------------ podium

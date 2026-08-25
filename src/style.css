@@ -68,8 +68,25 @@ button:disabled { opacity: 0.5; cursor: default; }
 }
 #lobby[hidden], #board[hidden], #hud[hidden] { display: none; }
 
+/*
+ * `min-width: 0` is the whole reason this card fits on a phone.
+ *
+ * The card is a grid item of `#lobby`/`#board`, and a grid item's automatic
+ * minimum size is its *min-content* width — which quietly outranks the `width`
+ * above it. One wide row inside (the block wall, a relay URL, a live-games row)
+ * therefore pushed the card out to 591px inside a 390px screen: still centred
+ * by `place-items`, but wider than the glass, so the right-hand half of the
+ * leaderboard was simply off the side of the phone. It reads as "the panel is
+ * not centred" because the visible part is not.
+ *
+ * With the floor at zero the card obeys `width` again and the wide thing inside
+ * scrolls or wraps on its own, which is what each of them was already built to
+ * do. Verified by measurement, not by eye: `test/board.mjs` and
+ * `test/mobile.mjs` both assert the card's right edge is inside the viewport.
+ */
 .card {
   width: min(520px, 100%);
+  min-width: 0;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 14px;
@@ -264,13 +281,13 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
 #feed {
   position: absolute;
   /* Above the key hints, whatever height they have wrapped to.
-     `bottom: 84px` was the height of a one-line hint row plus a gap, and it
-     stopped being true the moment the hints started wrapping — every button
-     added to the row on the right makes the row on the left one line taller,
-     and at three lines the feed was printing straight through it. `--hint-h`
-     is written by `watchActionsWidth` in main.ts from the real element, for the
-     same reason `--actions-w` is: a constant here is a promise that the layout
-     will never change again, and it has already been broken twice. */
+     `bottom: 84px` was one hint line plus a gap, and it stopped being true the
+     moment the hints started wrapping — every button added to the row on the
+     right makes the row on the left a line taller, and at three lines the feed
+     printed straight through it. `--hint-h` is written by `watchActionsWidth`
+     in main.ts from the real element, for the same reason `--actions-w` is: a
+     constant here is a promise the layout will never change again, and that
+     promise has already been broken twice. */
   bottom: calc(var(--hint-h, 42px) + 28px);
   left: 14px;
   display: flex;
@@ -318,7 +335,14 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
   color: var(--dim);
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 999px;
+  /* 22px, not a 999px lozenge.
+     A pill radius is identical to this at one line and turns into a *circle*
+     the moment the row wraps — which it now does, because every button added to
+     the action bar takes width away from here. Photographed at 1280px it was a
+     large dark disc over the bottom-left corner of the board with words
+     scattered inside it. A radius that cannot exceed the corner is the fix that
+     survives the next button. */
+  border-radius: 22px;
   padding: 7px 14px;
   font-size: 12px;
 }
@@ -333,6 +357,25 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
   flex-wrap: wrap;
 }
 #hud-actions button { padding: 7px 12px; font-size: 12px; }
+/*
+ * The bot stepper: three buttons that read as one control.
+ *
+ * Flanking buttons are square and the label is not, so "fewer / this many /
+ * more" is legible at a glance rather than being three words in a row. It is
+ * one flex item in `#hud-actions`, which is what keeps `--actions-w` — the
+ * reserve that stops the key hints being painted underneath this row —
+ * measuring it as the single control it looks like.
+ */
+.stepper { display: flex; gap: 4px; align-items: stretch; }
+.stepper button { padding: 7px 12px; font-size: 12px; }
+.stepper #bots-less,
+.stepper #bots-more {
+  min-width: 30px;
+  padding: 7px 0;
+  font-size: 14px;
+  line-height: 1;
+}
+.stepper button:disabled { opacity: 0.4; }
 /* Ghost buttons over the sky need a plate of their own for the same reason. */
 #hud-actions button.ghost { background: var(--panel); border-color: var(--line); }
 #hud-actions button.ghost:hover { background: #1b2536; filter: none; }
@@ -457,6 +500,57 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
   word-break: break-word;
 }
 
+/*
+ * The streak strip: what the next kill buys you.
+ *
+ * Bottom centre, directly above the magazine, because those two are the same
+ * question — what can I do right now — and a player checking one is already
+ * looking at the other. The left column is taken (feed over hints over buffs)
+ * and a fourth thing in it would be a list; the right is the actions row.
+ *
+ * Pointer-events none: it sits over the arena, and a tank behind it must still
+ * be clickable. Same reason `#ammo` above has it.
+ */
+#streak {
+  position: absolute;
+  bottom: 122px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--dim);
+  white-space: nowrap;
+  text-shadow: 0 1px 3px #000;
+  pointer-events: none;
+  z-index: 4;
+}
+#streak .streak-line { display: flex; align-items: baseline; gap: 8px; }
+#streak b { color: var(--text); font-size: 14px; font-variant-numeric: tabular-nums; }
+#streak .streak-next { color: var(--accent); }
+#streak .dim { color: var(--dim); }
+/* The bar fills across one rung, not across the ladder — see `rungFloor`. */
+#streak .streak-bar {
+  width: 100%;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.09);
+  overflow: hidden;
+}
+#streak .streak-bar i { display: block; height: 100%; background: var(--accent); }
+/* One away. The only state worth changing colour for, because it is the only
+   one that changes what a player does with the next ten seconds. */
+#streak.close { border-color: var(--accent); }
+#streak.close .streak-next { color: #fff; font-weight: 700; }
+#streak.top { border-color: #b8474f; }
+#streak.top .streak-next { color: #ff9aa2; }
+
 #buffs {
   position: absolute;
   bottom: 118px;
@@ -579,6 +673,93 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
 .fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .fields label { margin-bottom: 12px; }
 
+/* ------------------------------------------------------------- the hub */
+
+/*
+ * Mode cards.
+ *
+ * Auto-fit rather than a fixed three columns: at 520px they are three across,
+ * on a phone they stack, and neither case needs a breakpoint of its own. The
+ * minimum is 150px and the name is 13px, which is what it takes for "Team
+ * Deathmatch" to hold one line at three-across — a mode name that wraps reads
+ * as two modes.
+ */
+.modes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+  margin: 0 0 16px;
+}
+.mode {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+  padding: 12px;
+  text-align: left;
+  background: #0b0f18;
+  border: 1px solid var(--line);
+  color: var(--text);
+}
+.mode:hover:not(:disabled) { background: #121a29; filter: none; }
+.mode.on {
+  border-color: var(--accent);
+  background: linear-gradient(180deg, rgba(255, 196, 77, 0.16), rgba(255, 196, 77, 0.04));
+}
+.mode-name { font-size: 13px; font-weight: 700; white-space: nowrap; }
+.mode.on .mode-name { color: var(--accent); }
+.mode-fine {
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.35;
+  color: var(--dim);
+  white-space: normal;
+}
+/* Not-yet rather than broken: it says what it is and refuses the click. */
+.mode:disabled { opacity: 0.55; cursor: default; }
+.mode:disabled .mode-fine { color: #8a7a4e; }
+
+/* Each side in its own colour, because "Blue" written in grey is a word and a
+   blue chip is the thing you will be looking for on the board. */
+#side button[data-value] { color: hsl(var(--side-hue) 70% 72%); }
+#side button[aria-pressed='true'] {
+  background: hsl(var(--side-hue) 62% 52%);
+  border-color: hsl(var(--side-hue) 62% 52%);
+  color: #10141c;
+}
+
+/*
+ * The garage: the preview beside the picker it belongs to.
+ *
+ * The canvas gets a fixed height rather than an aspect ratio, because it is a
+ * WebGL surface that has to be resized in JS anyway, and a height that moves
+ * with the column width makes the lobby jump every time the skin row wraps.
+ */
+.garage {
+  display: flex;
+  gap: 14px;
+  align-items: stretch;
+  margin-bottom: 10px;
+}
+#tank-cam {
+  flex: 0 0 132px;
+  width: 132px;
+  height: 132px;
+  border-radius: 10px;
+  background: radial-gradient(circle at 50% 40%, #16202f 0%, #0a0e16 70%);
+  border: 1px solid var(--line);
+}
+.garage-pick { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.garage-pick .seg-label { width: auto; }
+.garage-pick .fine { margin: 0; }
+@media (max-width: 460px) {
+  /* On a phone the picker under the tank rather than beside it: six finishes
+     next to a 132px canvas is two words per line. */
+  .garage { flex-direction: column; }
+  #tank-cam { flex: 0 0 auto; width: 100%; height: 150px; }
+}
+
 .seg-row {
   display: flex;
   align-items: center;
@@ -586,9 +767,22 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
   margin-bottom: 10px;
 }
 .seg-label { color: var(--dim); font-size: 13px; flex: none; width: 66px; }
+/*
+ * Wrapping, because the skin row grew past six.
+ *
+ * A segmented control with two options is a row; with six it is a row on a
+ * desktop and a paragraph on a phone. It used to force the whole lobby card
+ * wider than the screen instead of wrapping — the card had no `min-width: 0`,
+ * so this row's min-content became the card's width and pushed "Rust" and
+ * everything after it off the side of the phone. The card floor is fixed
+ * above; this is the other half, and without it the buttons would simply be
+ * clipped rather than reachable.
+ */
 .seg {
   display: flex;
   flex: 1 1 auto;
+  flex-wrap: wrap;
+  min-width: 0;
   gap: 4px;
   padding: 4px;
   background: #0b0f18;
@@ -727,7 +921,13 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
 #scoreboard, #status { top: max(14px, env(safe-area-inset-top)); }
 #controls-hint, #hud-actions { bottom: max(14px, env(safe-area-inset-bottom)); }
 #touch-hint { top: max(14px, env(safe-area-inset-top)); }
-#feed { bottom: calc(84px + env(safe-area-inset-bottom)); }
+/* Same measured reserve as the base rule, plus the safe area. This line used
+   to hardcode 84px — one hint line plus a gap — and being later in the file it
+   silently beat the `--hint-h` rule above, so the feed sat 32px inside a
+   three-line hint row while the variable said 102px and everything looked
+   correct in isolation. A constant that overrides a measurement is worse than
+   no measurement. */
+#feed { bottom: calc(var(--hint-h, 42px) + 28px + env(safe-area-inset-bottom)); }
 
 /*
  * A phone in landscape is about 380px tall. Everything on the HUD has to give
@@ -738,7 +938,7 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
   .panel { padding: 7px 10px; font-size: 11px; }
   #scoreboard { min-width: 150px; }
   #hud-actions button { padding: 5px 9px; font-size: 11px; }
-  #feed { bottom: calc(58px + env(safe-area-inset-bottom)); font-size: 11px; }
+  #feed { bottom: calc(var(--hint-h, 30px) + 22px + env(safe-area-inset-bottom)); font-size: 11px; }
   #feed div { padding: 3px 9px; }
   .avatar { --av: 18px; }
 }
@@ -940,6 +1140,20 @@ body.hud-compact #hud-actions {
   padding: 8px;
 }
 body.hud-compact #hud-actions button { padding: 11px 12px; font-size: 12px; }
+
+/* No keyboard hints on the touch layout.
+   The `max-width: 640px` rule below was the only thing hiding them, and an
+   iPhone held landscape is 932 CSS pixels wide — so the desktop hint row was
+   being drawn on a phone. With the action row grown to seven buttons the hints
+   had no width left, wrapped to one word per line, and the 999px pill radius
+   turned the whole thing into a large dark circle over the board. `hud-compact`
+   is set when a finger has been seen, which is exactly the audience that has no
+   keyboard to be hinted about. */
+body.hud-compact #controls-hint { display: none; }
+
+/* Too narrow to be worth reading. Set by `watchActionsWidth` in main.ts from
+   the measured gap between the hints and the button row. */
+#controls-hint.cramped { display: none; }
 
 /* The kill feed sits at the bottom on a desk, on top of the action bar's old
    corner. With the bar collapsed the feed is the only thing down there, so it
@@ -1495,3 +1709,4 @@ button.blocktile:focus-visible {
   }
   .dr-ratio { display: none; }
 }
+

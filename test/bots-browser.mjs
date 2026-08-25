@@ -248,20 +248,139 @@ try {
   // section would pass against the feature being missing entirely.
   check('the control: they were really there a moment ago', !!spawned && asPeers.length === 3)
 
-  // ------------------------------------------------------------- the toggle
+  // --------------------------------------------------------- the bot control
+  //
+  // It used to be a toggle, which cannot say three — and three was the only
+  // number the game had, picked when a room held four. These check the stepper
+  // that replaced it, and every one of them reads `game.botsWanted` as well as
+  // the label: a control that relabels itself and reaches nothing is the
+  // easiest version of this to ship.
 
   const toggled = await page.evaluate(() => {
-    const before = document.getElementById('bots-toggle').textContent
+    const label = () => document.getElementById('bots-toggle').textContent
+    const before = label()
     document.getElementById('bots-toggle').click()
-    const after = document.getElementById('bots-toggle').textContent
-    const wanted = window.__players[0].game.botsEnabled
+    const after = label()
+    const off = window.__players[0].game.botsWanted
     document.getElementById('bots-toggle').click()
-    return { before, after, wanted, back: document.getElementById('bots-toggle').textContent }
+    return { before, after, off, back: label(), on: window.__players[0].game.botsWanted }
   })
-  check('the toggle says what it does and reaches the game',
-    toggled.before === 'Bots: on' && toggled.after === 'Bots: off' &&
-      toggled.wanted === false && toggled.back === 'Bots: on',
+  check('the middle button still clears the arena and puts it back',
+    toggled.before === 'Bots: 3' && toggled.after === 'Bots: off' && toggled.off === 0 &&
+      toggled.back === 'Bots: 3' && toggled.on === 3,
     JSON.stringify(toggled))
+
+  const stepped = await page.evaluate(() => {
+    const out = []
+    const read = () => ({
+      label: document.getElementById('bots-toggle').textContent,
+      wanted: window.__players[0].game.botsWanted,
+    })
+    document.getElementById('bots-more').click()
+    out.push(read())
+    document.getElementById('bots-less').click()
+    document.getElementById('bots-less').click()
+    out.push(read())
+    return out
+  })
+  check('more and fewer reach the game, not just the label',
+    stepped[0].label === 'Bots: 4' && stepped[0].wanted === 4 &&
+      stepped[1].label === 'Bots: 2' && stepped[1].wanted === 2,
+    JSON.stringify(stepped))
+
+  // The ends. A stepper that silently does nothing at its limit is a stepper
+  // that looks broken; one that wraps around to zero is worse.
+  const ends = await page.evaluate(() => {
+    const more = document.getElementById('bots-more')
+    const less = document.getElementById('bots-less')
+    for (let i = 0; i < 12; i++) more.click()
+    const top = {
+      wanted: window.__players[0].game.botsWanted,
+      label: document.getElementById('bots-toggle').textContent,
+      moreDisabled: more.disabled,
+    }
+    for (let i = 0; i < 12; i++) less.click()
+    const bottom = {
+      wanted: window.__players[0].game.botsWanted,
+      label: document.getElementById('bots-toggle').textContent,
+      lessDisabled: less.disabled,
+    }
+    return { top, bottom }
+  })
+  check('it stops at seven — one for every seat but yours — and says so',
+    ends.top.wanted === 7 && ends.top.label === 'Bots: 7' && ends.top.moreDisabled === true,
+    JSON.stringify(ends.top))
+  check('and it stops at zero rather than wrapping round',
+    ends.bottom.wanted === 0 && ends.bottom.label === 'Bots: off' && ends.bottom.lessDisabled === true,
+    JSON.stringify(ends.bottom))
+
+  // The claim that matters: the number reaches the *arena*, not just the model.
+  // Bots publish nothing, so this is a purely local change — which is exactly
+  // why it can be a live control instead of a setting you restart for.
+  const live = await page.evaluate(async () => {
+    const g = window.__game
+    // Nobody real in the room, or the bots stand down regardless of the count.
+    g.peers.clear()
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms))
+    const seen = []
+    for (const n of [5, 1]) {
+      const btn = n > g.botsWanted ? 'bots-more' : 'bots-less'
+      // Bounded. The first version was `while (g.botsWanted !== n) click()`,
+      // which is an infinite loop inside the page against any build where the
+      // button does not reach the game — exactly the build this check exists
+      // to catch. A test that hangs instead of failing reports nothing.
+      for (let i = 0; i < 16 && g.botsWanted !== n; i++) document.getElementById(btn).click()
+      const deadline = Date.now() + 8000
+      while (Date.now() < deadline && g.botCount !== n) await wait(80)
+      seen.push({ asked: n, onBoard: g.botCount })
+    }
+    return seen
+  })
+  check('asking for five puts five tanks in the arena',
+    live[0]?.asked === 5 && live[0]?.onBoard === 5, JSON.stringify(live[0]))
+  check('and dropping to one leaves exactly one',
+    live[1]?.asked === 1 && live[1]?.onBoard === 1, JSON.stringify(live[1]))
+
+  // --------------------------------------------------- and on the way in too
+  //
+  // "Both in pre game screen and while in game" was the ask, and the lobby half
+  // has a failure mode the in-match half does not: a picker that writes a
+  // preference nobody reads at spawn. So this drives a *fresh* page, picks a
+  // number before pressing play, and counts the tanks that turn up.
+
+  const lobbyPage = await browser.newPage()
+  await lobbyPage.setViewport({ width: 1280, height: 800 })
+  await lobbyPage.goto(URL, { waitUntil: 'domcontentloaded', timeout: 30_000 })
+  await lobbyPage.evaluate(() => localStorage.clear())
+  await lobbyPage.reload({ waitUntil: 'domcontentloaded' })
+  const picker = await lobbyPage.evaluate(() => ({
+    options: [...document.querySelectorAll('#bots button')].map((b) => b.dataset.value),
+    picked: [...document.querySelectorAll('#bots button')]
+      .filter((b) => b.getAttribute('aria-pressed') === 'true')
+      .map((b) => b.dataset.value),
+  }))
+  check('the lobby offers a bot count, zero through seven',
+    picker.options.join(',') === '0,1,2,3,4,5,6,7', JSON.stringify(picker.options))
+  check('and a first visit is already set to the default three',
+    picker.picked.join(',') === '3', JSON.stringify(picker.picked))
+
+  await lobbyPage.click('#bots button[data-value="5"]')
+  await lobbyPage.type('#name', 'five')
+  await lobbyPage.type('#room', 'five' + Math.floor(Math.random() * 1e6))
+  await lobbyPage.click('#play-guest')
+  const lobbyUp = await lobbyPage
+    .waitForFunction(() => !!window.__game, { timeout: 25_000 })
+    .then(() => true).catch(() => false)
+  check('a game starts from the lobby with a count picked', lobbyUp)
+  const arrived = await until(async () => {
+    const n = await lobbyPage.evaluate(() => window.__game.botCount)
+    return n === 5 ? n : null
+  }, 15_000)
+  check('and the number picked before the match is the number in it',
+    arrived === 5, `${arrived} on the board`)
+  const remembered = await lobbyPage.evaluate(() => localStorage.getItem('tank.bots'))
+  check('the choice is remembered for next time', remembered === '5', String(remembered))
+  await lobbyPage.close()
 
   // ------------------------------------------------ the hint row still fits
 
@@ -304,6 +423,26 @@ try {
     // `bottom` used to be a constant sized for a one-line hint row, and every
     // button added on the right makes that row one line taller on the left —
     // at three lines the feed was printing straight over the hints.
+    // Put lines in the feed first. The check below tolerates an empty feed —
+    // there is nothing to overlap — and at 1440px the feed happened to be empty
+    // when it was measured, so it passed against a 32px overlap. A control that
+    // is only exercised when the thing under test is absent is not a control.
+    await page.evaluate(() => {
+      const g = window.__game
+      for (let i = 0; i < 3; i++) g.pushFeed(`layout probe line ${i + 1}`)
+    })
+    // Poll for it to settle. The height is published on the next animation
+    // frame, so a single read right after a viewport change catches the layout
+    // one pass early — which is a fact about the harness, not about the page.
+    for (let i = 0; i < 20; i++) {
+      const ok = await page.evaluate(() => {
+        const hint = document.getElementById('controls-hint').getBoundingClientRect()
+        const feed = document.getElementById('feed').getBoundingClientRect()
+        return hint.height === 0 || feed.height === 0 || feed.bottom <= hint.top
+      })
+      if (ok) break
+      await wait(100)
+    }
     const stack = await page.evaluate(() => {
       const hint = document.getElementById('controls-hint').getBoundingClientRect()
       const feed = document.getElementById('feed').getBoundingClientRect()

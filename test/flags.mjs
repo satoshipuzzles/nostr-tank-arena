@@ -83,9 +83,50 @@ try {
     g.beginRound = () => {}
     g.botsEnabled = false
     document.getElementById('podium').hidden = true
+    // Through the lobby card, not by setting `team` — the mode is what turns
+    // flags on now, and a suite that set the side by hand would pass against a
+    // build where the card does nothing.
+    document.getElementById('mode-ctf').click()
     g.team = 1
+    g.flagsOn = true
   }, HASH)
   await wait(800)
+
+  // ------------------------------------------------------- the mode is the switch
+
+  const modeCard = await page.evaluate(() => {
+    const card = document.getElementById('mode-ctf')
+    return {
+      disabled: card.disabled,
+      on: card.classList.contains('on'),
+      fine: card.querySelector('.mode-fine')?.textContent ?? '',
+      flagsOn: window.__game.flagsOn,
+    }
+  })
+  check('the lobby card is live rather than "in build"',
+    modeCard.disabled === false && !/in build/i.test(modeCard.fine), JSON.stringify(modeCard))
+  check('and picking it is what turns flags on',
+    modeCard.on === true && modeCard.flagsOn === true, JSON.stringify(modeCard))
+
+  // The control: a deathmatch has no flags, whatever side anybody is on. Before
+  // this the flags came on the moment somebody had a team, which meant a team
+  // deathmatch quietly had flags in it.
+  const noFlagsInDm = await page.evaluate(() => {
+    const g = window.__game
+    g.flagsOn = false
+    const b = window.__flags.baseFor(2)
+    g.tank.dead = false
+    g.tank.x = b.x
+    g.tank.y = b.y
+    for (let i = 0; i < 6; i++) {
+      g.update(0.016, { throttle: 0, steer: 0, aim: null, aimAt: null, fire: false, reload: false, lob: false })
+    }
+    const carrying = g.carrying
+    g.flagsOn = true
+    return carrying
+  })
+  check('the control: standing on a base in a non-flag mode takes nothing',
+    noFlagsInDm === 0, String(noFlagsInDm))
 
   // ---------------------------------------------------------------- the bases
 

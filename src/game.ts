@@ -42,10 +42,20 @@ import {
   parsePayload,
   roomTag,
 } from './protocol'
-import { BOT_COUNT, killBot, makeBot, stepBot } from './bots'
+import { BOT_COUNT, MAX_BOTS, killBot, makeBot, stepBot } from './bots'
 import { FLAG_TEAMS, canScore, canTake, carriers } from './flags'
 import type { Claim } from './flags'
-import { WALLS, applyCoverBits, coverBits, damageCover, explodes, resetCover } from './arena'
+import {
+  WALLS,
+  applyCoverBits,
+  applyCoverDamageBits,
+  coverBits,
+  coverDamageBits,
+  damageCover,
+  groundSpeed,
+  explodes,
+  resetCover,
+} from './arena'
 import {
   CHOPPER_DAMAGE,
   CHOPPER_HIT_MS,
@@ -189,6 +199,55 @@ const STREAK_SIEGE = 15
 const STREAK_JUGGERNAUT = 20
 /** A second, longer air strike. Nothing beyond this changes; 25 is the top. */
 const STREAK_CARPET = 25
+
+/**
+ * The ladder as a table, because two places have to agree about it.
+ *
+ * cloudfodder, mid-match: "how am I supposed to get to the choppa?" Every rung
+ * above worked perfectly and nothing on the screen ever mentioned that they
+ * existed, so a reward was a surprise the first time and invisible after that.
+ * The HUD strip that fixes it has to name the same rungs `onOwnKill` awards,
+ * and the way to guarantee that is to have one list rather than two — a
+ * hand-written copy in the HUD is a promise that nobody will ever retune the
+ * ladder, and this ladder has already been retuned twice.
+ *
+ * `name` is what the HUD shows while you are climbing toward it. `detail` is
+ * the subtitle on the banner when you land on it, which stays longer because
+ * there is a moment to read it.
+ */
+export interface StreakRung {
+  at: number
+  name: string
+  detail: string
+}
+
+export const STREAK_LADDER: readonly StreakRung[] = [
+  { at: STREAK_REPAIR, name: 'hull repair', detail: 'hull repaired' },
+  { at: STREAK_STRIKE, name: 'air strike', detail: 'air strike inbound' },
+  { at: STREAK_OVERDRIVE, name: 'chopper', detail: 'chopper — ten seconds of gun' },
+  { at: STREAK_SIEGE, name: 'siege shells', detail: 'siege shells — two hull a hit' },
+  { at: STREAK_JUGGERNAUT, name: 'juggernaut', detail: 'juggernaut — shielded and fast' },
+  { at: STREAK_CARPET, name: 'carpet bombing', detail: 'carpet bombing' },
+]
+
+/** The rung a given streak is climbing toward, or null at the top of the ladder. */
+export function nextRung(streak: number): StreakRung | null {
+  return STREAK_LADDER.find((r) => r.at > streak) ?? null
+}
+
+/**
+ * The rung below, so the meter fills across one step rather than across the
+ * whole ladder. Nineteen kills is one away from juggernaut, and a bar that
+ * reads 76% there is measuring the wrong thing.
+ */
+export function rungFloor(streak: number): number {
+  let floor = 0
+  for (const r of STREAK_LADDER) if (r.at <= streak) floor = r.at
+  return floor
+}
+
+/** The banner subtitle for a rung, read from the same table the HUD reads. */
+const detailAt = (at: number): string => STREAK_LADDER.find((r) => r.at === at)?.detail ?? ''
 
 /**
  * How many sides there are.
@@ -997,6 +1056,10 @@ export class Game {
     if (sameRound && typeof p.b === 'number' && p.b > 0) {
       for (const rect of applyCoverBits(p.b)) this.blewUp(rect, false)
     }
+    // And the scuffs on what is still standing. Same round gate, same union,
+    // no side effect beyond the paint — a tier cannot destroy anything, so
+    // this one has nothing to announce.
+    if (sameRound && typeof p.cd === 'number' && p.cd > 0) applyCoverDamageBits(p.cd)
 
     // Relays deliver out of order often enough to matter; keep the buffer sorted.
     const b = peer.buffer
@@ -1136,12 +1199,12 @@ export class Game {
         this.tank.hp = this.maxHp
         this.repairedAt = now
         this.sound('streak')
-        this.announce(`${STREAK_REPAIR} IN A ROW`, 'hull repaired', 130)
+        this.announce(`${STREAK_REPAIR} IN A ROW`, detailAt(STREAK_REPAIR), 130)
         return
       case STREAK_STRIKE:
         this.sound('streak')
         this.callStrike(now, STRIKE_BOMBS)
-        this.announce(`${STREAK_STRIKE} IN A ROW`, 'air strike inbound', 20)
+        this.announce(`${STREAK_STRIKE} IN A ROW`, detailAt(STREAK_STRIKE), 20)
         return
       case STREAK_OVERDRIVE:
         // Puzz asked for a chopper at ten, and a chopper is not a buff — it
@@ -1150,12 +1213,12 @@ export class Game {
         // do any more is duplicate a pickup as a reward.
         this.sound('streak')
         this.boardChopper(now)
-        this.announce(`${STREAK_OVERDRIVE} IN A ROW`, 'chopper — ten seconds of gun', 20)
+        this.announce(`${STREAK_OVERDRIVE} IN A ROW`, detailAt(STREAK_OVERDRIVE), 20)
         return
       case STREAK_SIEGE:
         this.sound('streak')
         this.buffs.siegeUntil = Math.max(this.buffs.siegeUntil, now) + STREAK_SIEGE_MS
-        this.announce(`${STREAK_SIEGE} IN A ROW`, 'siege shells — two hull a hit', 300)
+        this.announce(`${STREAK_SIEGE} IN A ROW`, detailAt(STREAK_SIEGE), 300)
         return
       case STREAK_JUGGERNAUT:
         this.sound('streak')
@@ -1163,12 +1226,12 @@ export class Game {
         this.repairedAt = now
         this.buffs.shieldUntil = Math.max(this.buffs.shieldUntil, now) + STREAK_JUGGER_MS
         this.buffs.speedUntil = Math.max(this.buffs.speedUntil, now) + STREAK_JUGGER_MS
-        this.announce(`${STREAK_JUGGERNAUT} IN A ROW`, 'juggernaut — shielded and fast', 190)
+        this.announce(`${STREAK_JUGGERNAUT} IN A ROW`, detailAt(STREAK_JUGGERNAUT), 190)
         return
       case STREAK_CARPET:
         this.sound('streak')
         this.callStrike(now, CARPET_BOMBS)
-        this.announce(`${STREAK_CARPET} IN A ROW`, 'carpet bombing', 0)
+        this.announce(`${STREAK_CARPET} IN A ROW`, detailAt(STREAK_CARPET), 0)
         return
     }
     if (this.streak > STREAK_CARPET) this.announce(`${this.streak} IN A ROW`, 'unstoppable', 45)
@@ -1303,13 +1366,34 @@ export class Game {
   private bots: Bot[] = []
 
   /**
-   * Whether to fill an empty room with bots. On by default.
+   * How many practice tanks to fill an empty room with. Three by default.
    *
    * A solo player joining a string nobody else has typed is the overwhelmingly
-   * common first run of this game, and an empty arena is not a game. Off is
-   * still one click away for anyone who wants the room they actually asked for.
+   * common first run of this game, and an empty arena is not a game. Zero is
+   * still one click away for anyone who wants the room they actually asked
+   * for — and now so is seven, which is a very different practice session.
+   *
+   * A *want*, not a spawn count: `syncBots` decides what actually appears, and
+   * bots only exist while no real player is in the room.
    */
-  botsEnabled = true
+  botsWanted = BOT_COUNT
+
+  /**
+   * The old on/off view of the same setting.
+   *
+   * Kept because half a dozen suites drive `botsEnabled = false` to get a
+   * quiet arena, and because "off" is a real state a player asks for rather
+   * than an implementation detail of a counter. Setting it back to `true`
+   * restores the default rather than whatever was last picked, which is the
+   * only sensible reading of "on" when the count it replaced is gone.
+   */
+  get botsEnabled(): boolean {
+    return this.botsWanted > 0
+  }
+
+  set botsEnabled(on: boolean) {
+    this.botsWanted = on ? BOT_COUNT : 0
+  }
 
   /** Kills against bots. Deliberately not `kills` — see the note in bots.ts. */
   botKills = 0
@@ -1332,6 +1416,21 @@ export class Game {
    * somebody's side buys a truce rather than an advantage.
    */
   team = 0
+
+  /**
+   * Whether this round is a flag game.
+   *
+   * Set from the lobby's mode card rather than inferred from anything, because
+   * a mode is a thing players agree on before they join — Puzz: *"needs to be a
+   * setting that players determine before joining a game."* Inferring it from
+   * "somebody picked a side" is what the first cut of teams did, and it means
+   * nobody joining knows what game they are in.
+   *
+   * Team deathmatch and capture the flag both put you on a side; only one of
+   * them puts flags on the board, so this is a separate flag from `team`
+   * rather than a level of it.
+   */
+  flagsOn = false
 
   /**
    * The flag we are carrying, 1..5, or 0.
@@ -1368,6 +1467,15 @@ export class Game {
    * be blocked by the rule that your flag must be home.
    */
   private stepFlags(now: number): void {
+    // Not a flag round: nothing to take, and any claim we were holding is
+    // dropped rather than carried into a deathmatch.
+    if (!this.flagsOn) {
+      if (this.carrying) {
+        this.carrying = 0
+        this.claims.delete(this.identity.sessionPubkey)
+      }
+      return
+    }
     // Our own claim, refreshed while we are still holding it. Dropped the
     // moment we are dead, spectating or flying — a flag on a tank that is not
     // on the board is the dropped-flag state by another name.
@@ -1507,11 +1615,15 @@ export class Game {
    */
   private syncBots(dt: number, now: number): void {
     const humans = [...this.peers.keys()].filter((k) => !this.isBot(k))
-    const wanted = this.botsEnabled && humans.length === 0 && !this.watching ? BOT_COUNT : 0
+    const asked = Math.max(0, Math.min(MAX_BOTS, Math.floor(this.botsWanted)))
+    const wanted = humans.length === 0 && !this.watching ? asked : 0
 
     if (this.bots.length > wanted) {
-      for (const bot of this.bots) this.peers.delete(bot.session)
-      this.bots = []
+      // Retire from the end rather than clearing the lot. Dropping one bot used
+      // to delete all three and respawn two, which reads as the arena blinking
+      // — and it threw away the state of tanks the player was mid-fight with.
+      const going = this.bots.splice(wanted)
+      for (const bot of going) this.peers.delete(bot.session)
       if (wanted === 0 && humans.length > 0) this.pushFeed('a real player joined — bots stood down')
     }
     while (this.bots.length < wanted) this.bots.push(makeBot(this.bots.length, now))
@@ -2013,7 +2125,13 @@ export class Game {
     } else if (this.tank.dead) {
       if (now >= this.tank.respawnAt) this.respawn()
     } else {
-      const boost = (hasBuff(this.buffs, 'speedUntil', now) ? 1.45 : 1) * this.modifier.speed
+      // Ground before boost: crossing a breach costs you the same fraction
+      // whether or not you are running overdrive, which is what keeps rubble a
+      // decision rather than something a pickup deletes.
+      const boost =
+        (hasBuff(this.buffs, 'speedUntil', now) ? 1.45 : 1) *
+        this.modifier.speed *
+        groundSpeed(this.tank.x, this.tank.y)
       stepTank(this.tank, controls.throttle, controls.steer, controls.aim, dt, boost)
       this.stepMagazine(now, controls.reload)
       const armed = this.tank.ammo > 0 && !this.tank.reloadingUntil && now >= this.tank.reloadAt
@@ -2446,6 +2564,11 @@ export class Game {
       // round. Unioned by whoever receives it, so a tick lost on the way costs
       // nothing and a late joiner is caught up by the next one.
       ...(coverBits() ? { b: coverBits() } : {}),
+      // The scuffs, on the same terms as the holes: omitted while the board is
+      // untouched, unioned by whoever receives it, and worth sending because a
+      // crate that has taken six hits looks different to the player who put
+      // them in and to everybody else only if it travels.
+      ...(coverDamageBits() ? { cd: coverDamageBits() } : {}),
       // Absent in a free-for-all, which is most rounds, so the common tick is
       // the size it was before teams existed.
       ...(this.team ? { tm: this.team } : {}),

@@ -23,7 +23,16 @@
 import * as THREE from 'three'
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
-import { ARENA_H, ARENA_W, WALLS, coverGeneration, onLayoutChange, pointInTallWall } from './arena'
+import {
+  ARENA_H,
+  ARENA_W,
+  DAMAGE_TIERS,
+  WALLS,
+  coverGeneration,
+  damageTier,
+  onLayoutChange,
+  pointInTallWall,
+} from './arena'
 import { CHOPPER_ALT, CHOPPER_SPREAD } from './chopper'
 import { FLAG_REACH, FLAG_TEAMS, baseFor } from './flags'
 import type { CoverKind, Rect } from './arena'
@@ -939,6 +948,73 @@ function fenceParts(r: Rect, rnd: () => number, bag: ReturnType<typeof partBag>)
   bag.put(cap)
 }
 
+/**
+ * What is left when a piece of cover comes apart.
+ *
+ * Puzz: "the walls should break eventually but the remains should stay."
+ * Before this, breaking a crate deleted it — the lane opened and the board
+ * simply had a hole in it where a stack of timber had been a second earlier,
+ * which reads as a rendering fault rather than as something you did.
+ *
+ * Low on purpose, and this is a decision worth stating rather than a number
+ * that happened. `arena.ts` says out loud that there are exactly two questions
+ * anything in this game asks a rect — does it stop a tank, does it stop a
+ * shell — and that a third invites a height field nobody has designed. Rubble
+ * is *cosmetic*: shells pass over it and tanks drive across it exactly as they
+ * do over the empty ground today, so breaching still opens the lane for both
+ * and nothing about the rules moved. Keeping it under a hull's belly is what
+ * makes driving through look like driving over debris instead of like a bug.
+ *
+ * If rubble should also slow a tank, that is a genuine rules change and it
+ * wants its own issue and its own height field, not a quiet extra predicate.
+ */
+const RUBBLE_H = WALL_H * 0.2
+
+/**
+ * The hard ceiling on a pile, in world units.
+ *
+ * A cap rather than a hope, because the parts below are *rotated*: tipping a
+ * chunk that is 120 units long by a quarter of a radian lifts its far corner
+ * far above the height it was built at, and how long a chunk is depends on the
+ * rect it came from. The first cut of this looked right on a square crate and
+ * measured 59 units on a long one — a wall, exactly the thing rubble is not.
+ * Scaling the merged geometry to fit is the only version of "under a hull"
+ * that is true for every footprint on every board.
+ *
+ * Sixteen is the top of a tank's hull mesh, so a pile is never taller than the
+ * thing driving over it.
+ */
+const RUBBLE_CAP = 16
+
+function rubbleParts(r: Rect, rnd: () => number, bag: ReturnType<typeof partBag>): void {
+  const { long, short } = longAxis(r)
+  // Enough chunks to read as a pile from the board camera and few enough that
+  // eight of them on a board is not a second layout's worth of geometry.
+  const n = Math.max(4, Math.round(long / 34))
+  for (let i = 0; i < n; i++) {
+    const t = n === 1 ? 0 : i / (n - 1) - 0.5
+    const w = short * (0.24 + rnd() * 0.34)
+    const h = RUBBLE_H * (0.42 + rnd() * 0.62)
+    const g = new RoundedBoxGeometry(w * (1 + rnd()), h, w, 1, Math.min(2, h * 0.3))
+    // Tipped over rather than stacked. A pile whose pieces are all level reads
+    // as a low wall, which is the thing this is explicitly not.
+    g.rotateY(rnd() * TAU)
+    g.rotateZ((rnd() - 0.5) * 0.9)
+    g.rotateX((rnd() - 0.5) * 0.7)
+    g.translate(t * (long - w) * 0.92, h * 0.36, (rnd() - 0.5) * short * 0.62)
+    bag.put(g)
+  }
+  // Splinters flat on the ground around the footprint, which is what stops the
+  // pile from looking like it was placed there.
+  for (let i = 0; i < 3; i++) {
+    const len = short * (0.2 + rnd() * 0.3)
+    const g = new RoundedBoxGeometry(len, RUBBLE_H * 0.18, len * 0.35, 1, 1)
+    g.rotateY(rnd() * TAU)
+    g.translate((rnd() - 0.5) * long * 1.02, RUBBLE_H * 0.09, (rnd() - 0.5) * short * 1.02)
+    bag.put(g)
+  }
+}
+
 const SCENERY: Record<CoverKind, (r: Rect, rnd: () => number, bag: ReturnType<typeof partBag>) => void> = {
   rock: rockParts,
   crate: crateParts,
@@ -962,6 +1038,26 @@ function coverGeometry(r: Rect): THREE.BufferGeometry {
   const merged = mergeGeometries(bag.parts, false)!
   for (const g of bag.parts) g.dispose()
   if (!longAxis(r).horizontal) merged.rotateY(Math.PI / 2)
+  return merged
+}
+
+/**
+ * The pile that replaces it, seeded off the same rect.
+ *
+ * Same seed as the cover it came from, so the debris sits where the stack was
+ * rather than being re-scattered every time the board is rebuilt — and so two
+ * clients that rebuild at different moments see the same pile.
+ */
+function rubbleGeometry(r: Rect): THREE.BufferGeometry {
+  const bag = partBag()
+  rubbleParts(r, noise(rectSeed(r) ^ 0x9e37), bag)
+  const merged = mergeGeometries(bag.parts, false)!
+  for (const g of bag.parts) g.dispose()
+  if (!longAxis(r).horizontal) merged.rotateY(Math.PI / 2)
+  // Measured, then flattened if it needs it. See `RUBBLE_CAP`.
+  merged.computeBoundingBox()
+  const top = merged.boundingBox?.max.y ?? 0
+  if (top > RUBBLE_CAP) merged.scale(1, RUBBLE_CAP / top, 1)
   return merged
 }
 
@@ -1719,6 +1815,23 @@ export class Renderer {
    * `disposeBoard` has already freed.
    */
   private coverMeshes = new Map<number, THREE.Mesh>()
+  /**
+   * The pile each destructible rect leaves behind, by `Rect.id`.
+   *
+   * Built with the board and hidden, rather than created when something breaks:
+   * merging a geometry mid-round is a few milliseconds inside the one frame
+   * where a barrel is already exploding, and that is the worst possible frame
+   * to spend them in.
+   */
+  private rubbleMeshes = new Map<number, THREE.Mesh>()
+  /**
+   * The tier each destructible mesh is currently painted at, by `Rect.id`.
+   *
+   * So a frame where the epoch moved for some other reason — one of eight
+   * barrels going up — does not rewrite eight materials that already say the
+   * right thing.
+   */
+  private coverPainted = new Map<number, number>()
   /** Last `coverGeneration()` drawn, so the board is only walked when it moves. */
   private coverEpoch = -1
 
@@ -1857,13 +1970,34 @@ export class Renderer {
     this.coverMats = Object.values(mats)
 
     this.coverMeshes.clear()
+    this.rubbleMeshes.clear()
+    this.coverPainted.clear()
+    // Force the next `syncCover` to walk the new meshes rather than trusting a
+    // generation number that belongs to the board we just threw away.
+    this.coverEpoch = -1
     for (const w of WALLS) {
       const kind = w.kind ?? 'rock'
-      const mesh = new THREE.Mesh(coverGeometry(w), mats[kind])
+      const breakable = w.hp !== undefined && w.id !== undefined
+      // A destructible rect gets its *own* material so it can be scorched
+      // without dragging every other crate on the board down with it. Six
+      // clones on the widest layout, and they go into `coverMats` so
+      // `disposeBoard` frees them with the rest.
+      const mat = breakable ? mats[kind].clone() : mats[kind]
+      if (breakable) this.coverMats.push(mat)
+      const mesh = new THREE.Mesh(coverGeometry(w), mat)
       // Only the destructible ones are worth remembering. `syncCover` walks
       // this map rather than all sixty rects, and the map being small is what
       // makes "check the board every frame" not worth avoiding.
-      if (w.hp !== undefined && w.id !== undefined) this.coverMeshes.set(w.id, mesh)
+      if (breakable) {
+        this.coverMeshes.set(w.id!, mesh)
+        const rubble = new THREE.Mesh(rubbleGeometry(w), mat)
+        rubble.position.set(w.x + w.w / 2, 0, w.y + w.h / 2)
+        rubble.castShadow = true
+        rubble.receiveShadow = true
+        rubble.visible = false
+        this.rubbleMeshes.set(w.id!, rubble)
+        this.board.add(rubble)
+      }
       mesh.position.set(w.x + w.w / 2, 0, w.y + w.h / 2)
       // The fence is the one thing a shadow buys nothing on: it rings the
       // board, so its shadow falls outward onto the rim and off the world.
@@ -2483,7 +2617,15 @@ export class Renderer {
       this.coverEpoch = epoch
       for (const [id, mesh] of this.coverMeshes) {
         const rect = WALLS[id]
-        mesh.visible = !rect?.gone
+        const broken = !!rect?.gone
+        mesh.visible = !broken
+        const rubble = this.rubbleMeshes.get(id)
+        if (rubble) rubble.visible = broken
+        const tier = rect ? damageTier(rect) : 0
+        if (this.coverPainted.get(id) !== tier) {
+          this.coverPainted.set(id, tier)
+          this.paintDamage(mesh, tier)
+        }
       }
     }
     for (const blast of game.coverBlasts) {
@@ -2708,6 +2850,36 @@ export class Renderer {
   }
 
   /**
+   * Paint one piece of cover at a damage tier.
+   *
+   * Three things move together, because any one of them alone is ambiguous on
+   * a board seen from this far away: it gets darker (soot), rougher (the
+   * finish comes off), and it *settles* — sinking and leaning a little more
+   * with each tier. The lean is what makes the difference readable in a
+   * silhouette, which is how you see a crate you are driving past rather than
+   * one you are staring at.
+   *
+   * The base colour is read off the material the first time and kept in
+   * `userData`, so this is idempotent: painting tier 2 twice is the same as
+   * painting it once, and painting tier 0 after tier 3 puts the crate back
+   * exactly as it was. `resetCover` at a round boundary depends on that.
+   */
+  private paintDamage(mesh: THREE.Mesh, tier: number): void {
+    const mat = mesh.material as THREE.MeshStandardMaterial
+    const store = mat.userData as { baseColor?: THREE.Color; baseRough?: number }
+    if (!store.baseColor) {
+      store.baseColor = mat.color.clone()
+      store.baseRough = mat.roughness
+    }
+    const t = Math.max(0, Math.min(DAMAGE_TIERS, tier)) / DAMAGE_TIERS
+    mat.color.copy(store.baseColor).multiplyScalar(1 - 0.34 * t)
+    mat.roughness = Math.min(1, (store.baseRough ?? 0.8) + 0.18 * t)
+    mesh.position.y = -WALL_H * 0.12 * t
+    mesh.rotation.z = 0.055 * t
+    mesh.rotation.x = -0.03 * t
+  }
+
+  /**
    * The mesh for a piece of destructible cover, by `Rect.id`.
    *
    * Exists for test/barrels-browser.mjs, and it is the right thing to expose:
@@ -2718,6 +2890,51 @@ export class Renderer {
    */
   coverMeshAt(id: number): THREE.Mesh | null {
     return this.coverMeshes.get(id) ?? null
+  }
+
+  /**
+   * What the last frame actually cost the GPU, and what is resident.
+   *
+   * Exists because `npm run profile` needs it, and it is added in the same
+   * change as the thing that reads it — a counter nobody displays is not an
+   * instrument, and this repo has had two of those sitting wired up and unread
+   * for days.
+   *
+   * Draw calls and triangles are the honest half of a profile taken on a
+   * software rasteriser: they are the same numbers a real GPU would be handed,
+   * where milliseconds under swiftshader are not.
+   */
+  stats(): {
+    calls: number
+    triangles: number
+    lines: number
+    points: number
+    geometries: number
+    textures: number
+    programs: number
+  } {
+    const info = this.renderer.info
+    return {
+      calls: info.render.calls,
+      triangles: info.render.triangles,
+      lines: info.render.lines,
+      points: info.render.points,
+      geometries: info.memory.geometries,
+      textures: info.memory.textures,
+      programs: info.programs?.length ?? 0,
+    }
+  }
+
+  /**
+   * The pile a broken piece leaves behind, by `Rect.id`.
+   *
+   * Same reasoning as `coverMeshAt`, and the same trap on the other side of it:
+   * "the rubble mesh exists" is not the claim either — test/rubble.mjs measures
+   * its bounding box, because a pile that is secretly as tall as the crate it
+   * replaced is a wall, and a pile with no geometry in it is nothing at all.
+   */
+  rubbleMeshAt(id: number): THREE.Mesh | null {
+    return this.rubbleMeshes.get(id) ?? null
   }
 
   /**
@@ -3204,6 +3421,117 @@ export class Renderer {
     window.removeEventListener('resize', this.resize)
     for (const rig of this.rigs.values()) this.disposeRig(rig)
     this.disposeRig(this.you)
+    this.renderer.dispose()
+  }
+}
+
+/**
+ * The tank on the lobby, in the flesh.
+ *
+ * Puzz: "Skins should show a preview png, svg or whatever media file of what
+ * the tank will look like." A picture would be a *second* description of the
+ * tank, and second descriptions drift — the six finishes are numbers in
+ * `SKINS`, and a hand-drawn swatch of "chrome" is a promise that nobody will
+ * ever retune `metalness`. So this renders the real rig with the real
+ * `applySkin`, in its own small context. What you see in the garage is the
+ * mesh the board will draw, because it is literally the same code.
+ *
+ * Its own WebGL context, which is the cost. One extra context is well inside
+ * every browser cap, and `dispose()` gives it back the moment a match starts —
+ * a lobby preview still holding a context during a firefight is exactly the
+ * kind of thing that shows up as "the game got laggy".
+ */
+export class TankPreview {
+  private readonly renderer: THREE.WebGLRenderer
+  private readonly scene = new THREE.Scene()
+  private readonly camera: THREE.PerspectiveCamera
+  private readonly rig: TankRig
+  private raf = 0
+  private disposed = false
+
+  constructor(canvas: HTMLCanvasElement) {
+    // `preserveDrawingBuffer` so the canvas can be *read*. Without it the
+    // buffer is cleared on composite and `toDataURL` hands back a blank
+    // image — which is how a preview that renders nothing at all would sail
+    // through a test that only checked the canvas exists. It costs a copy of a
+    // 132px surface and it also makes the tank right-click-saveable, which is
+    // the closest thing to the "preview png" that was asked for.
+    this.renderer = new THREE.WebGLRenderer({
+      canvas,
+      antialias: true,
+      alpha: true,
+      preserveDrawingBuffer: true,
+    })
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace
+
+    // The same two lights the board uses, at the same colours. A preview lit
+    // differently from the arena is a preview that lies about the finish,
+    // which is the one thing this element exists to be honest about.
+    this.scene.add(new THREE.HemisphereLight(0xc6d9ea, 0x5f7742, 1.35))
+    const sun = new THREE.DirectionalLight(0xfff0d2, 2.15)
+    sun.position.set(120, 180, 90)
+    this.scene.add(sun, sun.target)
+
+    this.rig = makeTank()
+    // The ring and the name plate belong to a tank on a board with other
+    // tanks in the way; in a garage they are furniture. The driver stays —
+    // your own face in the hatch is half of why a skin is worth choosing.
+    this.rig.ring.visible = false
+    this.rig.label.visible = false
+    // Hull pips too. Three white squares floating over a tank in a garage read
+    // as damage on a tank that has not been anywhere, and they were the only
+    // thing the first framing managed to clip against the top of the canvas.
+    for (const p of this.rig.pips) p.visible = false
+    this.scene.add(this.rig.root)
+
+    // Framed by measurement, not by eye: the driver's head is a billboard at
+    // roughly y=60 and the first cut cropped it against the top of the canvas,
+    // which is a preview of a tank with no driver in it.
+    this.camera = new THREE.PerspectiveCamera(32, 1, 1, 2000)
+    this.camera.position.set(132, 96, 146)
+    this.camera.lookAt(0, 26, 0)
+
+    this.resize()
+    const spin = () => {
+      if (this.disposed) return
+      // Slow, and never stopped. A still three-quarter view hides what a
+      // finish does with a moving highlight, which is most of what separates
+      // chrome from matte.
+      this.rig.root.rotation.y += 0.006
+      this.rig.turret.rotation.y = Math.sin(this.rig.root.rotation.y * 0.7) * 0.35
+      this.renderer.render(this.scene, this.camera)
+      this.raf = requestAnimationFrame(spin)
+    }
+    spin()
+  }
+
+  /** Point it at a finish and a player colour. */
+  setSkin(skin: SkinId, hue: number): void {
+    if (this.disposed) return
+    applySkin(this.rig, SKINS[skin] ?? SKINS[DEFAULT_SKIN], hue)
+  }
+
+  /** Who is driving: the callsign's initials, or the npub's picture once it lands. */
+  setDriver(name: string, picture: string | null, hue: number): void {
+    if (this.disposed) return
+    this.rig.avatar.set(name, picture, hue)
+  }
+
+  resize(): void {
+    if (this.disposed) return
+    const el = this.renderer.domElement
+    const w = el.clientWidth || 280
+    const h = el.clientHeight || 170
+    this.renderer.setSize(w, h, false)
+    this.camera.aspect = w / Math.max(1, h)
+    this.camera.updateProjectionMatrix()
+  }
+
+  dispose(): void {
+    if (this.disposed) return
+    this.disposed = true
+    cancelAnimationFrame(this.raf)
     this.renderer.dispose()
   }
 }
