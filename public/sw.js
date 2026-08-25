@@ -62,13 +62,13 @@ self.addEventListener('fetch', (e) => {
   // was a URL nothing in this app ever requests. Both misses landed on
   // `Response.error()`.
   //
-  // That it *looked* fine is the interesting part. With a worker registered,
-  // its `fetch()` still reads Chrome's ordinary HTTP cache, so an offline
-  // navigation was quietly served from there and every URL worked. Wiping
-  // Cache Storage entirely changed nothing, which is what proved the fallback
-  // was dead code rather than a working feature. The HTTP cache is evicted
-  // under pressure and honours `Cache-Control`; it is not what an installed app
-  // should be resting on days later.
+  // That it *looked* fine for so long is the interesting part, and the reason
+  // is in the harness rather than in the browser: Chrome's offline emulation is
+  // scoped to the target it is sent to, and a service worker is its own target.
+  // With the page switched to offline the worker went on fetching from a server
+  // that was still running, so every URL loaded and an unreachable fallback
+  // looked like a working offline mode. Only killing the origin outright shows
+  // the difference — see the note at the top of test/pwa.mjs.
   const navigation = req.mode === 'navigate'
   const key = navigation ? SHELL : req
 
