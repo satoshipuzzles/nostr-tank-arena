@@ -65,7 +65,7 @@ import {
   underFire,
 } from './chopper'
 import type { Rect } from './arena'
-import type { Bot } from './bots'
+import type { Bot, BotTarget } from './bots'
 import {
   LOB_BLAST,
   LOB_CHARGE_MS,
@@ -269,14 +269,37 @@ const STREAK_JUGGER_MS = 12_000
  * radius — so two thirds of the lane was safe ground and a tank standing still
  * in the middle of the strike usually took nothing at all. It looked
  * spectacular and did nothing, which is the worst thing a kill streak can be.
- * At fourteen the gaps close and standing in the lane is fatal, which is what
- * makes the warning stripe and the two seconds of siren mean something.
+ * Fourteen was closer and still not closed. The run sweeps `ARENA_W + 2R` =
+ * 1728 units across `n - 1` gaps, so fourteen bombs sit 133 apart against a
+ * 128-unit blast diameter — five units of safe ground every 133, and a tank
+ * parked in one takes nothing at all. Found by a test that put a bot at x=400,
+ * which lands in exactly such a gap: bombs at 335 and 468, both 65+ away.
+ *
+ * Fifteen puts them 123 apart, which overlaps. Now the line really is
+ * continuous, standing in it is fatal, and the warning stripe and the two
+ * seconds of siren mean what the rest of this comment always claimed.
  */
-const STRIKE_BOMBS = 14
+const STRIKE_BOMBS = 15
 const CARPET_BOMBS = 22
 /** Seconds between one bomb and the next, and the hull each one takes off. */
 const STRIKE_STEP_MS = 190
 const STRIKE_DAMAGE = 2
+/**
+ * How long the siren and the lane stripe run before the first bomb lands.
+ *
+ * The comment above promises "two seconds of siren" and it was not true: the
+ * payload carried `t0 = now`, and bomb zero fires at `t0 + 0 * STRIKE_STEP_MS`
+ * — so the warning and the first explosion arrived on the same frame and the
+ * lane lit up under a tank that was already dead. Caught by P.F. Chang reading
+ * the diff.
+ *
+ * Added to `t0` on the caller rather than subtracted on the receiver, so it
+ * rides the payload and every client walks the same line from the same moment.
+ * It also matters more now than it did: with bots finally taking strike damage,
+ * a warning nobody can act on is the difference between a reward and a coin
+ * toss.
+ */
+const STRIKE_LEAD_MS = 2_000
 /**
  * How close a bomb has to land.
  *
@@ -1255,7 +1278,9 @@ export class Game {
   private callStrike(now: number, bombs: number): void {
     const y = this.tank.y < ARENA_H / 2 ? ARENA_H * 0.72 : ARENA_H * 0.28
     const dir: 1 | -1 = this.tank.x < ARENA_W / 2 ? 1 : -1
-    const payload: StrikePayload = { t0: now, y, dir, n: bombs, d: STRIKE_DAMAGE }
+    // The run starts two seconds from now, not now — see `STRIKE_LEAD_MS`.
+    const t0 = now + STRIKE_LEAD_MS
+    const payload: StrikePayload = { t0, y, dir, n: bombs, d: STRIKE_DAMAGE }
     const id = randomId()
     // Ours runs locally from the same numbers rather than waiting for the relay
     // to echo it back — otherwise the person who called it watches their own
@@ -1263,7 +1288,11 @@ export class Game {
     this.strikes.set(id, {
       id,
       owner: this.identity.sessionPubkey,
-      t0: now,
+      // `t0`, not `now`. The local copy has to walk the same line from the same
+      // moment as every receiver, or the caller watches their own strike land
+      // two seconds before anybody else sees it — which is exactly the kind of
+      // divergence the payload exists to prevent.
+      t0,
       y,
       dir,
       n: bombs,
@@ -1276,6 +1305,18 @@ export class Game {
   private onStrike(e: Event): void {
     const p = parsePayload<StrikePayload>(e.content)
     if (!p || typeof p.t0 !== 'number' || typeof p.y !== 'number') return
+    // Our own strike, echoed back by a relay. Every other handler guards
+    // against this and this one did not, and the consequences were much worse
+    // than a duplicate: `ensurePeer` created a peer *for ourselves*, which put
+    // a second copy of us on the scoreboard, and — because a room with a human
+    // in it stands the practice tanks down — **deleted all three bots the
+    // moment a solo player earned an air strike.** The board emptied, the
+    // bombs fell on nothing, and the reward looked broken because by the time
+    // it landed there was nobody left to kill.
+    //
+    // We already run our own strike locally from the same numbers; see
+    // `callStrike`. There is nothing here to learn from the echo.
+    if (e.pubkey === this.identity.sessionPubkey) return
     if (this.strikes.has(e.id)) return
     const peer = this.ensurePeer(e.pubkey)
     peer.lastSeen = performance.now()
@@ -1315,6 +1356,17 @@ export class Game {
         const mine = strike.owner === this.identity.sessionPubkey
         this.blasts.push({ x, y: strike.y, mine })
         this.sound('blast', { at: { x, y: strike.y } })
+        // Bots are in the lane like anybody else.
+        //
+        // They were not, and it is the whole reason Puzz reported the air
+        // strike as not working: this block only ever touched `this.tank`,
+        // because it was written before bots existed and never learned about
+        // them. A solo player earned a strike at five kills, fourteen bombs
+        // walked the board and nothing died. The chopper reads so much better
+        // for exactly this reason — `rakeBots` came after bots and does hit
+        // them — which is the tell that this was an omission rather than a
+        // balance decision.
+        this.strikeBots(x, strike.y, strike.damage, strike.owner)
         if (mine || this.watching || this.tank.dead) continue
         // A teammate's strike walks over us. The lane is picked away from the
         // caller already; on a team that exemption has to cover the side, or a
@@ -1644,7 +1696,15 @@ export class Game {
     this.lastTankAt = { x: this.tank.x, y: this.tank.y }
 
     for (const bot of this.bots) {
-      const action = stepBot(bot, target, dt, now, this.maxHp, this.modifier.reload)
+      // Who this one is actually fighting.
+      //
+      // In a free-for-all every bot hunts the player and that is the whole
+      // room. In a team mode a bot on our side has to hunt something else, or
+      // "your teammate" is a tank that shoots you and the mode is worse than
+      // not having teams at all. So a bot takes the nearest live thing that is
+      // not on its side, which is the player for the ones against us and an
+      // enemy bot for the one with us.
+      const action = stepBot(bot, this.enemyFor(bot, target, dt), dt, now, this.maxHp, this.modifier.reload)
       if (action.fire !== null) this.fireBot(bot, action.fire)
 
       // Straight into the peer record the renderer reads. No interpolation and
@@ -1667,9 +1727,21 @@ export class Game {
       peer.view.shield = false
       peer.view.chopperUntil = 0
       peer.view.chopperAt = null
-      // Bots take the side of whoever they are practising against, so a player
-      // on a team is not suddenly fighting three tanks that are all on it too.
-      peer.view.team = 0
+      // A side each, in team modes.
+      //
+      // They used to be hard-coded to nobody's side, on the reasoning that a
+      // player who picked Red should not find themselves fighting three tanks
+      // that were all on Red too. The reasoning was right and the conclusion
+      // was wrong: with every bot on no side, friendly fire never engages and
+      // team deathmatch plays exactly like a deathmatch, which is what Puzz
+      // reported as "team death match isnt really working".
+      //
+      // So the first bot joins us and the rest take the next side along. One
+      // teammate not to shoot and two opponents to shoot is the smallest thing
+      // that is recognisably a team game, and it means the mode reads
+      // differently the moment you pick it rather than only when a second
+      // person turns up.
+      peer.view.team = this.team ? this.botTeam(bot) : 0
     }
   }
 
@@ -1950,6 +2022,108 @@ export class Game {
     }
   }
 
+  /**
+   * Bots caught by one bomb of an air strike or a carpet run.
+   *
+   * Same exemptions as a player takes: the caller is not hit by their own
+   * strike, and a teammate is not hit by a teammate's. Bots on our side are
+   * spared for the second reason, which is what makes a team mode against them
+   * a team mode rather than a free-for-all with extra paperwork.
+   */
+  private strikeBots(x: number, y: number, damage: number, owner: string): void {
+    for (const bot of this.bots) {
+      if (bot.tank.dead) continue
+      const peerTeam = this.peers.get(bot.session)?.view.team ?? 0
+      if (peerTeam && this.teamOf(owner) === peerTeam) continue
+      const dx = bot.tank.x - x
+      const dy = bot.tank.y - y
+      if (dx * dx + dy * dy > STRIKE_RADIUS * STRIKE_RADIUS) continue
+      bot.tank.hp -= damage
+      if (bot.tank.hp > 0) {
+        this.sound('hit', { at: { x: bot.tank.x, y: bot.tank.y } })
+        continue
+      }
+      killBot(bot, performance.now(), this.modifier.respawn)
+      this.sound('death', { at: { x: bot.tank.x, y: bot.tank.y } })
+      if (owner === this.identity.sessionPubkey) {
+        this.botKills++
+        this.sound('kill')
+        this.onOwnKill()
+        this.pushFeed(`you killed ${bot.name}`)
+      }
+    }
+  }
+
+  /**
+   * The nearest thing this bot is allowed to shoot.
+   *
+   * `null` when there is nothing — a bot alone on its side with everybody else
+   * dead wanders, which `stepBot` already handles and is the right behaviour
+   * rather than a bot that stares at a corpse.
+   *
+   * Velocity matters here: the bot's aim leads its target, so a target handed
+   * over without one is a target it shoots behind. The player's comes from the
+   * measured delta; a bot's comes from its own heading and throttle, which is
+   * exact because we are the ones stepping it.
+   */
+  private enemyFor(bot: Bot, player: BotTarget | null, dt: number): BotTarget | null {
+    const side = this.peers.get(bot.session)?.view.team ?? 0
+    const options: BotTarget[] = []
+    // The player, unless this bot is on our side.
+    if (player && !(side && side === this.team)) options.push(player)
+    for (const other of this.bots) {
+      if (other === bot || other.tank.dead) continue
+      const theirs = this.peers.get(other.session)?.view.team ?? 0
+      // In a free-for-all bots do not fight each other — three bots brawling in
+      // a corner is a room the player is not in. They only turn on each other
+      // when sides make them enemies.
+      if (!side || !theirs || theirs === side) continue
+      options.push({
+        x: other.tank.x,
+        y: other.tank.y,
+        vx: Math.cos(other.tank.hull) * 175,
+        vy: Math.sin(other.tank.hull) * 175,
+        dead: other.tank.dead,
+      })
+    }
+    if (!options.length) return null
+    let best = options[0]
+    let bestD = Infinity
+    for (const o of options) {
+      const d = (o.x - bot.tank.x) ** 2 + (o.y - bot.tank.y) ** 2
+      if (d < bestD) {
+        bestD = d
+        best = o
+      }
+    }
+    void dt
+    return best
+  }
+
+  /**
+   * Which side a bot takes, given the side we are on.
+   *
+   * By position in the list rather than at random, so a bot does not change
+   * sides between frames — and stable across a round, because the list is only
+   * rebuilt when the room empties or the count changes.
+   *
+   * The first is with us; the rest are against. With three bots that is a duo
+   * against a pair, which is the shape Puzz asked for when he said duos.
+   */
+  private botTeam(bot: Bot): number {
+    const i = this.bots.indexOf(bot)
+    if (i <= 0) return this.team
+    // The next side along, wrapping, and never back onto ours.
+    const other = (this.team % TEAMS) + 1
+    return other === this.team ? (this.team % TEAMS) + 2 : other
+  }
+
+  /** Which side a session is on, ours included. 0 for nobody's. */
+  private teamOf(session: string): number {
+    if (session === this.identity.sessionPubkey) return this.team
+    return this.peers.get(session)?.view.team ?? 0
+  }
+
   /** Everything in the crater that is a bot. Same rules as `hitBot`. */
   private blastBots(shell: Shell): void {
     const r = LOB_BLAST + TANK_RADIUS
@@ -1983,10 +2157,32 @@ export class Game {
    * the feed so the player can see it happened.
    */
   private hitBot(shell: Shell): boolean {
-    if (this.isBot(shell.owner)) return false
+    const fromBot = this.isBot(shell.owner)
     for (const bot of this.bots) {
       if (bot.tank.dead) continue
+      if (bot.session === shell.owner) continue
+      // A bot's stray round only troubles another bot when sides make them
+      // enemies. This used to be a flat "bot shells never touch bots", which
+      // had to go so friendly fire could be decided per side — but dropping it
+      // outright meant that in a *free-for-all*, where every bot is hunting the
+      // player, their crossfire quietly killed each other off in the corner.
+      // Caught by a control in test/rewards.mjs that expected an untouched bot
+      // and found one on one hull.
+      if (fromBot) {
+        const mine = this.peers.get(bot.session)?.view.team ?? 0
+        const theirs = this.peers.get(shell.owner)?.view.team ?? 0
+        if (!mine || !theirs || mine === theirs) continue
+      }
       if (!shellHits(shell, bot.tank.x, bot.tank.y)) continue
+      // A bot on the shooter's side eats the shell and takes nothing, exactly
+      // like a player teammate — same rule, so a teammate is a teammate whoever
+      // is driving it. The shell is still consumed rather than passed through,
+      // or a shot aimed past a friendly bot would kill whoever is behind it.
+      const side = this.peers.get(bot.session)?.view.team ?? 0
+      if (side && this.teamOf(shell.owner) === side) {
+        this.shells.delete(shell.id)
+        return true
+      }
       this.shells.delete(shell.id)
       bot.tank.hp -= shell.damage
       if (bot.tank.hp > 0) {

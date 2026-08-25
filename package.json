@@ -40,7 +40,8 @@
     "test:streak": "node test/streak.mjs",
     "test:hub": "node test/hub.mjs",
     "test:rubble": "node test/rubble.mjs",
-    "profile": "node test/profile.mjs"
+    "profile": "node test/profile.mjs",
+    "test:rewards": "node test/rewards.mjs"
   },
   "dependencies": {
     "nostr-tools": "^2.10.4",

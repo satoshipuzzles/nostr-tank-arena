@@ -37,8 +37,17 @@
 
 import { ARENA_H, ARENA_W } from './arena'
 
-/** How long you are up there. Puzz's number. */
-export const CHOPPER_MS = 10_000
+/**
+ * How long you are up there.
+ *
+ * Twenty seconds, doubled from ten at Puzz's request after he called it "the
+ * funniest thing ever". Worth watching: twenty seconds is a long time for a
+ * tank to be out of play, and the tank being off the board is the whole cost
+ * that balances being untouchable. If it starts reading as too long, the honest
+ * lever is `CHOPPER_HIT_MS` rather than clawing the duration back — a shorter
+ * reward that kills faster is a worse trade than a long one you have to aim.
+ */
+export const CHOPPER_MS = 20_000
 
 /**
  * How fast the chopper crosses the board, in px/s.
