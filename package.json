@@ -38,7 +38,8 @@
     "test:teams": "node test/teams.mjs",
     "test:streak": "node test/streak.mjs",
     "test:hub": "node test/hub.mjs",
-    "test:rubble": "node test/rubble.mjs"
+    "test:rubble": "node test/rubble.mjs",
+    "profile": "node test/profile.mjs"
   },
   "dependencies": {
     "nostr-tools": "^2.10.4",
