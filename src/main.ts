@@ -1284,6 +1284,10 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     // one piece of shared state that is not derived from the block hash, so a
     // suite has to be able to read the actual rects rather than infer them.
     ;(window as unknown as { __arena: unknown }).__arena = arena
+    // The room-shape constants, for test/rooms suites. `SEATS` is a lobby
+    // number rather than a rule, and a suite has to be able to read the one the
+    // build actually shipped rather than the one it was written against.
+    ;(window as unknown as { __rooms: unknown }).__rooms = { SEATS }
 
     // Faces on the tanks. The renderer asks by pubkey and never learns what a
     // relay is; `Profiles.get` queues an unknown npub for the next batch and
