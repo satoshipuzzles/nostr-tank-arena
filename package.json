@@ -27,7 +27,8 @@
     "test:fpv": "node test/fpv.mjs",
     "test:lob": "node test/lob.mjs",
     "test:bots": "node test/bots.mjs",
-    "test:bots-browser": "node test/bots-browser.mjs"
+    "test:bots-browser": "node test/bots-browser.mjs",
+    "test:pwa": "node test/pwa.mjs"
   },
   "dependencies": {
     "nostr-tools": "^2.10.4",

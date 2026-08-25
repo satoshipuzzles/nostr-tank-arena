@@ -12,12 +12,29 @@
 // old JavaScript long after a deploy, and this project deploys several times a
 // day. Fresh when the network answers, last-known-good when it does not.
 
-const CACHE = 'tank-arena-v1'
+const CACHE = 'tank-arena-v2'
+
+/**
+ * The one cache key every navigation is stored under.
+ *
+ * A navigation to `/?room=lobby` and one to `/?room=cornychat` are the same
+ * document, and this game *rewrites the address bar* to `?room=...` the moment
+ * you join — so the URL somebody adds to their home screen is almost never the
+ * bare origin. Keyed by request URL, the cache would hold one entry per room
+ * anybody had ever opened and still miss on the next invite link.
+ */
+const SHELL = './'
 
 self.addEventListener('install', (e) => {
-  // No precache list. The build hashes its filenames, so a list written here is
-  // wrong the moment vite runs — the runtime handler below fills the cache with
-  // whatever this build actually asked for.
+  // Precache the shell — one entry, no hashed filenames in it.
+  //
+  // "No precache list, the runtime handler will fill it" was the previous plan
+  // and it does not survive contact with a first visit: the worker is not
+  // controlling the page that installed it, so nothing on that visit goes
+  // through the fetch handler and nothing lands in the cache. A player who
+  // opens the game once, adds it to their home screen and gets on a plane had
+  // an empty cache the whole time.
+  e.waitUntil(caches.open(CACHE).then((c) => c.add(SHELL)))
   self.skipWaiting()
 })
 
@@ -36,15 +53,41 @@ self.addEventListener('fetch', (e) => {
   // — arbitrary URLs on arbitrary hosts, which is exactly what should not end
   // up in a cache this file is responsible for evicting.
   if (req.method !== 'GET' || new URL(req.url).origin !== self.location.origin) return
+
+  // A navigation is stored and retrieved under `SHELL`, never under its own
+  // URL. The old code did the obvious thing — `cache.put(req)` then
+  // `caches.match(req)` — and it could not work: the query string is part of a
+  // cache key, so the only room URL that ever hit was the exact one you had
+  // already opened, and the `/index.html` written as the last-resort fallback
+  // was a URL nothing in this app ever requests. Both misses landed on
+  // `Response.error()`.
+  //
+  // That it *looked* fine is the interesting part. With a worker registered,
+  // its `fetch()` still reads Chrome's ordinary HTTP cache, so an offline
+  // navigation was quietly served from there and every URL worked. Wiping
+  // Cache Storage entirely changed nothing, which is what proved the fallback
+  // was dead code rather than a working feature. The HTTP cache is evicted
+  // under pressure and honours `Cache-Control`; it is not what an installed app
+  // should be resting on days later.
+  const navigation = req.mode === 'navigate'
+  const key = navigation ? SHELL : req
+
   e.respondWith(
     fetch(req)
       .then((res) => {
-        const copy = res.clone()
-        void caches.open(CACHE).then((c) => c.put(req, copy))
+        // Only store a real answer. Caching a 404 or a 502 under the shell key
+        // is how a bad deploy becomes permanent for everybody who was unlucky.
+        if (res.ok && res.type === 'basic') {
+          const copy = res.clone()
+          void caches.open(CACHE).then((c) => c.put(key, copy))
+        }
         return res
       })
       .catch(() =>
-        caches.match(req).then((hit) => hit ?? caches.match('/index.html').then((i) => i ?? Response.error())),
+        caches
+          .match(key)
+          .then((hit) => hit ?? (navigation ? undefined : caches.match(SHELL)))
+          .then((hit) => hit ?? Response.error()),
       ),
   )
 })
