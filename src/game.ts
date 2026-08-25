@@ -43,7 +43,16 @@ import {
   roomTag,
 } from './protocol'
 import { BOT_COUNT, killBot, makeBot, stepBot } from './bots'
-import { WALLS, applyCoverBits, coverBits, damageCover, explodes, resetCover } from './arena'
+import {
+  WALLS,
+  applyCoverBits,
+  applyCoverDamageBits,
+  coverBits,
+  coverDamageBits,
+  damageCover,
+  explodes,
+  resetCover,
+} from './arena'
 import {
   CHOPPER_DAMAGE,
   CHOPPER_HIT_MS,
@@ -1027,6 +1036,10 @@ export class Game {
     if (sameRound && typeof p.b === 'number' && p.b > 0) {
       for (const rect of applyCoverBits(p.b)) this.blewUp(rect, false)
     }
+    // And the scuffs on what is still standing. Same round gate, same union,
+    // no side effect beyond the paint — a tier cannot destroy anything, so
+    // this one has nothing to announce.
+    if (sameRound && typeof p.cd === 'number' && p.cd > 0) applyCoverDamageBits(p.cd)
 
     // Relays deliver out of order often enough to matter; keep the buffer sorted.
     const b = peer.buffer
@@ -2370,6 +2383,11 @@ export class Game {
       // round. Unioned by whoever receives it, so a tick lost on the way costs
       // nothing and a late joiner is caught up by the next one.
       ...(coverBits() ? { b: coverBits() } : {}),
+      // The scuffs, on the same terms as the holes: omitted while the board is
+      // untouched, unioned by whoever receives it, and worth sending because a
+      // crate that has taken six hits looks different to the player who put
+      // them in and to everybody else only if it travels.
+      ...(coverDamageBits() ? { cd: coverDamageBits() } : {}),
       // Absent in a free-for-all, which is most rounds, so the common tick is
       // the size it was before teams existed.
       ...(this.team ? { tm: this.team } : {}),

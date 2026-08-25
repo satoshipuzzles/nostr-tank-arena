@@ -57,6 +57,17 @@ export interface Rect {
   hp?: number
   /** Blown up. Still in `WALLS`, and skipped by everything that collides. */
   gone?: boolean
+  /**
+   * How beaten up this looks: 0 intact, 3 about to go.
+   *
+   * A *display* tier rather than a second copy of `hp`, and the difference
+   * matters. `hp` is local — every client re-simulates every shell, and a
+   * client that missed one has a healthier crate than everybody else. `dmg` is
+   * the highest tier anybody has reported, unioned off the state tick exactly
+   * as `gone` is, so the board looks the same on every screen even where the
+   * local hit counts have drifted apart. It only ever goes up inside a round.
+   */
+  dmg?: number
 }
 
 /**
@@ -111,6 +122,51 @@ const DESTRUCTIBLE: ReadonlyMap<CoverKind, number> = new Map<CoverKind, number>(
   ['barrel', 3],
   ['crate', 8],
 ])
+
+/**
+ * How many steps of visible damage a piece of cover goes through.
+ *
+ * Puzz: "we want to see them get messed up with each shot and eventual break
+ * but not completely disappear."
+ *
+ * Three, and they are spaced by *fraction of hp lost* rather than by hits, so
+ * one number covers a three-hit barrel and an eight-hit crate without either
+ * being special-cased. A crate reaches the first tier on the first hit, the
+ * second at three, and the third at six — which means the answer to "how many
+ * more shells does this need" is on the board rather than in the player's
+ * memory, and a crate somebody else has been working on is legible the moment
+ * you drive past it.
+ */
+export const DAMAGE_TIERS = 3
+
+/** Bits per piece on the wire. Three tiers plus intact fits in three. */
+const TIER_BITS = 3
+/**
+ * How many pieces the damage mask can carry.
+ *
+ * `31 / 3` — the ceiling is what a JavaScript bitwise operator holds, same as
+ * the destroyed mask above it. The widest layout has eight breakables, so
+ * there is room, but this one is tighter than the 31 that mask gets and it is
+ * worth knowing where the wall is before somebody designs a board with a dozen
+ * crates on it.
+ */
+const TIER_SLOTS = Math.floor(31 / TIER_BITS)
+
+/**
+ * The tier a rect's own hit count implies.
+ *
+ * Local, and therefore not authoritative on its own — see `Rect.dmg`.
+ */
+function tierFromHp(r: Rect): number {
+  const full = r.kind === undefined ? undefined : DESTRUCTIBLE.get(r.kind)
+  if (full === undefined || full <= 0 || r.hp === undefined) return 0
+  if (r.gone) return DAMAGE_TIERS
+  const lost = 1 - r.hp / full
+  return Math.max(0, Math.min(DAMAGE_TIERS, Math.ceil(lost * DAMAGE_TIERS)))
+}
+
+/** What to draw: the worst anybody has seen, never less than our own count. */
+export const damageTier = (r: Rect): number => Math.max(r.dmg ?? 0, tierFromHp(r))
 
 /** Kept as a name because the blast is a barrel's alone. See `explodes`. */
 export const BARREL_HP = 3
@@ -618,9 +674,16 @@ export function damageCover(id: number, n = 1): boolean {
   if (!w || w.gone || w.hp === undefined) return false
   w.hp -= n
   coverEpoch++
-  if (w.hp > 0) return false
+  if (w.hp > 0) {
+    // Raised, never lowered. Two clients whose hit counts have drifted must
+    // still draw the same crate, and the one that has seen more damage is the
+    // one telling the truth about how much this thing has taken.
+    w.dmg = Math.max(w.dmg ?? 0, tierFromHp(w))
+    return false
+  }
   w.hp = 0
   w.gone = true
+  w.dmg = DAMAGE_TIERS
   return true
 }
 
@@ -669,12 +732,58 @@ export function resetCover(): void {
   for (const w of BREAKABLE) {
     const full = w.kind === undefined ? undefined : DESTRUCTIBLE.get(w.kind)
     if (full === undefined) continue
-    if (!w.gone && w.hp === full) continue
+    if (!w.gone && w.hp === full && !w.dmg) continue
     w.gone = false
     w.hp = full
+    w.dmg = 0
     changed = true
   }
   if (changed) coverEpoch++
+}
+
+/**
+ * How chewed up each piece of cover is, as a mask over `BREAKABLE`.
+ *
+ * A **thermometer** code — tier 2 is `0b011`, tier 3 is `0b111` — three bits
+ * per piece, and that encoding is the whole point. It makes `|` mean `max`, so
+ * this mask unions exactly like the destroyed one above: order-independent,
+ * idempotent, impossible to walk backwards, and self-healing for somebody who
+ * joins at minute six. A plain two-bit integer per piece would need a
+ * per-field maximum on receipt, and the moment a merge is not a single `|`
+ * somebody eventually writes `=` instead.
+ *
+ * It rides in its own field rather than being packed alongside `b`. A client
+ * already deployed reads `b` and ignores anything it does not know, so it
+ * keeps working and simply does not draw the scuffs — where widening `b` would
+ * have made an old client read "this crate is damaged" as "these three crates
+ * are destroyed" and blank cover that is still standing.
+ */
+export function coverDamageBits(): number {
+  let bits = 0
+  for (let i = 0; i < BREAKABLE.length && i < TIER_SLOTS; i++) {
+    const tier = damageTier(BREAKABLE[i])
+    if (tier > 0) bits |= ((1 << tier) - 1) << (i * TIER_BITS)
+  }
+  return bits
+}
+
+/** Union somebody else's damage into ours. Returns true if anything changed. */
+export function applyCoverDamageBits(bits: number): boolean {
+  let changed = false
+  for (let i = 0; i < BREAKABLE.length && i < TIER_SLOTS; i++) {
+    const field = (bits >> (i * TIER_BITS)) & ((1 << TIER_BITS) - 1)
+    // Popcount of a thermometer field is the tier it encodes. A field with a
+    // gap in it — 0b101 — is not something this encoder can produce, and
+    // counting bits rather than matching patterns means a garbled one lands on
+    // a real tier instead of being thrown away or trusted whole.
+    let tier = 0
+    for (let b = 0; b < TIER_BITS; b++) if (field & (1 << b)) tier++
+    if (tier <= (BREAKABLE[i].dmg ?? 0)) continue
+    BREAKABLE[i].dmg = Math.min(DAMAGE_TIERS, tier)
+    changed = true
+  }
+  if (changed) coverEpoch++
+  return changed
 }
 
 /** Union somebody else's mask into ours. Returns the barrels this took out. */
@@ -684,6 +793,7 @@ export function applyCoverBits(bits: number): Rect[] {
     if (!(bits & (1 << i)) || BREAKABLE[i].gone) continue
     BREAKABLE[i].hp = 0
     BREAKABLE[i].gone = true
+    BREAKABLE[i].dmg = DAMAGE_TIERS
     taken.push(BREAKABLE[i])
   }
   if (taken.length) coverEpoch++
