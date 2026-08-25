@@ -23,7 +23,7 @@
 import * as THREE from 'three'
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
-import { ARENA_H, ARENA_W, WALLS, onLayoutChange, pointInTallWall } from './arena'
+import { ARENA_H, ARENA_W, WALLS, coverGeneration, onLayoutChange, pointInTallWall } from './arena'
 import type { CoverKind, Rect } from './arena'
 import type { Game, Peer } from './game'
 import { LOB_APEX, LOB_BLAST, MAX_HP, RELOAD, TANK_RADIUS, shellHeight } from './sim'
@@ -1447,6 +1447,18 @@ export class Renderer {
   private lastRepairAt = 0
   /** One group per live pickup, keyed by the id the schedule derived. */
   private pickupMeshes = new Map<string, THREE.Group>()
+  /**
+   * Destructible cover, by `Rect.id`, so a barrel that is gone can come off.
+   *
+   * Rebuilt with the board. A layout swap replaces every mesh in it, which is
+   * why this is cleared in `buildBoard` rather than pruned here — a stale entry
+   * would be a mesh belonging to a previous board, holding a reference that
+   * `disposeBoard` has already freed.
+   */
+  private coverMeshes = new Map<number, THREE.Mesh>()
+  /** Last `coverGeneration()` drawn, so the board is only walked when it moves. */
+  private coverEpoch = -1
+
   /** Shared across every mesh of a kind, so `buildBoard` disposes them itself. */
   private coverMats: THREE.MeshStandardMaterial[] = []
 
@@ -1581,9 +1593,14 @@ export class Renderer {
     const mats = coverMaterials()
     this.coverMats = Object.values(mats)
 
+    this.coverMeshes.clear()
     for (const w of WALLS) {
       const kind = w.kind ?? 'rock'
       const mesh = new THREE.Mesh(coverGeometry(w), mats[kind])
+      // Only the destructible ones are worth remembering. `syncCover` walks
+      // this map rather than all sixty rects, and the map being small is what
+      // makes "check the board every frame" not worth avoiding.
+      if (w.hp !== undefined && w.id !== undefined) this.coverMeshes.set(w.id, mesh)
       mesh.position.set(w.x + w.w / 2, 0, w.y + w.h / 2)
       // The fence is the one thing a shadow buys nothing on: it rings the
       // board, so its shadow falls outward onto the rim and off the world.
@@ -1947,6 +1964,8 @@ export class Renderer {
       })
     }
 
+    this.syncCover(game, now)
+
     if (cockpit) this.placeEye(game)
 
     this.confetti.update(dt)
@@ -2155,6 +2174,65 @@ export class Renderer {
    * the three in front of you dies to one more shell is the whole feature, and
    * none of them are inside your lens.
    */
+  /**
+   * Barrels that have been shot away, and the bang when one goes.
+   *
+   * Gated on `coverGeneration()` so the common frame — nothing destroyed —
+   * costs one integer compare. The blast list is walked every frame because it
+   * is almost always empty and each entry is claimed once by timestamp; a
+   * generation cannot carry it, because two barrels can go in the same frame
+   * and a counter would only say "something changed".
+   */
+  private syncCover(game: Game, now: number): void {
+    void now
+    const epoch = coverGeneration()
+    if (epoch !== this.coverEpoch) {
+      this.coverEpoch = epoch
+      for (const [id, mesh] of this.coverMeshes) {
+        const rect = WALLS[id]
+        mesh.visible = !rect?.gone
+      }
+    }
+    for (const blast of game.coverBlasts) {
+      if (blast.at <= this.lastCoverBlast) continue
+      this.lastCoverBlast = blast.at
+      // Orange and upward, so it reads as a barrel rather than as a tank dying
+      // — a death is grey confetti thrown outward at ground level.
+      this.confetti.burst(blast.x, blast.y, blast.loud ? 26 : 12, 28, {
+        speed: 150,
+        up: 220,
+        y: 26,
+        size: 1.1,
+        life: 0.75,
+      })
+      for (let i = 0; i < (blast.loud ? 14 : 6); i++) {
+        this.plumes.puff(
+          blast.x + (Math.random() - 0.5) * 46,
+          20 + Math.random() * 60,
+          blast.y + (Math.random() - 0.5) * 46,
+          i < 6,
+        )
+      }
+      if (blast.loud) this.shake = Math.max(this.shake, 14)
+    }
+  }
+
+  /** Timestamp of the last barrel blast drawn, so each one is claimed once. */
+  private lastCoverBlast = 0
+
+  /**
+   * The mesh for a piece of destructible cover, by `Rect.id`.
+   *
+   * Exists for test/barrels-browser.mjs, and it is the right thing to expose:
+   * the claim worth checking is not "the rect says gone", it is that the mesh
+   * left the board. This codebase has shipped meshes that were `visible = true`
+   * on every frame for weeks while drawn inside the floor, and no assertion
+   * about game state could have told the difference.
+   */
+  coverMeshAt(id: number): THREE.Mesh | null {
+    return this.coverMeshes.get(id) ?? null
+  }
+
   private wear(rig: TankRig, v: TankView, now: number, dt: number, inside = false): void {
     const ratio = v.maxHp > 0 ? Math.max(0, v.hp) / v.maxHp : 1
     if (ratio >= 1) {

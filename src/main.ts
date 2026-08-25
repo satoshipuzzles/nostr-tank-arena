@@ -1,4 +1,5 @@
 import './style.css'
+import * as arena from './arena'
 import { layoutForBlock, layoutName, setLayout } from './arena'
 import { Sfx } from './audio'
 import { BlockClock } from './blocks'
@@ -1172,6 +1173,10 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     ;(window as unknown as { __sfx: Sfx }).__sfx = sfx
     ;(window as unknown as { __profiles: Profiles }).__profiles = profiles
     ;(window as unknown as { __players: Player[] }).__players = players
+    // The live board, for test/barrels-browser.mjs. Destructible cover is the
+    // one piece of shared state that is not derived from the block hash, so a
+    // suite has to be able to read the actual rects rather than infer them.
+    ;(window as unknown as { __arena: unknown }).__arena = arena
 
     // Faces on the tanks. The renderer asks by pubkey and never learns what a
     // relay is; `Profiles.get` queues an unknown npub for the next batch and
