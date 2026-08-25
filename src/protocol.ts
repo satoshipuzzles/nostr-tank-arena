@@ -154,6 +154,17 @@ export interface ShellPayload {
   a: number // angle, radians
   b?: number // wall bounces before it dies; defaults to 1
   d?: number // hull points it takes off; defaults to 1, capped at 3 on arrival
+  /**
+   * Ground range of a lobbed shot, in world units. Absent means a flat shell.
+   *
+   * The range is what makes a lob re-simulable, and it has to travel with the
+   * shot for the same reason `b` does — harder, in fact. A flat shell's path is
+   * decided by walls every client already agrees on. A lob's path is decided by
+   * how long one player held a key down, which nobody else can observe at all.
+   * Without this field a lob is the one thing in the game with no shared input,
+   * and the crater lands somewhere different on every screen.
+   */
+  l?: number
 }
 
 /** Victim-authoritative death report. `k` is the session pubkey of the killer. */

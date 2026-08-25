@@ -26,7 +26,7 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import { ARENA_H, ARENA_W, WALLS, onLayoutChange, pointInTallWall } from './arena'
 import type { CoverKind, Rect } from './arena'
 import type { Game, Peer } from './game'
-import { MAX_HP, RELOAD, TANK_RADIUS } from './sim'
+import { LOB_APEX, LOB_BLAST, MAX_HP, RELOAD, TANK_RADIUS, shellHeight } from './sim'
 import { ICON_POLYS, PICKUPS, hasBuff } from './pickups'
 import type { PickupKind } from './pickups'
 import { Avatar } from './avatars'
@@ -1328,6 +1328,62 @@ export class Renderer {
   get ownTankVisible(): boolean {
     return this.you.root.visible
   }
+  /**
+   * Where a charging lob would land, drawn flat on the felt.
+   *
+   * At `GROUND_Y + DECAL_LIFT`, like every other decal in this file, and for a
+   * specific reason: the ring under the player's tank and every pickup pad in
+   * this game once sat *below* the felt for weeks, drawn on every frame with
+   * `visible === true` and never reaching a pixel. Anything flat goes against
+   * that constant or it goes into the floor.
+   */
+  private lobRing = (() => {
+    const m = new THREE.Mesh(
+      new THREE.RingGeometry(LOB_BLAST - 7, LOB_BLAST, 40),
+      new THREE.MeshBasicMaterial({
+        color: 0xffb347, transparent: true, opacity: 0.9,
+        side: THREE.DoubleSide, depthWrite: false,
+        // Drawn through the geometry, unlike every other decal here. The lob
+        // exists to go over cover, so the crater is behind a wall or a hedge
+        // most times it is used, and a depth-tested ring shows up as a stray
+        // arc poking out from behind a bush — the half of it you most need to
+        // see is the half the wall is hiding. This is an aiming aid, not a
+        // thing in the world.
+        depthTest: false,
+      }),
+    )
+    m.rotation.x = -Math.PI / 2
+    m.position.y = GROUND_Y + DECAL_LIFT
+    m.visible = false
+    m.renderOrder = 3
+    return m
+  })()
+
+  /**
+   * The shadow under a lob in the air.
+   *
+   * The arc is the read: without something on the ground, a shell 150 units up
+   * is just a shell drawn slightly higher on the screen, and from the board
+   * camera that is indistinguishable from one further away. The shadow is how
+   * you know it is going over the wall and not into it.
+   */
+  private lobShadow = (() => {
+    const m = new THREE.Mesh(
+      // 16 rather than 10, and darker. The first cut was sized against the
+      // shell mesh; what it actually has to be legible against is a board the
+      // camera draws from two thousand units back, where ten units is six
+      // pixels of grass-on-grass.
+      new THREE.CircleGeometry(16, 24),
+      new THREE.MeshBasicMaterial({
+        color: 0x000000, transparent: true, opacity: 0.4, depthWrite: false,
+      }),
+    )
+    m.rotation.x = -Math.PI / 2
+    m.position.y = GROUND_Y + DECAL_LIFT
+    m.visible = false
+    return m
+  })()
+
   private shells = new Map<string, THREE.Mesh>()
   private shellGeo = new THREE.SphereGeometry(7, 12, 10)
   private siegeGeo = new THREE.SphereGeometry(11, 12, 10)
@@ -1448,6 +1504,8 @@ export class Renderer {
     this.strikeLane.rotation.x = -Math.PI / 2
     this.strikeLane.visible = false
     this.scene.add(this.strikeLane)
+    this.scene.add(this.lobRing)
+    this.scene.add(this.lobShadow)
 
     this.resize()
     window.addEventListener('resize', this.resize)
@@ -1820,6 +1878,7 @@ export class Renderer {
 
     this.strikes(game, now)
     this.syncShells(game)
+    this.syncLobAim(game)
     this.syncPickups(game, now)
     if (!game.watching) {
       this.deaths(game)
@@ -2167,6 +2226,11 @@ export class Renderer {
    * saw it at is where to put the sparks.
    */
   private syncShells(game: Game): void {
+    // Cleared first, set by the loop below. A visibility flag that is only ever
+    // turned *on* is the shape of bug this codebase has shipped before: the
+    // shadow of a shell that landed ten seconds ago sits on the felt forever,
+    // and nothing in the scene graph objects.
+    this.lobShadow.visible = false
     for (const shell of game.shells.values()) {
       let mesh = this.shells.get(shell.id)
       if (!mesh) {
@@ -2187,8 +2251,34 @@ export class Renderer {
         if (firer) firer.recoil = 1
         this.confetti.burst(shell.x, shell.y, 5, 45, { speed: 90, up: 60, y: 24, size: 0.55, life: 0.35 })
       }
-      mesh.position.set(shell.x, 24, shell.y)
+      const height = shellHeight(shell)
+      mesh.position.set(shell.x, 24 + height, shell.y)
       mesh.rotation.y += 0.3
+      if (shell.lob > 0) {
+        // Grow with the arc. A 7-unit sphere seen from the board camera two
+        // thousand units back is four pixels, and photographed at apex the lob
+        // was a yellow dot you had to be told was there — which loses the trade
+        // the weapon is built on. A lob is slow and telegraphed *on purpose*:
+        // the target is supposed to see it coming and walk out of the crater.
+        // A round nobody can see is just a delayed shell.
+        //
+        // Keyed to height rather than to a constant, so the thing is largest at
+        // the top of its arc, which is both when it is furthest from the camera
+        // and when there is most time left to react to it.
+        mesh.scale.setScalar(1 + (height / LOB_APEX) * 1.3)
+        // One shadow, under whichever lob is highest. Two lobs at once is rare
+        // enough that a second mesh is not worth the allocation, and the one in
+        // the air is the one you need to walk away from.
+        this.lobShadow.visible = true
+        this.lobShadow.position.set(shell.x, GROUND_Y + DECAL_LIFT, shell.y)
+        // Tightens as it comes down rather than spreading, which is backwards
+        // for a real shadow and right for a marker: the thing it is telling you
+        // is *where*, and it should be at its most precise the moment before it
+        // matters. Read the height once, above — calling `shellHeight` a second
+        // time here worked and invited the two to drift apart.
+        const drop = 1 - height / LOB_APEX
+        this.lobShadow.scale.setScalar(0.55 + drop * 0.85)
+      }
     }
 
     for (const [id, mesh] of this.shells) {
@@ -2203,6 +2293,35 @@ export class Renderer {
       this.shells.delete(id)
       this.lastShellSeen.delete(id)
     }
+  }
+
+  /**
+   * The landing ring while a lob is being charged.
+   *
+   * Drawn only for the local player, because it is the only one whose charge we
+   * know — a charge is deliberately not on the wire. Once the shot is away the
+   * arc and its shadow tell everybody else the same story, which is the point:
+   * a lob is the loudest thing you can do and everyone gets to see it coming.
+   */
+  private syncLobAim(game: Game): void {
+    const aim = game.lobAim
+    if (!aim) {
+      this.lobRing.visible = false
+      return
+    }
+    this.lobRing.visible = true
+    this.lobRing.position.set(aim.x, GROUND_Y + DECAL_LIFT, aim.y)
+    // Winds from amber to red as the range comes up, so the charge is readable
+    // without looking away from the board to find a bar.
+    const mat = this.lobRing.material as THREE.MeshBasicMaterial
+    mat.color.setHSL((38 - aim.charge * 34) / 360, 1, 0.58)
+    // A slow pulse, so a full charge sitting still still reads as *armed*
+    // rather than as a decal somebody left on the grass.
+    // `performance.now()`, not `clock.getElapsedTime()`: three's Clock advances
+    // its own elapsed time by calling `getDelta` internally, and `draw` has
+    // already taken this frame's delta off it. Reading it a second time here
+    // would quietly eat part of the next frame's dt.
+    this.lobRing.scale.setScalar(1 + Math.sin(performance.now() / 111) * 0.045)
   }
 
   /**

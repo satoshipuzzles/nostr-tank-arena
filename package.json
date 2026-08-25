@@ -24,7 +24,8 @@
     "test:score": "node test/score.mjs",
     "test:arsenal": "node test/arsenal.mjs",
     "test:damage": "node test/damage.mjs",
-    "test:fpv": "node test/fpv.mjs"
+    "test:fpv": "node test/fpv.mjs",
+    "test:lob": "node test/lob.mjs"
   },
   "dependencies": {
     "nostr-tools": "^2.10.4",

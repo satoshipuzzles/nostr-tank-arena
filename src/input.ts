@@ -39,6 +39,15 @@ export interface Controls {
    * shell.
    */
   reload: boolean
+  /**
+   * Held down to charge a lobbed shot; the shot goes off on release.
+   *
+   * A held button rather than a pressed one, because the hold *is* the aim —
+   * how long it is down decides how far the shell flies. `Game` owns the timer;
+   * this is only the state of the key, so that a pad and a keyboard and a
+   * thumb on glass all answer the same question.
+   */
+  lob: boolean
 }
 
 const DEADZONE = 0.22
@@ -160,6 +169,7 @@ const DRIVE_KEYS: Record<
     right: string[]
     fire: string[]
     reload: string[]
+    lob: string[]
   }
 > = {
   both: {
@@ -169,10 +179,11 @@ const DRIVE_KEYS: Record<
     right: ['KeyD', 'ArrowRight'],
     fire: ['Space'],
     reload: ['KeyR'],
+    lob: ['KeyQ'],
   },
   wasd: {
     up: ['KeyW'], down: ['KeyS'], left: ['KeyA'], right: ['KeyD'],
-    fire: ['Space'], reload: ['KeyR'],
+    fire: ['Space'], reload: ['KeyR'], lob: ['KeyQ'],
   },
   // Right hand on the arrows, thumb on Enter or right shift. Several, because
   // which one is comfortable depends entirely on the keyboard.
@@ -186,8 +197,11 @@ const DRIVE_KEYS: Record<
     // to take — it is player one's reload and both `Input`s read the same
     // physical keyboard.
     reload: ['Slash', 'NumpadSubtract'],
+    // Q belongs to player one, like R does. Player two's lob sits under the
+    // same hand as their reload.
+    lob: ['Period', 'NumpadMultiply'],
   },
-  none: { up: [], down: [], left: [], right: [], fire: [], reload: [] },
+  none: { up: [], down: [], left: [], right: [], fire: [], reload: [], lob: [] },
 }
 
 export class Input {
@@ -313,7 +327,9 @@ export class Input {
       // already — there is nothing for `fromScreen` to do to them, and rotating
       // them would turn "forward" into a slow spin.
       if (this.scheme === 'tank') {
-        return { throttle: -y, steer: x, aim, fire: touched.fire, reload: false }
+        // No lob on glass yet: it needs its own on-screen control, and that
+        // belongs with the mobile pass rather than bolted onto the fire pad.
+        return { throttle: -y, steer: x, aim, fire: touched.fire, reload: false, lob: false }
       }
       const heading = this.fromScreen(x, y, tank.hull)
       const drive = this.toHeading(heading.x, heading.y, tank.hull)
@@ -323,7 +339,7 @@ export class Input {
       const push = Math.min(1, Math.hypot(x, y))
       return {
         throttle: drive.throttle * push, steer: drive.steer, aim,
-        fire: touched.fire, reload: false,
+        fire: touched.fire, reload: false, lob: false,
       }
     }
 
@@ -342,6 +358,7 @@ export class Input {
 
     const fire = (this.binding.mouse && this.mouseDown) || has(map.fire)
     const reload = has(map.reload)
+    const lob = has(map.lob)
     const aim =
       this.binding.mouse && this.mouseWorld
         ? Math.atan2(this.mouseWorld.y - tank.y, this.mouseWorld.x - tank.x)
@@ -355,10 +372,10 @@ export class Input {
     // scheme reads the keys as a direction on the board, and only that reading
     // has to be rotated when the board is being seen from inside the turret.
     if (this.scheme === 'tank') {
-      return { throttle: -y, steer: x, aim, fire, reload }
+      return { throttle: -y, steer: x, aim, fire, reload, lob }
     }
     const heading = this.fromScreen(x, y, tank.hull)
-    return { ...this.toHeading(heading.x, heading.y, tank.hull), aim, fire, reload }
+    return { ...this.toHeading(heading.x, heading.y, tank.hull), aim, fire, reload, lob }
   }
 
   /** Where a player with no aiming device is pointing: along the hull. */
@@ -411,6 +428,12 @@ export class Input {
       // Button 2 is X on an Xbox pad and Square on a DualSense, which is where
       // every shooter on a console has put reload for twenty years.
       const reload = pad.buttons[2]?.pressed ?? false
+      // Left trigger, with LB as an alternate. Alt-fire has lived under the
+      // left trigger on every console shooter since the last time this game's
+      // ancestors were on a cartridge, and putting it there means a lob costs
+      // nothing to reach mid-fight. Read as an analogue value with the same
+      // threshold as the right trigger: plenty of pads rest a little off zero.
+      const lob = (pad.buttons[6]?.value ?? 0) > TRIGGER_FIRE || (pad.buttons[4]?.pressed ?? false)
       // Claiming the input needs a deliberate push or a real button. A stick
       // sitting just past the deadzone is not somebody asking to play.
       //
@@ -424,6 +447,7 @@ export class Input {
         aButton ||
         rb ||
         reload ||
+        lob ||
         trigger > TRIGGER_FIRE
       if (!claimed && !this.usingGamepad) continue
       if (claimed) this.usingGamepad = true
@@ -442,9 +466,9 @@ export class Input {
         const drive = this.toHeading(heading.x, heading.y, tank.hull)
         // Scale by how far the stick is pushed, so it is not all-or-nothing.
         const push = Math.min(1, Math.hypot(lx, ly))
-        return { throttle: drive.throttle * push, steer: drive.steer, aim, fire, reload }
+        return { throttle: drive.throttle * push, steer: drive.steer, aim, fire, reload, lob }
       }
-      return { throttle: -ly, steer: lx, aim, fire, reload }
+      return { throttle: -ly, steer: lx, aim, fire, reload, lob }
     }
     return null
   }
