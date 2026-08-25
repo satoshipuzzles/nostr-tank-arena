@@ -755,6 +755,23 @@ interface TankRig {
   body: THREE.MeshStandardMaterial
   trim: THREE.MeshStandardMaterial
   labelKey: string
+  /**
+   * The shield bubble, one per tank rather than one for the local player.
+   *
+   * It used to be a single mesh parked on whichever tank was you, which meant
+   * a shield was a fact only its owner could see. A defensive buff nobody can
+   * read is not a tactic, it is a private surprise — see `StatePayload.sh`.
+   */
+  bubble: THREE.Mesh
+  /**
+   * Fractional puffs owed to the plume emitter.
+   *
+   * Carried across frames so the smoke rate is per second rather than per
+   * frame: without it a 120Hz machine smokes twice as hard as a 60Hz one, and
+   * a machine that has degraded to `lean` barely smokes at all — exactly the
+   * device that most needs the damage to be legible.
+   */
+  smokeOwed: number
   /** Set when firing, decays to 0 — drives recoil and the muzzle flash. */
   recoil: number
   flash: THREE.Mesh
@@ -770,6 +787,35 @@ const BARREL_GEO = new RoundedBoxGeometry(36, 7, 7, 2, 3)
 const PIP_GEO = new RoundedBoxGeometry(13, 13, 13, 2, 4)
 const FLASH_GEO = new THREE.SphereGeometry(11, 10, 8)
 const TORSO_GEO = new RoundedBoxGeometry(15, 15, 17, 3, 4)
+/** What a burning hull's emissive is pulled toward. */
+const FIRE_GLOW = new THREE.Color(0xff7a1f)
+const BUBBLE_GEO = new THREE.SphereGeometry(TANK_RADIUS + 16, 20, 14)
+// Shared across every rig: all shields look the same, so one material is one
+// less thing to dispose and one less draw-call state change.
+const BUBBLE_MAT = new THREE.MeshBasicMaterial({
+  color: 0x7fd4ff,
+  transparent: true,
+  opacity: 0.42,
+  depthWrite: false,
+  side: THREE.DoubleSide,
+})
+/**
+ * The lattice inside the bubble.
+ *
+ * A flat 28%-opacity sphere over a tank the board camera draws forty units
+ * tall was measurable and not legible — it tinted the tank rather than
+ * announcing anything, and a defensive buff that has to be squinted at is a
+ * buff nobody plays around. The panel lines give it an edge that survives
+ * being small, and they read as a shield rather than as a blue tank.
+ */
+const BUBBLE_WIRE_GEO = new THREE.IcosahedronGeometry(TANK_RADIUS + 17, 2)
+const BUBBLE_WIRE_MAT = new THREE.MeshBasicMaterial({
+  color: 0xd6f4ff,
+  wireframe: true,
+  transparent: true,
+  opacity: 0.85,
+  depthWrite: false,
+})
 
 /** Everything the renderer needs about one tank for one frame. */
 interface TankView {
@@ -782,6 +828,8 @@ interface TankView {
   maxHp: number
   /** Shells left in their magazine. 0 means empty or mid-reload. */
   ammo: number
+  /** True while a shield is up, for them as well as for you. */
+  shield: boolean
   dead: boolean
   hue: number
   name: string
@@ -928,6 +976,17 @@ function makeTank(): TankRig {
   face.position.y = 22
   driver.add(face)
 
+  // On `root`, not on `bob`: the bob group tips a dead tank onto its side, and
+  // a shield that rolls over with the wreck is a strange thing to look at. It
+  // is hidden while dead anyway; this is belt and braces.
+  const bubble = new THREE.Mesh(BUBBLE_GEO, BUBBLE_MAT)
+  bubble.position.y = 26
+  bubble.visible = false
+  // A child, so `visible` and the pulse on the parent carry it without a
+  // second thing to remember to hide.
+  bubble.add(new THREE.Mesh(BUBBLE_WIRE_GEO, BUBBLE_WIRE_MAT))
+  root.add(bubble)
+
   const pips: THREE.Mesh[] = []
   for (let i = 0; i < MAX_HP; i++) {
     const pip = new THREE.Mesh(PIP_GEO, toy(0xffffff))
@@ -951,6 +1010,8 @@ function makeTank(): TankRig {
     ring,
     body,
     trim,
+    bubble,
+    smokeOwed: 0,
     labelKey: '',
     recoil: 0,
     flash,
@@ -1004,6 +1065,21 @@ export function pickupGeometry(kind: PickupKind): THREE.BufferGeometry {
 
 const PARTICLE_MAX = 320
 const PARTICLE_GEO = new RoundedBoxGeometry(7, 7, 7, 1, 2)
+
+const PLUME_MAX = 260
+const PLUME_GEO = new RoundedBoxGeometry(21, 21, 21, 2, 3)
+/**
+ * A steady breeze across the arena, in world units per second.
+ *
+ * Two reasons, and the second is the important one. A plume that goes straight
+ * up is a column standing in exactly the place the driver's head, the hull pips
+ * and the name plate already occupy — this game has no clear air above a tank —
+ * so the smoke would spend its whole life behind three sprites. Leaning it
+ * downwind puts it over open felt where it can actually be seen, and gives the
+ * board a direction, which is worth having for free.
+ */
+const WIND_X = 34
+const WIND_Z = -11
 
 interface Particle {
   x: number
@@ -1121,6 +1197,114 @@ class Confetti {
   }
 }
 
+/**
+ * Engine smoke and flame for a tank that has been hit.
+ *
+ * Separate from `Confetti` because the physics are the opposite: confetti is
+ * thrown outward and falls, a plume drifts upward and expands. Bending one
+ * system to do both would mean a gravity term that is sometimes negative,
+ * which is a worse thing to read than sixty lines of its own.
+ *
+ * Same trick for the fade, though. The pool is opaque and shrinks to nothing
+ * rather than going transparent: hundreds of unsorted translucent cubes in one
+ * InstancedMesh flicker against each other, and a puff that swells and then
+ * collapses reads as smoke perfectly well without any of that.
+ */
+class Plumes {
+  readonly mesh: THREE.InstancedMesh
+  private pool: Particle[] = []
+  private dummy = new THREE.Object3D()
+
+  constructor() {
+    this.mesh = new THREE.InstancedMesh(
+      PLUME_GEO,
+      // Basic, not standard. A lit material puts the hemisphere light's pale
+      // cream on top of every puff, which washes the smoke toward the colour of
+      // the sky behind it and takes the heat out of the flame — the two things
+      // the plume exists to say. Unlit, a grey puff stays grey against the felt
+      // and an orange one stays hot. It is also the cheaper material, on a mesh
+      // that redraws 260 instances every frame.
+      new THREE.MeshBasicMaterial(),
+      PLUME_MAX,
+    )
+    this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
+    this.mesh.frustumCulled = false
+    this.mesh.count = PLUME_MAX
+    this.dummy.scale.setScalar(0)
+    this.dummy.updateMatrix()
+    for (let i = 0; i < PLUME_MAX; i++) this.mesh.setMatrixAt(i, this.dummy.matrix)
+  }
+
+  /** One puff at a point. `hot` makes it a flame rather than exhaust. */
+  puff(x: number, y: number, z: number, hot: boolean): void {
+    if (this.pool.length >= PLUME_MAX) this.pool.shift()
+    const drift = hot ? 14 : 26
+    const shade = hot
+      ? new THREE.Color().setHSL((12 + Math.random() * 26) / 360, 1, 0.56 + Math.random() * 0.14)
+      : new THREE.Color().setHSL(0, 0, 0.16 + Math.random() * 0.22)
+    // Sized against the tank, which is 44 units long and renders about thirty
+    // pixels wide from the board camera. The first cut of this used 9-unit
+    // cubes at half scale — four world units, under three pixels — and the
+    // screenshot showed a spotless tank while every counter in the emitter
+    // said it was working perfectly.
+    this.pool.push({
+      x: x + (Math.random() - 0.5) * 11,
+      y: y + (Math.random() - 0.5) * 6,
+      z: z + (Math.random() - 0.5) * 11,
+      vx: WIND_X + (Math.random() - 0.5) * drift,
+      vy: hot ? 96 + Math.random() * 60 : 104 + Math.random() * 62,
+      vz: WIND_Z + (Math.random() - 0.5) * drift,
+      spin: (Math.random() - 0.5) * 3,
+      life: hot ? 0.42 + Math.random() * 0.26 : 1.15 + Math.random() * 0.75,
+      max: hot ? 0.68 : 1.9,
+      size: hot ? 1.15 + Math.random() * 0.5 : 1.3 + Math.random() * 0.7,
+      color: shade,
+    })
+  }
+
+  update(dt: number): void {
+    for (let i = this.pool.length - 1; i >= 0; i--) {
+      const p = this.pool[i]
+      p.life -= dt
+      if (p.life <= 0) {
+        this.pool.splice(i, 1)
+        continue
+      }
+      // Rising smoke slows as it cools and spreads as it goes, which is the
+      // whole silhouette. No ground bounce: none of these ever go down.
+      p.vy *= 1 - Math.min(1, dt * 0.75)
+      p.x += p.vx * dt
+      p.y += p.vy * dt
+      p.z += p.vz * dt
+    }
+
+    for (let i = 0; i < PLUME_MAX; i++) {
+      const p = this.pool[i]
+      if (!p) {
+        this.dummy.scale.setScalar(0)
+        this.dummy.position.set(0, -9999, 0)
+        this.dummy.updateMatrix()
+        this.mesh.setMatrixAt(i, this.dummy.matrix)
+        continue
+      }
+      const age = 1 - p.life / p.max
+      const collapse = Math.min(1, p.life / (p.max * 0.45))
+      this.dummy.position.set(p.x, p.y, p.z)
+      this.dummy.rotation.set(p.spin * age * 3, p.spin * age * 2, p.spin * age)
+      // Starts at 0.7 rather than 0.45: the board camera renders a 44-unit tank
+      // about thirty pixels wide, so a puff that begins at 0.45 of a 21-unit
+      // cube is six pixels across for the first third of its life. In a
+      // screenshot that is not smoke, it is noise on the felt.
+      this.dummy.scale.setScalar(p.size * (0.7 + age * 1.4) * collapse)
+      this.dummy.updateMatrix()
+      this.mesh.setMatrixAt(i, this.dummy.matrix)
+      this.mesh.setColorAt(i, p.color)
+    }
+    this.mesh.instanceMatrix.needsUpdate = true
+    if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true
+  }
+}
+
 // ---------------------------------------------------------------- renderer
 
 export class Renderer {
@@ -1128,6 +1312,7 @@ export class Renderer {
   private scene = new THREE.Scene()
   private camera: THREE.PerspectiveCamera
   private confetti = new Confetti()
+  private plumes = new Plumes()
 
   private rigs = new Map<string, TankRig>()
   private you = makeTank()
@@ -1206,8 +1391,6 @@ export class Renderer {
   private lastRepairAt = 0
   /** One group per live pickup, keyed by the id the schedule derived. */
   private pickupMeshes = new Map<string, THREE.Group>()
-  /** The bubble that shows a shield is up. One, reused. */
-  private shield: THREE.Mesh
   /** Shared across every mesh of a kind, so `buildBoard` disposes them itself. */
   private coverMats: THREE.MeshStandardMaterial[] = []
 
@@ -1231,21 +1414,10 @@ export class Renderer {
     onLayoutChange(() => this.buildBoard())
     this.buildLights()
     this.scene.add(this.confetti.mesh)
+    this.scene.add(this.plumes.mesh)
     this.scene.add(this.you.root)
     this.you.ring.visible = true
 
-    this.shield = new THREE.Mesh(
-      new THREE.SphereGeometry(TANK_RADIUS + 16, 20, 14),
-      new THREE.MeshBasicMaterial({
-        color: 0x7fd4ff,
-        transparent: true,
-        opacity: 0.28,
-        depthWrite: false,
-        side: THREE.DoubleSide,
-      }),
-    )
-    this.shield.visible = false
-    this.scene.add(this.shield)
 
     this.reloadBar = new THREE.Mesh(
       new THREE.BoxGeometry(1, 7, 7),
@@ -1526,6 +1698,31 @@ export class Renderer {
   }
 
   /**
+   * The other direction: a world point to a CSS pixel on this canvas.
+   *
+   * Added for the damage suite, which has to look at the actual pixels behind
+   * a burning tank rather than at a count of how many puffs were spawned. A
+   * particle emitter is exactly the kind of thing a counter cannot vouch for
+   * — this game has already shipped meshes that were `visible = true` every
+   * frame and drawn inside the board, where they never reached a pixel — so
+   * the check needs to know where on screen to look.
+   *
+   * Null when the point is behind the camera, which is the honest answer
+   * rather than the mirrored nonsense a raw projection returns there.
+   */
+  toScreen(x: number, y: number, z: number): { x: number; y: number } | null {
+    const v = new THREE.Vector3(x, y, z)
+    this.camera.updateMatrixWorld()
+    v.project(this.camera)
+    if (v.z > 1) return null
+    const r = this.canvas.getBoundingClientRect()
+    return {
+      x: r.left + ((v.x + 1) / 2) * r.width,
+      y: r.top + ((1 - v.y) / 2) * r.height,
+    }
+  }
+
+  /**
    * Where the cursor points when you are sitting in the turret.
    *
    * The horizontal plane the board camera raycasts against is useless here: an
@@ -1582,6 +1779,7 @@ export class Renderer {
       hp: game.tank.hp,
       maxHp,
       ammo: game.tank.reloadingUntil ? 0 : game.tank.ammo,
+      shield: hasBuff(game.buffs, 'shieldUntil', now),
       dead: game.tank.dead,
       hue: game.displayColor,
       name: game.name,
@@ -1608,6 +1806,7 @@ export class Renderer {
         hp: peer.view.hp,
         maxHp,
         ammo: peer.view.ammo,
+        shield: peer.view.shield,
         dead: peer.view.dead,
         hue: peer.displayColor,
         name: peer.name,
@@ -1658,12 +1857,12 @@ export class Renderer {
     // No `else`: `applyTank` runs before this every frame and has already put
     // every one of them back the way board view wants them.
 
-    this.shield.visible =
-      !cockpit && hasBuff(game.buffs, 'shieldUntil', now) && !game.tank.dead
-    if (this.shield.visible) {
-      this.shield.position.set(game.tank.x, 26, game.tank.y)
-      this.shield.scale.setScalar(1 + Math.sin(now / 180) * 0.04)
-    }
+    // `applyTank` has already put your own bubble up if you are shielded. From
+    // inside the cockpit it is a sphere the camera sits within, which paints
+    // the whole board blue rather than reading as a bubble, so it comes off
+    // with everything else you are wearing. The HUD chip still says it in
+    // words and counts the seconds down.
+    if (cockpit) this.you.bubble.visible = false
     if (hasBuff(game.buffs, 'speedUntil', now) && !game.tank.dead) {
       this.confetti.burst(game.tank.x, game.tank.y, 1, 285, {
         speed: 24,
@@ -1692,6 +1891,7 @@ export class Renderer {
     if (cockpit) this.placeEye(game)
 
     this.confetti.update(dt)
+    this.plumes.update(dt)
     this.applyShake(dt)
     this.renderer.render(this.scene, this.camera)
     this.degrade(dt)
@@ -1758,7 +1958,10 @@ export class Renderer {
       rig.body.emissive.setHex(0x000000)
     } else {
       applySkin(rig, SKINS[v.skin] ?? SKINS[DEFAULT_SKIN], hue)
+      this.wear(rig, v, now, dt)
     }
+
+    if (dead) rig.smokeOwed = 0
 
     // A dead tank tips over and sinks rather than vanishing, so you can see
     // where somebody went down without needing a marker for it.
@@ -1822,6 +2025,11 @@ export class Renderer {
     // four-way scramble — and a rival's only lights up once they are on three,
     // which is the whole point of putting the streak on the wire: the room can
     // see who to gang up on without anyone opening a scoreboard.
+    // Everyone's shield, not just yours. `draw` takes your own back off again
+    // in cockpit view, where you are inside the sphere.
+    rig.bubble.visible = !dead && v.shield
+    if (rig.bubble.visible) rig.bubble.scale.setScalar(1 + Math.sin(now / 180) * 0.04)
+
     const ringMat = rig.ring.material as THREE.MeshBasicMaterial
     const hot = v.streak >= 3
     rig.ring.visible = !dead && (v.mine || hot)
@@ -1834,6 +2042,89 @@ export class Renderer {
       ringMat.opacity = 0.55
       rig.ring.scale.setScalar(1)
     }
+  }
+
+  /**
+   * How beaten up a tank looks, from the HP that was already on the wire.
+   *
+   * Three states, and the thresholds are ratios rather than counts because
+   * Glass Cannon rounds change the hull maximum. A one-hull tank is never
+   * "damaged" — every hit kills it — so it never scorches and never smokes,
+   * which is correct rather than a gap.
+   *
+   *   scorched  the paint darkens the moment anything lands
+   *   smoking   any damage at all: grey exhaust off the engine deck
+   *   burning   one hit from dead: flame, black smoke, and a glowing hull
+   *
+   * Smoke starts at the first hit rather than at half hull, because this game
+   * has exactly two hull sizes: the standard three and Glass Cannon's one.
+   * At three hull, "at or below half" is hp 1 — which is already the burning
+   * tier — so a half-hull threshold reads beautifully and describes a state no
+   * round of this game can ever be in. The rate carries the gradient instead:
+   * a wisp at 2/3, a column at 1/3.
+   *
+   * The point of the last one is that it is readable from across the arena.
+   * Knowing which of the three tanks in front of you dies to one more shell is
+   * the difference between picking a fight and picking the right fight, and
+   * until now the only place that lived was three small pips over a tank the
+   * board camera renders forty units tall.
+   *
+   * The plume comes off the **rear deck**, not off the roof. There is no clear
+   * air above a tank in this game — the driver's head, the hull pips and the
+   * name plate stack from y=7 to y=133 — so smoke drawn straight up would
+   * spend its life behind three sprites. Behind the hull it is against felt.
+   */
+  private wear(rig: TankRig, v: TankView, now: number, dt: number): void {
+    const ratio = v.maxHp > 0 ? Math.max(0, v.hp) / v.maxHp : 1
+    if (ratio >= 1) {
+      rig.smokeOwed = 0
+      return
+    }
+    const burning = v.hp === 1 && v.maxHp > 1
+
+    // Soot, on top of whatever the skin painted. Multiplying keeps every skin
+    // recognisable while damaged — a scorched Chrome is still obviously Chrome
+    // — where setting a flat grey would erase the finish the player chose.
+    const soot = 1 - (1 - ratio) * 0.58
+    rig.body.color.multiplyScalar(soot)
+    rig.trim.color.multiplyScalar(soot)
+
+    if (burning) {
+      // Flicker, so it reads as fire rather than as a tank painted orange.
+      const flare = 0.42 + Math.sin(now / 70) * 0.12 + Math.sin(now / 23) * 0.06
+      rig.body.emissive.lerp(FIRE_GLOW, Math.max(0, Math.min(1, flare)))
+    }
+
+    // Behind the hull, along its heading. Forward is +cos/+sin here, which is
+    // the same convention the recoil offset above uses to push the turret back.
+    const back = 20
+    const px = v.x - Math.cos(v.hull) * back
+    const pz = v.y - Math.sin(v.hull) * back
+
+    // Rate rather than an on/off, so the plume itself says how hurt they are:
+    // a thin trail at the first scratch, a steady column near death. Reading
+    // that across the arena is the whole feature — and the first numbers here
+    // were set by eye and failed it. At 8/s the middle tier was one puff in a
+    // screenshot: technically smoking, invisible on a tank the board camera
+    // draws thirty pixels wide, which is the state this tier exists to show.
+    rig.smokeOwed += dt * (burning ? 46 : 18 + (1 - ratio) * 34)
+    // Capped rather than looped to exhaustion: a tab that was in the background
+    // for a minute comes back with one enormous dt, and without this it would
+    // spend that frame spawning nine hundred puffs it is about to throw away.
+    let budget = 6
+    while (rig.smokeOwed >= 1 && budget-- > 0) {
+      rig.smokeOwed -= 1
+      // Flame on the deck, soot above it. Spawning both at the same height
+      // reads as a tank in a bin bag rather than a tank on fire: the black
+      // puffs land in front of the glowing hull and cover the one thing this
+      // tier exists to show. Measured, not guessed — an even split at one
+      // height scored zero flame pixels at the nozzle while the hull
+      // underneath was fully lit.
+      const hot = burning && Math.random() < 0.75
+      const py = hot ? 18 + Math.random() * 10 : 32 + Math.random() * 14
+      this.plumes.puff(px, py, pz, hot)
+    }
+    if (budget <= 0) rig.smokeOwed = 0
   }
 
   /**

@@ -22,7 +22,8 @@
     "test:aim": "node test/aim.mjs",
     "test:aim-browser": "node test/aim-browser.mjs",
     "test:score": "node test/score.mjs",
-    "test:arsenal": "node test/arsenal.mjs"
+    "test:arsenal": "node test/arsenal.mjs",
+    "test:damage": "node test/damage.mjs"
   },
   "dependencies": {
     "nostr-tools": "^2.10.4",
