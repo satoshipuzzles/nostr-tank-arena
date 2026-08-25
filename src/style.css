@@ -968,6 +968,63 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
  * that is pure prose and the README says the same thing at more length. The
  * rest is spacing.
  */
+/*
+ * The lobby on a desk: the card was fixed at `min(520px, 100%)` no matter how
+ * wide the window got, so every row inside stacked into one column and the
+ * card ran tall enough to fall off the bottom of the very screen with room to
+ * spare — 1052px of card in a 900px-tall window, hemmed by empty black on
+ * both sides. Past 860px there is width to spend, so the card grows and the
+ * three rows that were costing the most height (fields+bots+players next to
+ * the garage, and steering next to sound) run side by side instead of
+ * top-to-bottom. `grid-template-areas` rather than reordering the markup: the
+ * DOM order stays the natural tab order, only the visual position moves.
+ */
+@media (min-width: 860px) {
+  .lobby-card {
+    width: min(760px, 100%);
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    column-gap: 28px;
+    align-items: start;
+    grid-template-areas:
+      "brand    brand"
+      "tag      tag"
+      "modes    modes"
+      "side     side"
+      "fields   garage"
+      "bots     garage"
+      "players  garage"
+      "steering sound"
+      "row      row"
+      "live     live"
+      "note     note"
+      "error    error"
+      "advanced advanced";
+  }
+  .lobby-card > .brand { grid-area: brand; }
+  .lobby-card > .tag { grid-area: tag; }
+  .lobby-card > #modes { grid-area: modes; }
+  .lobby-card > #row-side { grid-area: side; }
+  .lobby-card > .fields { grid-area: fields; }
+  .lobby-card > #row-bots { grid-area: bots; }
+  .lobby-card > #row-players { grid-area: players; }
+  /*
+   * Eight buttons is one too many for `.seg`'s flex-wrap to split evenly once
+   * this row is squeezed into a half-width column: seven fit on the first
+   * line and "7" wraps alone, stretched across the full row by itself. A
+   * fixed 4-column grid keeps two even rows of four instead.
+   */
+  #row-bots .seg { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
+  .lobby-card > .garage { grid-area: garage; }
+  .lobby-card > #row-steering { grid-area: steering; }
+  .lobby-card > #row-sound { grid-area: sound; }
+  .lobby-card > .row { grid-area: row; }
+  .lobby-card > .live { grid-area: live; }
+  .lobby-card > #lobby-note { grid-area: note; }
+  .lobby-card > #lobby-error { grid-area: error; }
+  .lobby-card > .advanced { grid-area: advanced; }
+}
+
 @media (max-height: 460px) and (orientation: landscape) {
   #lobby { padding: 10px; align-items: center; }
   .lobby-card { padding: 14px 18px; width: min(680px, 100%); }
