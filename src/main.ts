@@ -469,12 +469,12 @@ window.addEventListener('keydown', (e) => {
  * when you pick a side and nobody joins you. Whatever a real mode negotiation
  * looks like, it is a protocol change and it is not this.
  */
-type Mode = 'dm' | 'tdm' | 'ctf'
+type Mode = 'dm' | 'tdm' | 'ctf' | 'dom'
 
 /** Remembered, and consistent with the side that was remembered next to it. */
 let mode: Mode = ((): Mode => {
   const v = stored('tank.mode')
-  if (v === 'tdm' || v === 'dm' || v === 'ctf') return v
+  if (v === 'tdm' || v === 'dm' || v === 'ctf' || v === 'dom') return v
   // First run after this shipped: somebody who had already picked a side with
   // `T` is plainly playing a team game, so do not throw that away.
   return teamPick ? 'tdm' : 'dm'
@@ -490,7 +490,7 @@ for (let i = 1; i < TEAM_NAMES.length; i++) {
 }
 
 function paintModes(): void {
-  for (const id of ['dm', 'tdm', 'ctf'] as const) {
+  for (const id of ['dm', 'tdm', 'ctf', 'dom'] as const) {
     const on = id === mode
     const card = $(`mode-${id}`)
     card.classList.toggle('on', on)
@@ -511,13 +511,19 @@ function setMode(next: Mode): void {
   // way somebody picking a game thinks about it. Deathmatch means no side;
   // team deathmatch means a side, and Red if you have never picked one.
   setTeam(mode === 'dm' ? 0 : teamPick || 1)
-  if (running) for (const p of running.players) p.game.flagsOn = mode === 'ctf'
+  if (running) {
+    for (const p of running.players) {
+      p.game.flagsOn = mode === 'ctf'
+      p.game.pointsOn = mode === 'dom'
+    }
+  }
   paintModes()
 }
 
 $('mode-dm').addEventListener('click', () => setMode('dm'))
 $('mode-tdm').addEventListener('click', () => setMode('tdm'))
 $('mode-ctf').addEventListener('click', () => setMode('ctf'))
+$('mode-dom').addEventListener('click', () => setMode('dom'))
 $('side').addEventListener('click', (e) => {
   const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-value]')
   if (!b) return
@@ -1530,7 +1536,10 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     for (const p of players) p.game.team = teamPick
     // The mode reaches the fresh `Game`. Flags are only on in the one mode that
     // has them, which is why this is not derived from `team`.
-    for (const p of players) p.game.flagsOn = mode === 'ctf'
+    for (const p of players) {
+      p.game.flagsOn = mode === 'ctf'
+      p.game.pointsOn = mode === 'dom'
+    }
     // Repainted here rather than at module load: the default depends on whether
     // this session is a guest, and that is not known until a game exists.
     paintAutoPublish()
@@ -1922,6 +1931,33 @@ function drawHud(game: Game): void {
   // tally, and a scoreboard that led with kills would be reporting the wrong
   // game — but only once somebody has actually scored, so a team round that
   // nobody is playing flags in reads exactly as it did before.
+  // Points held, when there are any. A domination score is "who holds what
+  // *now*" as much as "who has taken most", and the second without the first is
+  // a scoreboard that cannot tell you whether you are winning.
+  const held = game.pointsOn ? game.territory : []
+  const heldRows = held.length
+    ? `<div class="team-tally points">${(() => {
+        const by = new Map<number, number>()
+        for (const t of held) if (t.state.owner) by.set(t.state.owner, (by.get(t.state.owner) ?? 0) + 1)
+        const neutral = held.length - [...by.values()].reduce((a, b) => a + b, 0)
+        const rows = [...by.entries()]
+          .sort((a, b) => b[1] - a[1] || a[0] - b[0])
+          .map(
+            ([team, n]) =>
+              `<div class="team-row"><span class="team-dot" style="background:hsl(${TEAM_HUES[team]} 72% 56%)"></span>` +
+              `<span class="team-name">${escapeHtml(TEAM_NAMES[team] ?? String(team))}</span>` +
+              `<span class="team-caps">${n}<i>&#9678;</i></span></div>`,
+          )
+        if (neutral > 0) {
+          rows.push(
+            `<div class="team-row"><span class="team-dot" style="background:#8d97a8"></span>` +
+              `<span class="team-name">Neutral</span><span class="team-caps">${neutral}<i>&#9678;</i></span></div>`,
+          )
+        }
+        return rows.join('')
+      })()}</div>`
+    : ''
+
   const flags = game.flagStandings()
   const flagRows = flags
     ? `<div class="team-tally flags">${flags
@@ -1947,6 +1983,7 @@ function drawHud(game: Game): void {
     : ''
 
   $('scoreboard').innerHTML =
+    heldRows +
     flagRows +
     teamRows +
     game

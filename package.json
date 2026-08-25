@@ -41,7 +41,8 @@
     "test:hub": "node test/hub.mjs",
     "test:rubble": "node test/rubble.mjs",
     "profile": "node test/profile.mjs",
-    "test:rewards": "node test/rewards.mjs"
+    "test:rewards": "node test/rewards.mjs",
+    "test:domination": "node test/domination.mjs"
   },
   "dependencies": {
     "nostr-tools": "^2.10.4",

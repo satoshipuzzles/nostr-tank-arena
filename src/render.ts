@@ -35,6 +35,7 @@ import {
 } from './arena'
 import { CHOPPER_ALT, CHOPPER_SPREAD } from './chopper'
 import { FLAG_REACH, FLAG_TEAMS, baseFor } from './flags'
+import { CAPTURE_S, POINT_RADIUS } from './domination'
 import type { CoverKind, Rect } from './arena'
 import type { Game, Peer } from './game'
 import { LOB_APEX, LOB_BLAST, MAX_HP, RELOAD, TANK_RADIUS, shellHeight } from './sim'
@@ -537,6 +538,55 @@ function disposeFlag(rig: FlagRig): void {
     if (Array.isArray(m)) m.forEach((x) => x.dispose())
     else m.dispose()
   })
+}
+
+/** A capture point: a fixed ring, and a disc that fills as it turns. */
+interface PointRig {
+  root: THREE.Group
+  outer: THREE.Mesh
+  fill: THREE.Mesh
+}
+
+const POINT_GEO = {
+  ring: new THREE.RingGeometry(POINT_RADIUS - 9, POINT_RADIUS, 44),
+  fill: new THREE.CircleGeometry(POINT_RADIUS - 12, 40),
+}
+
+function makePoint(): PointRig {
+  const root = new THREE.Group()
+  const outer = new THREE.Mesh(
+    POINT_GEO.ring,
+    new THREE.MeshBasicMaterial({
+      color: 0xd7dde8,
+      transparent: true,
+      opacity: 0.3,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    }),
+  )
+  outer.rotation.x = -Math.PI / 2
+  const fill = new THREE.Mesh(
+    POINT_GEO.fill,
+    new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.34,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    }),
+  )
+  fill.rotation.x = -Math.PI / 2
+  // A hair above the ring, or the two z-fight on a board seen from two thousand
+  // units back and the point flickers.
+  fill.position.y = 0.4
+  fill.visible = false
+  root.add(outer, fill)
+  return { root, outer, fill }
+}
+
+/** Per-rig materials only; the geometry above is shared. */
+function disposePoint(rig: PointRig): void {
+  for (const m of [rig.outer, rig.fill]) (m.material as THREE.Material).dispose()
 }
 
 /** A name plate. Redrawn only when the name or colour actually changes. */
@@ -2381,6 +2431,7 @@ export class Renderer {
     this.syncCover(game, now)
     this.syncChoppers(game, now)
     this.syncFlags(game, now)
+    this.syncTerritory(game, now)
 
     if (cockpit) this.placeEye(game)
 
@@ -2665,6 +2716,60 @@ export class Renderer {
   /** One pole per side that has somebody on it, by team index. */
   private flagPoles = new Map<number, FlagRig>()
 
+  /** One marker per capture point, by index. Built when a board first has them. */
+  private pointRings = new Map<number, PointRig>()
+
+  /**
+   * Capture points on the felt, coloured by whoever owns them.
+   *
+   * Two rings: the outer one is the point and never moves, the inner one is the
+   * capture in progress and sweeps as it fills. A player standing on a point
+   * needs to know two things without looking away from the fight — whose it is,
+   * and how close the other side is to taking it — and a ring that grows says
+   * the second one without a number.
+   */
+  private syncTerritory(game: Game, now: number): void {
+    const live = game.pointsOn ? game.territory : []
+    for (const [i, rig] of this.pointRings) {
+      if (i < live.length) continue
+      this.scene.remove(rig.root)
+      disposePoint(rig)
+      this.pointRings.delete(i)
+    }
+    for (let i = 0; i < live.length; i++) {
+      const { point, state } = live[i]
+      let rig = this.pointRings.get(i)
+      if (!rig) {
+        rig = makePoint()
+        this.scene.add(rig.root)
+        this.pointRings.set(i, rig)
+      }
+      rig.root.position.set(point.x, GROUND_Y + DECAL_LIFT, point.y)
+
+      const ownerHue = state.owner ? (TEAM_HUE[state.owner] ?? 0) : null
+      const outer = rig.outer.material as THREE.MeshBasicMaterial
+      if (ownerHue === null) {
+        outer.color.setHex(0xd7dde8)
+        outer.opacity = 0.3
+      } else {
+        outer.color.setHSL((ownerHue % 360) / 360, 0.78, 0.58)
+        outer.opacity = 0.6
+      }
+
+      // The fill. Scaled from the middle outward so "nearly taken" reads as a
+      // disc closing on the ring rather than as a colour getting slightly
+      // stronger, which nobody can judge mid-fight.
+      const taking = state.taking
+      rig.fill.visible = taking > 0 && state.progress > 0
+      if (rig.fill.visible) {
+        const fillMat = rig.fill.material as THREE.MeshBasicMaterial
+        fillMat.color.setHSL(((TEAM_HUE[taking] ?? 0) % 360) / 360, 0.8, 0.6)
+        fillMat.opacity = 0.34 + Math.abs(Math.sin(now / 180)) * 0.16
+        rig.fill.scale.setScalar(Math.max(0.05, Math.min(1, state.progress / CAPTURE_S)))
+      }
+    }
+  }
+
   /**
    * Bases on the felt, and the flag on whoever is running with it.
    *
@@ -2674,10 +2779,30 @@ export class Renderer {
    * bare pole and a ring, which is the thing a defender is looking for.
    */
   private syncFlags(game: Game, now: number): void {
-    // Only sides that have a base. A fifth side plays deathmatch — see
-    // `FLAG_TEAMS` — and drawing a pole for it would promise a flag that
-    // `canTake` will never hand over.
+    // Only sides that have a base, and only in a flag round.
+    //
+    // The mode gate is not decoration: `syncFlags` drew a pole for every side
+    // with somebody on it, so a *domination* round came up with flag poles
+    // standing next to the capture points — promising a flag that `canTake`
+    // will never hand over, in a mode that has no flags in it. Photographed
+    // before it was noticed, which is the only way that kind of thing gets
+    // noticed.
+    //
+    // A fifth side has no base either — see `FLAG_TEAMS`.
     const teams = new Set<number>()
+    if (!game.flagsOn) {
+      for (const [team, rig] of this.flagPoles) {
+        this.scene.remove(rig.root)
+        disposeFlag(rig)
+        this.flagPoles.delete(team)
+      }
+      this.carriedOn(this.you, 0, now)
+      for (const peer of game.peers.values()) {
+        const rig = this.rigs.get(peer.session)
+        if (rig) this.carriedOn(rig, 0, now)
+      }
+      return
+    }
     if (game.team && game.team <= FLAG_TEAMS) teams.add(game.team)
     for (const peer of game.peers.values()) {
       if (peer.view.team && peer.view.team <= FLAG_TEAMS) teams.add(peer.view.team)
