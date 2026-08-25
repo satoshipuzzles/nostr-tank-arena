@@ -14,8 +14,26 @@ export const SHELL_SPEED = 430 // px/s
 export const SHELL_RADIUS = 5
 export const SHELL_LIFETIME = 4.0 // seconds
 export const SHELL_BOUNCES = 1
-export const RELOAD = 1.05 // seconds
+export const RELOAD = 1.05 // seconds, between shots inside a magazine
 export const RESPAWN_DELAY = 2.5 // seconds
+/**
+ * Shells in a magazine, and how long a full reload takes.
+ *
+ * Until now "reload" was only a cooldown, so a tank could never be caught
+ * empty and the correct play with a target in the open was to hold the trigger
+ * forever. A magazine is what makes ammo a resource: four shells is one
+ * exchange, and the 2.4 seconds after the fourth is a window where the other
+ * tank gets to close the distance for free. That window is the whole point —
+ * it is what makes cover, positioning and the rapid-fire pickup matter, and it
+ * is why the count is published on the state tick rather than kept private.
+ *
+ * Four and 2.4s are tuned against the 1.05s between shots: a magazine takes
+ * about 3.2 seconds to empty, so the reload is roughly three quarters of the
+ * time you spent shooting. Long enough to be a real loss, short enough that a
+ * miss is not a death sentence.
+ */
+export const MAG_SIZE = 4
+export const MAG_RELOAD = 2.4 // seconds
 export const MUZZLE_OFFSET = 26
 
 export interface Shell {
@@ -146,7 +164,21 @@ export interface LocalTank {
   hp: number
   dead: boolean
   respawnAt: number
+  /** When the next shot inside the current magazine is allowed. */
   reloadAt: number
+  /** Shells left in the magazine. */
+  ammo: number
+  /** When the current magazine reload started, for the HUD's fill bar. */
+  reloadingFrom: number
+  /**
+   * When a magazine reload finishes, or 0 when not reloading.
+   *
+   * Separate from `reloadAt` because they are different states and collapsing
+   * them would make "one shell left, cooling down" indistinguishable from
+   * "empty, reloading" — and the second is the one everybody else needs to be
+   * able to see.
+   */
+  reloadingUntil: number
   /**
    * Where the turret is being told to point, kept as a signed offset from the
    * gun rather than as a bearing, so that a full turn ahead and no turns ahead

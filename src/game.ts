@@ -26,21 +26,26 @@ import {
   type Pickup,
 } from './pickups'
 import { Identity, Net } from './nostr'
+import { DEFAULT_SKIN, asSkin, type SkinId } from './skins'
 import {
   KIND_CLAIM,
   KIND_DEATH,
+  KIND_STRIKE,
   KIND_SESSION,
   KIND_SHELL,
   KIND_STATE,
   type DeathPayload,
   type SessionPayload,
   type ShellPayload,
+  type StrikePayload,
   type StatePayload,
   parsePayload,
   roomTag,
 } from './protocol'
 import {
   MUZZLE_OFFSET,
+  MAG_RELOAD,
+  MAG_SIZE,
   RELOAD,
   RESPAWN_DELAY,
   type LocalTank,
@@ -139,12 +144,65 @@ const CLAIM_BACKFILL = 250
  * now that unknown claims buffer and ids carry the block hash.
  */
 const CLAIM_TTL = 600
-/** Kills in a row that earn a full repair. */
+/**
+ * The kill-streak ladder.
+ *
+ * Puzz asked for tiers at 5, 10, 15, 20 and 25. The repair at 3 stays under
+ * them as the first rung, because a ladder whose bottom step is five kills is
+ * a ladder almost nobody in a four-player room ever stands on — most rounds
+ * are a block long and three in a row is already a good round.
+ *
+ * Everything except the air strike is *self-authoritative*: it changes only
+ * our own HP and our own buffs, which this client is already allowed to
+ * decide, so a reward needs no new trust, no new event kind and no agreement
+ * with anybody. It rides out in the next state tick like any other HP change.
+ * The air strike is the one that reaches across the arena, and that is exactly
+ * why it is the one with a wire format.
+ */
 const STREAK_REPAIR = 3
-/** Kills in a row that earn rapid fire, and a glow so everyone can see it. */
-const STREAK_RAPID = 5
+/** Kills in a row that call an air strike. The marquee reward. */
+const STREAK_STRIKE = 5
+/** Rapid fire and a fresh hull. */
+const STREAK_OVERDRIVE = 10
+/** Siege shells: every shot takes two hull points instead of one. */
+const STREAK_SIEGE = 15
+/** Shield and speed together, which is the "come and try it" tier. */
+const STREAK_JUGGERNAUT = 20
+/** A second, longer air strike. Nothing beyond this changes; 25 is the top. */
+const STREAK_CARPET = 25
 /** How long the streak reward's rapid fire lasts. */
 const STREAK_RAPID_MS = 14_000
+const STREAK_SIEGE_MS = 20_000
+const STREAK_JUGGER_MS = 12_000
+
+/**
+ * Bombs in a five-kill strike, and in the twenty-five-kill one.
+ *
+ * Sized so the line is *continuous*. The first version dropped nine across a
+ * 1728-unit run, which is one bomb every 216 units against a 64-unit blast
+ * radius — so two thirds of the lane was safe ground and a tank standing still
+ * in the middle of the strike usually took nothing at all. It looked
+ * spectacular and did nothing, which is the worst thing a kill streak can be.
+ * At fourteen the gaps close and standing in the lane is fatal, which is what
+ * makes the warning stripe and the two seconds of siren mean something.
+ */
+const STRIKE_BOMBS = 14
+const CARPET_BOMBS = 22
+/** Seconds between one bomb and the next, and the hull each one takes off. */
+const STRIKE_STEP_MS = 190
+const STRIKE_DAMAGE = 2
+/**
+ * How close a bomb has to land.
+ *
+ * A tank is 22 units across and the board is 1600 wide, so 64 is "you were in
+ * the lane" rather than "you were unlucky". Wide enough that standing in the
+ * open on the wrong row is a decision with a consequence, tight enough that
+ * driving out of the lane is a real answer — which is the whole reason the
+ * bombs walk instead of landing all at once.
+ */
+const STRIKE_RADIUS = 64
+/** How long after its last bomb a finished strike is kept around. */
+const STRIKE_LINGER_MS = 1_500
 /** How long the podium sits between rounds. */
 export const INTERMISSION_MS = 9_000
 const SESSION_REBROADCAST_MS = 12_000
@@ -173,7 +231,16 @@ export interface Peer {
   hasOffset: boolean
   lastSeen: number
   buffer: StateSample[]
-  view: { x: number; y: number; hull: number; gun: number; hp: number; dead: boolean }
+  view: {
+    x: number
+    y: number
+    hull: number
+    gun: number
+    hp: number
+    dead: boolean
+    /** Shells left in their magazine; 0 means empty or reloading. */
+    ammo: number
+  }
   /** What we counted for them out of the death events we personally received. */
   kills: number
   deaths: number
@@ -194,6 +261,30 @@ export interface Peer {
   claimed: { kills: number; deaths: number } | null
   /** Their kills in a row, from the state tick, so their glow is visible here too. */
   streak: number
+  /** The finish they picked. Purely cosmetic; see `src/skins.ts`. */
+  skin: SkinId
+}
+
+/** One air strike being re-simulated locally. See `StrikePayload`. */
+interface Strike {
+  id: string
+  /** Session pubkey of whoever called it, so a kill is credited correctly. */
+  owner: string
+  /** Start of the run, already shifted into *our* clock. */
+  t0: number
+  y: number
+  dir: 1 | -1
+  n: number
+  damage: number
+  /**
+   * Which bombs have already gone off here.
+   *
+   * Indices rather than a counter: a client that tabs out and comes back finds
+   * six bombs due at once, and a counter would fire one and silently drop the
+   * rest — the same "record first, match second" bug that used to throw away
+   * kills from unknown peers, in a different costume.
+   */
+  fired: Set<number>
 }
 
 interface StateSample {
@@ -204,6 +295,7 @@ interface StateSample {
   gun: number
   hp: number
   dead: boolean
+  ammo: number
 }
 
 export interface FeedEntry {
@@ -244,6 +336,19 @@ export class Game {
   readonly tank: LocalTank
   readonly peers = new Map<string, Peer>()
   readonly shells = new Map<string, Shell>()
+  /**
+   * Air strikes in progress, by event id. Re-simulated from the payload rather
+   * than driven by per-bomb events, so a whole run costs one event.
+   */
+  readonly strikes = new Map<string, Strike>()
+  /**
+   * Blasts that went off since the renderer last looked.
+   *
+   * A queue rather than a flag, because two bombs can land inside one frame at
+   * 190ms cadence on a machine dropping frames, and a flag would draw one
+   * explosion for both. The renderer drains it.
+   */
+  readonly blasts: { x: number; y: number; mine: boolean }[] = []
   readonly feed: FeedEntry[] = []
   kills = 0
   deaths = 0
@@ -429,6 +534,8 @@ export class Game {
      * them wait rather than bouncing them.
      */
     public watching = false,
+    /** The finish this tank wears. Cosmetic only — see `src/skins.ts`. */
+    public skin: SkinId = DEFAULT_SKIN,
   ) {
     this.displayColor = color
     const spawn = SPAWNS[Math.floor(Math.random() * SPAWNS.length)]
@@ -441,6 +548,9 @@ export class Game {
       dead: false,
       respawnAt: 0,
       reloadAt: 0,
+      ammo: MAG_SIZE,
+      reloadingFrom: 0,
+      reloadingUntil: 0,
     }
   }
 
@@ -474,7 +584,7 @@ export class Game {
   async start(): Promise<void> {
     this.net.subscribe(
       {
-        kinds: [KIND_SESSION, KIND_STATE, KIND_SHELL, KIND_DEATH],
+        kinds: [KIND_SESSION, KIND_STATE, KIND_SHELL, KIND_DEATH, KIND_STRIKE],
         '#t': [roomTag(this.room)],
         // Deliberately tiny. Nothing on this subscription is worth replaying —
         // `onEvent` drops everything that arrives before EOSE — so this only
@@ -505,6 +615,7 @@ export class Game {
       name: this.name,
       color: this.color,
       exp: Math.floor(Date.now() / 1000) + SESSION_TTL_S,
+      sk: this.skin,
     }
     const signed = await this.identity.signAsSelf({
       kind: KIND_SESSION,
@@ -638,6 +749,8 @@ export class Game {
         return this.onShell(e)
       case KIND_DEATH:
         return this.onDeath(e)
+      case KIND_STRIKE:
+        return this.onStrike(e)
       case KIND_CLAIM:
         return this.onClaim(e)
     }
@@ -655,6 +768,7 @@ export class Game {
     peer.pubkey = e.pubkey
     peer.name = typeof p.name === 'string' && p.name ? p.name.slice(0, 20) : peer.name
     peer.color = typeof p.color === 'number' ? p.color % 360 : peer.color
+    peer.skin = asSkin(p.sk)
   }
 
   private ensurePeer(session: string): Peer {
@@ -670,11 +784,19 @@ export class Game {
         hasOffset: false,
         lastSeen: performance.now(),
         buffer: [],
-        view: { x: ARENA_W / 2, y: ARENA_H / 2, hull: 0, gun: 0, hp: this.maxHp, dead: false },
+        view: {
+        x: ARENA_W / 2, y: ARENA_H / 2, hull: 0, gun: 0,
+        hp: this.maxHp, dead: false,
+        // Assume loaded until told otherwise: showing every peer as empty for
+        // their first 100ms would flash a reload marker over every tank that
+        // joins, and "empty" is the reading that changes how you play.
+        ammo: MAG_SIZE,
+      },
         kills: 0,
         deaths: 0,
         claimed: null,
         streak: 0,
+        skin: DEFAULT_SKIN,
       }
       this.peers.set(session, peer)
       // Somebody just arrived, and they missed everything we have already said.
@@ -715,6 +837,10 @@ export class Game {
       gun: p.g,
       hp: typeof p.hp === 'number' ? p.hp : this.maxHp,
       dead: !!p.d,
+      // A client too old to send one is assumed loaded. Guessing "empty" for
+      // an old client would put a reload marker over a tank that is about to
+      // shoot you, which is worse than saying nothing.
+      ammo: typeof p.a === 'number' ? Math.max(0, Math.min(MAG_SIZE, Math.floor(p.a))) : MAG_SIZE,
     }
     // Cosmetic and self-reported, exactly like the HP beside it. A streak you
     // cannot see on the tank that has it is a number in somebody else's HUD.
@@ -806,6 +932,44 @@ export class Game {
   }
 
   /**
+   * The magazine clock: finish a reload that is running, or start one.
+   *
+   * Empty always reloads by itself. A player on a phone has no key to press and
+   * a player who has not noticed the pips should never be left holding a dead
+   * trigger wondering what broke — "the gun reloads when it runs out" is the
+   * behaviour every shooter has trained people to expect. The manual reload is
+   * for topping up *before* that, which is the interesting decision: spend two
+   * and a half seconds in cover now, or gamble that two shells is enough.
+   */
+  private stepMagazine(now: number, asked: boolean): void {
+    if (this.tank.reloadingUntil) {
+      if (now >= this.tank.reloadingUntil) {
+        this.tank.reloadingUntil = 0
+        this.tank.ammo = MAG_SIZE
+        // The next shot is available immediately: the reload *was* the wait.
+        this.tank.reloadAt = 0
+        this.sound('reload')
+      }
+      return
+    }
+    if (this.tank.ammo <= 0 || (asked && this.tank.ammo < MAG_SIZE)) {
+      this.beginMagazineReload(now)
+    }
+  }
+
+  private beginMagazineReload(now: number): void {
+    if (this.tank.reloadingUntil) return
+    // Rapid fire shortens the reload as well as the gap between shots. It would
+    // be a strange buff that made you shoot twice as fast into the same dry
+    // magazine and then stand still for the same two and a half seconds.
+    const rapid = hasBuff(this.buffs, 'rapidUntil', now) ? 0.42 : 1
+    this.tank.reloadingFrom = now
+    this.tank.reloadingUntil = now + MAG_RELOAD * 1000 * rapid * this.modifier.reload
+    this.tank.ammo = 0
+    this.sound('dry')
+  }
+
+  /**
    * A kill we were credited with.
    *
    * The repair is deliberately self-authoritative: our own HP is the one number
@@ -819,19 +983,138 @@ export class Game {
     this.streak++
     this.bestStreak = Math.max(this.bestStreak, this.streak)
 
-    if (this.streak === STREAK_REPAIR) {
-      this.tank.hp = this.maxHp
-      this.repairedAt = now
-      this.sound('streak')
-      this.announce(`${STREAK_REPAIR} IN A ROW`, 'hull repaired', 130)
-    } else if (this.streak === STREAK_RAPID) {
-      this.sound('streak')
-      this.buffs.rapidUntil = Math.max(this.buffs.rapidUntil, now) + STREAK_RAPID_MS
-      this.announce(`${STREAK_RAPID} IN A ROW`, 'rapid fire — and everyone can see you', 20)
-    } else if (this.streak > STREAK_RAPID) {
-      this.announce(`${this.streak} IN A ROW`, 'unstoppable', 45)
-    } else {
-      this.pushFeed(`${this.streak} in a row`)
+    switch (this.streak) {
+      case STREAK_REPAIR:
+        this.tank.hp = this.maxHp
+        this.repairedAt = now
+        this.sound('streak')
+        this.announce(`${STREAK_REPAIR} IN A ROW`, 'hull repaired', 130)
+        return
+      case STREAK_STRIKE:
+        this.sound('streak')
+        this.callStrike(now, STRIKE_BOMBS)
+        this.announce(`${STREAK_STRIKE} IN A ROW`, 'air strike inbound', 20)
+        return
+      case STREAK_OVERDRIVE:
+        this.sound('streak')
+        this.tank.hp = this.maxHp
+        this.repairedAt = now
+        this.buffs.rapidUntil = Math.max(this.buffs.rapidUntil, now) + STREAK_RAPID_MS
+        this.announce(`${STREAK_OVERDRIVE} IN A ROW`, 'overdrive — full hull, rapid fire', 20)
+        return
+      case STREAK_SIEGE:
+        this.sound('streak')
+        this.buffs.siegeUntil = Math.max(this.buffs.siegeUntil, now) + STREAK_SIEGE_MS
+        this.announce(`${STREAK_SIEGE} IN A ROW`, 'siege shells — two hull a hit', 300)
+        return
+      case STREAK_JUGGERNAUT:
+        this.sound('streak')
+        this.tank.hp = this.maxHp
+        this.repairedAt = now
+        this.buffs.shieldUntil = Math.max(this.buffs.shieldUntil, now) + STREAK_JUGGER_MS
+        this.buffs.speedUntil = Math.max(this.buffs.speedUntil, now) + STREAK_JUGGER_MS
+        this.announce(`${STREAK_JUGGERNAUT} IN A ROW`, 'juggernaut — shielded and fast', 190)
+        return
+      case STREAK_CARPET:
+        this.sound('streak')
+        this.callStrike(now, CARPET_BOMBS)
+        this.announce(`${STREAK_CARPET} IN A ROW`, 'carpet bombing', 0)
+        return
+    }
+    if (this.streak > STREAK_CARPET) this.announce(`${this.streak} IN A ROW`, 'unstoppable', 45)
+    else this.pushFeed(`${this.streak} in a row`)
+  }
+
+  /**
+   * Call an air strike: a line of bombs walking across the board.
+   *
+   * The lane is chosen away from us — a reward that can kill the person who
+   * earned it is not a reward, and "the bombs avoid the caller" is a rule a
+   * player can see working rather than a hidden exemption. It is picked as the
+   * row furthest from our own tank so the run still crosses the middle of the
+   * arena, where everyone else is.
+   *
+   * One event for the whole run. Every client walks the same line from `t0`,
+   * so twelve explosions cost one publish — worth stating because a strike is
+   * already the loudest thing in the game and it should not also be the
+   * heaviest thing on the relay.
+   */
+  private callStrike(now: number, bombs: number): void {
+    const y = this.tank.y < ARENA_H / 2 ? ARENA_H * 0.72 : ARENA_H * 0.28
+    const dir: 1 | -1 = this.tank.x < ARENA_W / 2 ? 1 : -1
+    const payload: StrikePayload = { t0: now, y, dir, n: bombs, d: STRIKE_DAMAGE }
+    const id = randomId()
+    // Ours runs locally from the same numbers rather than waiting for the relay
+    // to echo it back — otherwise the person who called it watches their own
+    // strike arrive a round trip late, and on a bad relay not at all.
+    this.strikes.set(id, {
+      id,
+      owner: this.identity.sessionPubkey,
+      t0: now,
+      y,
+      dir,
+      n: bombs,
+      damage: STRIKE_DAMAGE,
+      fired: new Set(),
+    })
+    this.publishAsSession(KIND_STRIKE, payload)
+  }
+
+  private onStrike(e: Event): void {
+    const p = parsePayload<StrikePayload>(e.content)
+    if (!p || typeof p.t0 !== 'number' || typeof p.y !== 'number') return
+    if (this.strikes.has(e.id)) return
+    const peer = this.ensurePeer(e.pubkey)
+    peer.lastSeen = performance.now()
+    this.updateOffset(peer, p.t0)
+    this.strikes.set(e.id, {
+      id: e.id,
+      owner: e.pubkey,
+      // Into our clock, like every other timestamp that crosses the wire.
+      t0: p.t0 + peer.offset,
+      y: Math.max(0, Math.min(ARENA_H, p.y)),
+      dir: p.dir === -1 ? -1 : 1,
+      n: Math.max(1, Math.min(40, Math.floor(p.n))),
+      damage: Math.max(1, Math.min(MAX_HULL, Math.floor(p.d))),
+      fired: new Set(),
+    })
+    this.sound('siren', { at: { x: ARENA_W / 2, y: p.y } })
+    this.pushFeed(`${peer.name} called an air strike`)
+  }
+
+  /**
+   * Walk every live strike forward and detonate whatever is due.
+   *
+   * Damage is applied the same way a shell's is — by the victim, to itself —
+   * so a strike needs no more trust than the rest of the game already extends.
+   * The caller is exempt.
+   */
+  private stepStrikes(now: number): void {
+    for (const [id, strike] of this.strikes) {
+      const span = ARENA_W + STRIKE_RADIUS * 2
+      for (let i = 0; i < strike.n; i++) {
+        if (strike.fired.has(i)) continue
+        if (now < strike.t0 + i * STRIKE_STEP_MS) continue
+        strike.fired.add(i)
+        const t = strike.n > 1 ? i / (strike.n - 1) : 0.5
+        const along = strike.dir === 1 ? t : 1 - t
+        const x = -STRIKE_RADIUS + along * span
+        const mine = strike.owner === this.identity.sessionPubkey
+        this.blasts.push({ x, y: strike.y, mine })
+        this.sound('blast', { at: { x, y: strike.y } })
+        if (mine || this.watching || this.tank.dead) continue
+        const dx = this.tank.x - x
+        const dy = this.tank.y - strike.y
+        if (dx * dx + dy * dy > STRIKE_RADIUS * STRIKE_RADIUS) continue
+        if (hasBuff(this.buffs, 'shieldUntil', now)) {
+          this.sound('shield')
+          continue
+        }
+        this.tank.hp -= strike.damage
+        this.sound('hit')
+        if (this.tank.hp <= 0) this.die(strike.owner)
+      }
+      if (now > strike.t0 + strike.n * STRIKE_STEP_MS + STRIKE_LINGER_MS) this.strikes.delete(id)
     }
   }
 
@@ -927,7 +1210,10 @@ export class Game {
     } else {
       const boost = (hasBuff(this.buffs, 'speedUntil', now) ? 1.45 : 1) * this.modifier.speed
       stepTank(this.tank, controls.throttle, controls.steer, controls.aim, dt, boost)
-      if (controls.fire && now >= this.tank.reloadAt) this.fire(now)
+      this.stepMagazine(now, controls.reload)
+      if (controls.fire && this.tank.ammo > 0 && !this.tank.reloadingUntil && now >= this.tank.reloadAt) {
+        this.fire(now)
+      }
       this.sweepPickups(now)
     }
     this.refreshPickups()
@@ -941,6 +1227,7 @@ export class Game {
       this.collide(shell)
     }
 
+    this.stepStrikes(now)
     this.interpolate(now)
     this.prunePeers(now)
     this.spreadColors()
@@ -1026,6 +1313,11 @@ export class Game {
   private fire(now: number): void {
     const rapid = hasBuff(this.buffs, 'rapidUntil', now) ? 0.42 : 1
     this.tank.reloadAt = now + RELOAD * 1000 * rapid * this.modifier.reload
+    // One shell per pull, even when Scattershot turns it into three. Charging
+    // three would leave a scattergun with one and a bit shots in the magazine,
+    // which is not a pickup, it is a punishment.
+    this.tank.ammo--
+    if (this.tank.ammo <= 0) this.beginMagazineReload(now)
     const bounces = this.modifier.bounces
     const damage = hasBuff(this.buffs, 'siegeUntil', now) ? 2 : 1
     const spread = hasBuff(this.buffs, 'scatterUntil', now) ? [-SCATTER_SPREAD, 0, SCATTER_SPREAD] : [0]
@@ -1104,6 +1396,12 @@ export class Game {
     this.tank.y = best.y
     this.tank.hp = this.maxHp
     this.tank.dead = false
+    // Full magazine and no reload in progress. Respawning into the two seconds
+    // that were left on a reload you died during is a punishment for dying that
+    // the respawn delay has already handed out.
+    this.tank.ammo = MAG_SIZE
+    this.tank.reloadingUntil = 0
+    this.tank.reloadAt = 0
     this.sound('respawn')
     this.tank.hull = Math.atan2(ARENA_H / 2 - best.y, ARENA_W / 2 - best.x)
     this.tank.gun = this.tank.hull
@@ -1136,6 +1434,7 @@ export class Game {
         peer.view.gun = newest.gun
         peer.view.hp = newest.hp
         peer.view.dead = newest.dead
+        peer.view.ammo = newest.ammo
         continue
       }
 
@@ -1156,6 +1455,9 @@ export class Game {
       peer.view.gun = lerpAngle(a.gun, bb.gun, t)
       peer.view.hp = bb.hp
       peer.view.dead = bb.dead
+      // Taken from the newer of the two samples, like HP: a magazine count is a
+      // step, not a slope, and half a shell is not a thing to draw.
+      peer.view.ammo = bb.ammo
       while (b.length > 2 && b[1].t < renderAt) b.shift()
     }
   }
@@ -1223,6 +1525,11 @@ export class Game {
       ks: this.kills,
       ds: this.deaths,
       r: this.round,
+      // Ammo goes on the wire because being caught empty is only a real cost if
+      // the other tank can *see* it. A reload you can hide is just a private
+      // pause; a reload everyone can read is the window that makes cover and
+      // positioning matter. Self-reported, like the HP beside it.
+      a: this.tank.reloadingUntil ? 0 : this.tank.ammo,
     }
     this.publishAsSession(KIND_STATE, payload)
   }
@@ -1276,6 +1583,9 @@ export class Game {
     this.streak = 0
     this.bestStreak = 0
     clearBuffs(this.buffs)
+    // A strike called under the old block does not keep bombing the new one.
+    this.strikes.clear()
+    this.blasts.length = 0
     // Peer tallies are ours to keep, not theirs to send, so they reset here too.
     for (const peer of this.peers.values()) {
       peer.kills = 0

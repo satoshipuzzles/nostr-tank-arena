@@ -35,6 +35,10 @@ export type Sound =
   | 'streak'
   | 'block'
   | 'respawn'
+  | 'dry'
+  | 'reload'
+  | 'siren'
+  | 'blast'
 
 export interface PlayOpts {
   /** Where it happened, in arena pixels. Omit for something that happened to you. */
@@ -214,6 +218,34 @@ export class Sfx {
         break
       case 'respawn':
         this.tone(ctx, out, t, { type: 'triangle', from: 220, to: 440, dur: 0.22, gain: 0.22 * volume })
+        break
+      case 'dry':
+        // The magazine ran out. A dull mechanical clack — deliberately not
+        // musical, because it has to be legible under a firefight as "that was
+        // the last one" rather than as another shot.
+        this.noise(ctx, out, t, { dur: 0.05, gain: 0.32 * volume, from: 2600, to: 900 })
+        this.tone(ctx, out, t, { type: 'square', from: 160, to: 90, dur: 0.07, gain: 0.16 * volume })
+        break
+      case 'siren':
+        // The air-strike warning. A two-note rise and fall, long enough to be a
+        // sentence rather than a blip: it is the only sound in the game that
+        // means "move", and a player has about two seconds to act on it.
+        this.tone(ctx, out, t, { type: 'sawtooth', from: 420, to: 620, dur: 0.5, gain: 0.2 * volume })
+        this.tone(ctx, out, t + 0.5, { type: 'sawtooth', from: 620, to: 380, dur: 0.6, gain: 0.2 * volume })
+        break
+      case 'blast':
+        // One bomb. Heavier and lower than a shell hit, and mostly noise —
+        // a run of nine of these 190ms apart should read as a rolling wall
+        // rather than as nine separate events.
+        this.noise(ctx, out, t, { dur: 0.42, gain: 0.7 * volume, from: 1800, to: 60 })
+        this.tone(ctx, out, t, { type: 'sawtooth', from: 110, to: 28, dur: 0.4, gain: 0.4 * volume })
+        break
+      case 'reload':
+        // Two clacks and a rising note: the magazine going home. The rise is
+        // what makes it read as *ready* rather than as one more empty click.
+        this.noise(ctx, out, t, { dur: 0.04, gain: 0.22 * volume, from: 3000, to: 1200 })
+        this.noise(ctx, out, t + 0.07, { dur: 0.05, gain: 0.26 * volume, from: 2200, to: 700 })
+        this.tone(ctx, out, t + 0.07, { type: 'triangle', from: 330, to: 560, dur: 0.16, gain: 0.2 * volume })
         break
     }
   }

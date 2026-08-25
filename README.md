@@ -40,15 +40,66 @@ explorer that lies shifts *when* rounds flip for everyone reading it rather
 than desynchronising anybody. It cannot touch the simulation, hit detection or
 scores.
 
-## Kill streaks and repairs
+## Kill streaks
 
-- Three kills without dying repairs your hull to full.
-- Eight seconds without taking a hit gives one hull point back.
+Kills in a row, without dying:
 
-Both are self-authoritative, which is the point: your own HP is already the one
-number this client decides, so neither needed a new event kind, a new trust
-assumption, or agreement with anybody. They ride out in the next state tick like
-any other HP change. `Game.regenAfter` is the knob.
+| Streak | Reward |
+| --- | --- |
+| 3 | Hull repaired to full |
+| 5 | **Air strike** — a line of bombs walks across the far half of the board |
+| 10 | Overdrive — full hull and rapid fire |
+| 15 | Siege shells — every shot takes two hull points |
+| 20 | Juggernaut — full hull, shielded and fast |
+| 25 | Carpet bombing — a longer air strike |
+
+Separately, eight seconds without taking a hit gives one hull point back;
+`Game.regenAfter` is the knob.
+
+Everything on that ladder except the air strike is **self-authoritative**, and
+that is the point: your own HP and your own buffs are already the numbers this
+client decides, so no rung needed a new event kind, a new trust assumption, or
+agreement with anybody. They ride out in the next state tick like any other HP
+change, and a cheater who hands themselves hull points was always able to.
+
+The air strike is the one that reaches across the arena, which is exactly why it
+is the one with a wire format — kind `21004`, one event for the whole run.
+Every client walks the same line from `t0` and each bomb detonates at a position
+anyone can compute, so a fourteen-bomb strike costs one publish rather than
+fourteen. Damage travels in the payload for the same reason it travels on a
+shell: the *victim* applies it, and the victim cannot see what the caller had
+going on when they earned it. The caller is exempt, and the lane is chosen on
+the far side of the board from them.
+
+The bombs are spaced to leave **no gaps**. The first version dropped nine across
+a 1728-unit run — one every 216 units against a 64-unit blast radius — so two
+thirds of the lane was safe ground and a tank standing still in the middle of a
+strike usually took nothing. It looked spectacular and did nothing, which is the
+worst thing a kill streak can be. Fourteen closes the line, and that is what
+makes the warning worth heeding: the lane lights up on the felt and a siren
+sounds about two seconds before the first bomb, so a strike is survivable if you
+move and fatal if you do not.
+
+## Tank skins
+
+Six finishes — Plastic, Matte, Chrome, Neon, Rust and Carbon — chosen in the
+lobby and carried on the session attestation (`sk`) rather than on the state
+tick, because it changes about once a session and re-transmitting a lobby
+setting ten times a second forever would be paying a tick-stream price for
+nothing.
+
+**A skin never takes a player's colour away.** Every tank's hue comes from its
+own pubkey and is spread across a fixed palette so four tanks are obviously four
+colours; that is the single most load-bearing piece of legibility in a four-way
+scramble. So a skin changes the *finish* — lightness, metalness, roughness, how
+much the hull glows — and the hue survives all six. `Carbon` is the exception
+that proves the rule: its hull is nearly black, so the usual gunmetal trim would
+leave a tank with no colour anywhere, and below a lightness of 0.4 the trim
+takes the hue instead. The colour moves rather than disappearing.
+
+Skins are cosmetic only. Tank *classes* — different hulls that drive and shoot
+differently — are a separate and much larger piece of work, filed as its own
+issue.
 
 ## The board
 
@@ -335,9 +386,10 @@ subscribes you to an entire match.
 | Kind | Name | Storage | Signed by | Content |
 |------|------|---------|-----------|---------|
 | `21003` | session attestation | ephemeral | **real npub** | `{ s, name, color, exp }` |
-| `21000` | tank state tick | ephemeral | session key | `{ t, x, y, h, g, hp, d, k?, ks?, ds?, r? }` |
+| `21000` | tank state tick | ephemeral | session key | `{ t, x, y, h, g, hp, d, k?, ks?, ds?, r?, a? }` |
 | `21001` | shell fired | ephemeral | session key | `{ id, t0, x, y, a, b?, d? }` |
 | `21002` | death report | ephemeral | session key | `{ t, k, x, y }` |
+| `21004` | air strike | ephemeral | session key | `{ t0, y, dir, n, d }` |
 | `30078` | score record | addressable (NIP-78) | **real npub** | `{ kills, deaths, room, at }` |
 | `30078` | pickup claim | addressable (NIP-78) + NIP-40 | session key | `{ id, kind, at }` |
 | `30078` | room presence | addressable (NIP-78) + NIP-40 | **real npub** | `{ room, name, hue, role, block?, layout?, at }` |
@@ -387,6 +439,23 @@ dropped, which costs that peer about a second of showing 0/0.
 
 Self-reported, therefore forgeable — see [How to cheat this](#how-to-cheat-this),
 where this is item 5 and the trade is written out.
+
+`a` on the state tick is how many shells are left in the sender's magazine, 0
+while reloading. It is on the wire for a gameplay reason rather than a
+bookkeeping one: an empty magazine is only a real cost if the tank across the
+arena can *see* it. A reload nobody can read is a private pause; a reload
+everybody can read is the two and a half seconds in which the right play is to
+close the distance. A tank with an empty magazine wears a charcoal name plate
+with an amber rim, which is a change no player hue can imitate — hues come from
+a fixed palette of six saturated colours and that plate is neither saturated nor
+coloured.
+
+A magazine is four shells and a full reload is 2.4 seconds against 1.05 seconds
+between shots, so the reload costs roughly three quarters of the time you spent
+shooting. Empty always reloads by itself — a phone has no key to press — and
+`R` (or button 2 on a pad, which is X on an Xbox and Square on a DualSense)
+tops up early, which is the interesting decision: spend the time in cover now,
+or gamble that two shells is enough.
 
 `b` on the fire event is the shell's bounce budget, and it travels with the shell
 rather than being read from the current round's rules when the event arrives.

@@ -30,6 +30,15 @@ export interface Controls {
   /** Absolute gun angle in world radians, or null to hold the current one. */
   aim: number | null
   fire: boolean
+  /**
+   * Asked for a reload before the magazine ran dry.
+   *
+   * Empty always reloads on its own — a phone has no key to press and a player
+   * who cannot see the pips should never be stuck holding a dead trigger. This
+   * is the *early* reload: topping up in cover rather than being caught at one
+   * shell.
+   */
+  reload: boolean
 }
 
 const DEADZONE = 0.22
@@ -144,7 +153,14 @@ export const PLAYER_TWO: Binding = { keys: 'arrows', pad: 1, mouse: false }
 
 const DRIVE_KEYS: Record<
   Binding['keys'],
-  { up: string[]; down: string[]; left: string[]; right: string[]; fire: string[] }
+  {
+    up: string[]
+    down: string[]
+    left: string[]
+    right: string[]
+    fire: string[]
+    reload: string[]
+  }
 > = {
   both: {
     up: ['KeyW', 'ArrowUp'],
@@ -152,8 +168,12 @@ const DRIVE_KEYS: Record<
     left: ['KeyA', 'ArrowLeft'],
     right: ['KeyD', 'ArrowRight'],
     fire: ['Space'],
+    reload: ['KeyR'],
   },
-  wasd: { up: ['KeyW'], down: ['KeyS'], left: ['KeyA'], right: ['KeyD'], fire: ['Space'] },
+  wasd: {
+    up: ['KeyW'], down: ['KeyS'], left: ['KeyA'], right: ['KeyD'],
+    fire: ['Space'], reload: ['KeyR'],
+  },
   // Right hand on the arrows, thumb on Enter or right shift. Several, because
   // which one is comfortable depends entirely on the keyboard.
   arrows: {
@@ -162,8 +182,12 @@ const DRIVE_KEYS: Record<
     left: ['ArrowLeft'],
     right: ['ArrowRight'],
     fire: ['Enter', 'NumpadEnter', 'ShiftRight', 'NumpadAdd'],
+    // Player two's hand is on the right of the keyboard, so `R` is not theirs
+    // to take — it is player one's reload and both `Input`s read the same
+    // physical keyboard.
+    reload: ['Slash', 'NumpadSubtract'],
   },
-  none: { up: [], down: [], left: [], right: [], fire: [] },
+  none: { up: [], down: [], left: [], right: [], fire: [], reload: [] },
 }
 
 export class Input {
@@ -289,7 +313,7 @@ export class Input {
       // already — there is nothing for `fromScreen` to do to them, and rotating
       // them would turn "forward" into a slow spin.
       if (this.scheme === 'tank') {
-        return { throttle: -y, steer: x, aim, fire: touched.fire }
+        return { throttle: -y, steer: x, aim, fire: touched.fire, reload: false }
       }
       const heading = this.fromScreen(x, y, tank.hull)
       const drive = this.toHeading(heading.x, heading.y, tank.hull)
@@ -297,7 +321,10 @@ export class Input {
       // control that is all-or-nothing is why phone games feel twitchy: there
       // is no way to nudge into a corner.
       const push = Math.min(1, Math.hypot(x, y))
-      return { throttle: drive.throttle * push, steer: drive.steer, aim, fire: touched.fire }
+      return {
+        throttle: drive.throttle * push, steer: drive.steer, aim,
+        fire: touched.fire, reload: false,
+      }
     }
 
     const map = DRIVE_KEYS[this.binding.keys]
@@ -314,6 +341,7 @@ export class Input {
     const y = (has(map.down) ? 1 : 0) - (has(map.up) ? 1 : 0)
 
     const fire = (this.binding.mouse && this.mouseDown) || has(map.fire)
+    const reload = has(map.reload)
     const aim =
       this.binding.mouse && this.mouseWorld
         ? Math.atan2(this.mouseWorld.y - tank.y, this.mouseWorld.x - tank.x)
@@ -327,10 +355,10 @@ export class Input {
     // scheme reads the keys as a direction on the board, and only that reading
     // has to be rotated when the board is being seen from inside the turret.
     if (this.scheme === 'tank') {
-      return { throttle: -y, steer: x, aim, fire }
+      return { throttle: -y, steer: x, aim, fire, reload }
     }
     const heading = this.fromScreen(x, y, tank.hull)
-    return { ...this.toHeading(heading.x, heading.y, tank.hull), aim, fire }
+    return { ...this.toHeading(heading.x, heading.y, tank.hull), aim, fire, reload }
   }
 
   /** Where a player with no aiming device is pointing: along the hull. */
@@ -380,6 +408,9 @@ export class Input {
       const aButton = pad.buttons[0]?.pressed ?? false
       const rb = pad.buttons[5]?.pressed ?? false
       const fire = trigger > TRIGGER_FIRE || aButton || rb
+      // Button 2 is X on an Xbox pad and Square on a DualSense, which is where
+      // every shooter on a console has put reload for twenty years.
+      const reload = pad.buttons[2]?.pressed ?? false
       // Claiming the input needs a deliberate push or a real button. A stick
       // sitting just past the deadzone is not somebody asking to play.
       //
@@ -392,6 +423,7 @@ export class Input {
         Math.hypot(axis(2), axis(3)) > CLAIM ||
         aButton ||
         rb ||
+        reload ||
         trigger > TRIGGER_FIRE
       if (!claimed && !this.usingGamepad) continue
       if (claimed) this.usingGamepad = true
@@ -410,9 +442,9 @@ export class Input {
         const drive = this.toHeading(heading.x, heading.y, tank.hull)
         // Scale by how far the stick is pushed, so it is not all-or-nothing.
         const push = Math.min(1, Math.hypot(lx, ly))
-        return { throttle: drive.throttle * push, steer: drive.steer, aim, fire }
+        return { throttle: drive.throttle * push, steer: drive.steer, aim, fire, reload }
       }
-      return { throttle: -ly, steer: lx, aim, fire }
+      return { throttle: -ly, steer: lx, aim, fire, reload }
     }
     return null
   }

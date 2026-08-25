@@ -765,6 +765,80 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
   #lobby-note, .advanced { display: none; }
 }
 
+/* -------------------------------------------------------------- ammo */
+
+/*
+ * The magazine, bottom centre, above where a right thumb sits.
+ *
+ * Centre rather than a corner because it has to be readable without looking
+ * away from your own tank, and it is the one HUD element that changes what you
+ * do in the next second. It is outside `.panel` on purpose — the compact HUD
+ * folds the panels away on a phone and an ammo count you have to tap to see is
+ * an ammo count you will not look at.
+ */
+#ammo {
+  position: absolute;
+  /*
+   * Above the bottom bar, not in it. The first version sat at 16px and landed
+   * exactly on top of `#controls-hint` and the `#hud-actions` row — the pips
+   * were drawn *through* the hint text and the word "reloading" came out
+   * overlapping "gamepad supported". Legible in a screenshot only because I
+   * knew where to look, which is the definition of not legible.
+   */
+  bottom: 76px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  z-index: 4;
+  pointer-events: none;
+}
+#ammo-pips { display: flex; gap: 5px; }
+.pip {
+  width: 9px;
+  height: 22px;
+  border-radius: 3px;
+  border: 1px solid var(--line);
+  background: #0d1119cc;
+}
+/* A loaded shell. Bright enough to count out of the corner of an eye. */
+.pip.live { background: var(--accent); border-color: var(--accent); }
+/* The last one in the magazine, so "nearly dry" is a different shape from
+   "plenty left" and not merely a smaller number of the same thing. */
+.pip.last { background: #f0b23c; border-color: #f0b23c; }
+/*
+ * On a phone the bottom bar is gone — the actions are behind a chip and the
+ * controls hint disappears on the first touch — so the magazine drops to where
+ * a right thumb can see it without looking away from its own stick.
+ */
+body.hud-compact #ammo { bottom: max(12px, env(safe-area-inset-bottom)); }
+
+#ammo-word {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--dim);
+  min-height: 13px;
+}
+/*
+ * Reloading. The pips fill left to right over the reload, driven by `--load`
+ * from JS, so the bar *is* the timer rather than a label next to one.
+ */
+#ammo.reloading .pip {
+  background: linear-gradient(
+    to top,
+    var(--accent) calc(var(--load, 0) * 100%),
+    #0d1119cc calc(var(--load, 0) * 100%)
+  );
+  border-color: #2a3446;
+}
+#ammo.reloading #ammo-word { color: #f0b23c; }
+/* Empty and not yet reloading is a state that should never last long enough to
+   see; if it ever does, it should look wrong rather than look idle. */
+#ammo.dry #ammo-word { color: #e26a6a; }
+
 /* --------------------------------------------------- the compact hud */
 
 /*

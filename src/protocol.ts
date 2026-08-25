@@ -12,6 +12,7 @@ export const KIND_SESSION = 21003 // ephemeral: binds a session key to a real np
 export const KIND_STATE = 21000 // ephemeral: tank state tick
 export const KIND_SHELL = 21001 // ephemeral: a shell was fired
 export const KIND_DEATH = 21002 // ephemeral: victim reports its own death
+export const KIND_STRIKE = 21004 // ephemeral: a kill-streak air strike was called
 export const KIND_SCORE = 30078 // addressable (NIP-78): persistent score record
 /**
  * Pickup claim. Same NIP-78 kind, different `d` namespace — and stored rather
@@ -45,6 +46,16 @@ export interface SessionPayload {
   name: string // display name
   color: number // hue 0-359
   exp: number // unix seconds
+  /**
+   * Chosen skin id. Absent means the default, so an old client is not a
+   * missing tank, it is a plastic one.
+   *
+   * On the attestation rather than on the state tick because it changes about
+   * once a session: re-transmitting a lobby setting ten times a second forever
+   * would be paying a tick-stream price for something nobody ever changes
+   * mid-round. See `src/skins.ts`.
+   */
+  sk?: string
 }
 
 /**
@@ -94,6 +105,16 @@ export interface StatePayload {
    * we are not playing is dropped rather than shown.
    */
   r?: number
+  /**
+   * Shells left in the sender's magazine, 0 while reloading.
+   *
+   * On the wire for a gameplay reason rather than a bookkeeping one: an empty
+   * magazine is only a real cost if the tank across the arena can see it. A
+   * reload nobody can read is a private pause; a reload everybody can read is
+   * the two and a half seconds in which the right play is to close the
+   * distance. Self-reported, exactly like the `hp` above it.
+   */
+  a?: number
 }
 
 /**
@@ -126,6 +147,32 @@ export interface DeathPayload {
   k: string | null // killer session pubkey, null for self-destruct
   x: number
   y: number
+}
+
+/**
+ * An air strike, earned at five kills without dying.
+ *
+ * One event for the whole run rather than one per bomb. Every client
+ * re-simulates the line deterministically from `t0`, exactly like a shell: the
+ * bombs walk across the board at a fixed cadence and each one detonates at a
+ * position anybody can compute. That keeps a twelve-bomb strike at a single
+ * event instead of twelve, which matters — a strike is the loudest thing in
+ * the game and it should not also be the heaviest thing on the relay.
+ *
+ * Damage travels in the payload for the same reason it travels on a shell: the
+ * victim is the one who applies it, and the victim cannot see what the caller
+ * had going on at the moment they earned it.
+ */
+export interface StrikePayload {
+  t0: number // caller's clock when the run starts, ms
+  /** The row the bombs walk along, in arena pixels. */
+  y: number
+  /** 1 for left-to-right, -1 for right-to-left. */
+  dir: 1 | -1
+  /** How many bombs in the run. */
+  n: number
+  /** Hull points each blast takes off. */
+  d: number
 }
 
 export function parsePayload<T>(content: string): T | null {

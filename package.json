@@ -21,7 +21,8 @@
     "test:relay-editor": "node test/relay-editor.mjs",
     "test:aim": "node test/aim.mjs",
     "test:aim-browser": "node test/aim-browser.mjs",
-    "test:score": "node test/score.mjs"
+    "test:score": "node test/score.mjs",
+    "test:arsenal": "node test/arsenal.mjs"
   },
   "dependencies": {
     "nostr-tools": "^2.10.4",

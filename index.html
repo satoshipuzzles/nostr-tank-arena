@@ -45,6 +45,14 @@
       </div>
       <div class="panel" id="scoreboard"></div>
       <div class="panel" id="status"></div>
+      <!-- Ammo. Deliberately outside the collapsible panels: on a phone the
+           scoreboard and the relay line are things you glance at, and the
+           magazine is something you have to be able to read *during* a fight
+           without opening anything. -->
+      <div id="ammo" hidden>
+        <div id="ammo-pips" aria-hidden="true"></div>
+        <div id="ammo-word"></div>
+      </div>
       <div id="crosshair" hidden><i></i></div>
       <div id="notice" hidden></div>
       <div id="rules" hidden></div>
@@ -54,7 +62,7 @@
       <div id="feed"></div>
       <div id="controls-hint">
         <span><b>WASD</b> drive</span><span><b>mouse</b> aim</span><span><b>click / space</b> fire</span
-        ><span><b>V</b> cockpit</span><span><b>gamepad</b> supported</span
+        ><span><b>R</b> reload</span><span><b>V</b> cockpit</span><span><b>gamepad</b> supported</span
         ><span id="hint-p2" hidden><b>P2:</b> arrows + enter, or pad 2</span>
       </div>
       <div id="touch-hint" hidden>
@@ -120,6 +128,15 @@
             <button type="button" data-value="2">Two on this screen</button>
           </div>
         </div>
+
+        <!-- Skins are cosmetic only: the finish changes, the player's colour
+             never does. Filled from `SKINS` in src/skins.ts so the markup and
+             the renderer cannot drift apart. -->
+        <div class="seg-row" id="row-skin">
+          <span class="seg-label">Skin</span>
+          <div class="seg" id="skin" role="group" aria-label="Tank skin"></div>
+        </div>
+        <p class="fine" id="skin-blurb"></p>
 
         <div class="seg-row">
           <span class="seg-label">Steering</span>

@@ -30,6 +30,7 @@ import { MAX_HP, RELOAD, TANK_RADIUS } from './sim'
 import { ICON_POLYS, PICKUPS, hasBuff } from './pickups'
 import type { PickupKind } from './pickups'
 import { Avatar } from './avatars'
+import { DEFAULT_SKIN, SKINS, type Skin, type SkinId } from './skins'
 
 // Board furniture, in arena units so it stays in scale with the simulation.
 const WALL_H = 58
@@ -289,7 +290,31 @@ function chalkTexture(): THREE.Texture {
 }
 
 /** A name plate. Redrawn only when the name or colour actually changes. */
-function labelTexture(name: string, hue: number, verified: boolean): THREE.Texture {
+/**
+ * The name plate — and, when `dry`, the "this tank is reloading" state.
+ *
+ * The empty-magazine marker lives *here*, on the plate, after two attempts at
+ * a mesh above the tank failed for the same reason in two different places.
+ * A 46x6 slab at y=101 was inside the plate sprite (152x38 centred on 114
+ * covers 95 to 133) and never reached a pixel; moved to y=64 it landed inside
+ * the driver's face sprite instead. `visible` was `true` both times and a DOM
+ * assertion would have called it shipped. There is no clear air above a tank:
+ * the head, the pips and the plate already use all of it, and above the plate
+ * is past what `framesBoard` keeps on screen for a tank in a corner.
+ *
+ * The plate is the one thing on a tank that is guaranteed to be legible — it
+ * is a `depthTest: false` sprite drawn over everything, and it is the element
+ * players are already reading to tell each other apart. So it carries the
+ * state: the plate goes charcoal with an amber rim and amber text. That is a
+ * change no tank hue can imitate, because hues come from a fixed palette of
+ * six saturated colours and this is neither saturated nor coloured.
+ */
+function labelTexture(
+  name: string,
+  hue: number,
+  verified: boolean,
+  dry: boolean,
+): THREE.Texture {
   const canvas = document.createElement('canvas')
   canvas.width = 512
   canvas.height = 128
@@ -300,9 +325,9 @@ function labelTexture(name: string, hue: number, verified: boolean): THREE.Textu
   const w = Math.min(480, ctx.measureText(text).width + 56)
   const x = (512 - w) / 2
 
-  ctx.fillStyle = `hsl(${hue}, 70%, 42%)`
-  ctx.strokeStyle = '#141a26'
-  ctx.lineWidth = 8
+  ctx.fillStyle = dry ? '#1b212c' : `hsl(${hue}, 70%, 42%)`
+  ctx.strokeStyle = dry ? '#f0b23c' : '#141a26'
+  ctx.lineWidth = dry ? 10 : 8
   roundRect(ctx, x, 22, w, 84, 26)
   ctx.fill()
   ctx.stroke()
@@ -310,7 +335,7 @@ function labelTexture(name: string, hue: number, verified: boolean): THREE.Textu
   ctx.font = '700 52px ui-monospace, Menlo, monospace'
   ctx.textAlign = 'center'
   ctx.textBaseline = 'middle'
-  ctx.fillStyle = verified ? '#ffffff' : '#e2d3a8'
+  ctx.fillStyle = dry ? '#f0b23c' : verified ? '#ffffff' : '#e2d3a8'
   ctx.fillText(text, 256, 66)
 
   const texture = new THREE.CanvasTexture(canvas)
@@ -755,6 +780,8 @@ interface TankView {
   hp: number
   /** This round's hull maximum, which Glass Cannon changes. */
   maxHp: number
+  /** Shells left in their magazine. 0 means empty or mid-reload. */
+  ammo: number
   dead: boolean
   hue: number
   name: string
@@ -762,8 +789,41 @@ interface TankView {
   picture: string | null
   verified: boolean
   streak: number
+  /** The finish this tank wears. See `src/skins.ts`. */
+  skin: SkinId
   /** True for the local player, whose ring is always drawn. */
   mine: boolean
+}
+
+/**
+ * Paint one tank in its chosen finish, without losing its colour.
+ *
+ * The hue is the player's identity — it comes from their pubkey and is spread
+ * across a fixed six-colour palette so four tanks are obviously four colours.
+ * That is the most load-bearing piece of legibility in the game, so every skin
+ * here changes the *finish* and keeps the hue: lightness, metalness, roughness
+ * and how much the hull glows.
+ *
+ * `carbon` is the exception that proves the rule. Its hull is nearly black, so
+ * putting the usual desaturated gunmetal on the trim would produce a tank with
+ * no colour anywhere — the one thing a cosmetic is not allowed to do. Below a
+ * lightness of 0.4 the trim takes the hue instead, at full saturation, so the
+ * colour moves rather than disappearing.
+ */
+function applySkin(rig: TankRig, skin: Skin, hue: number): void {
+  const h = hue / 360
+  const light = Math.max(0.08, Math.min(0.95, 0.58 * skin.light))
+  rig.body.color.setHSL(h, 0.78, light)
+  rig.body.metalness = skin.metalness
+  rig.body.roughness = skin.roughness
+  rig.body.emissive.setHSL(h, 0.9, skin.emissive * 0.45)
+  if (light < 0.4) {
+    rig.trim.color.setHSL(h, 0.85, 0.55)
+  } else if (skin.trim !== null) {
+    rig.trim.color.setHex(skin.trim)
+  } else {
+    rig.trim.color.setHSL(h, 0.4, 0.26)
+  }
 }
 
 function makeTank(): TankRig {
@@ -1098,6 +1158,8 @@ export class Renderer {
   private shellSiege = new THREE.MeshBasicMaterial({ color: 0xff5470 })
 
   private reloadBar: THREE.Mesh
+  /** The ground stripe warning that an air strike is walking down this row. */
+  private strikeLane: THREE.Mesh
   private lastShellSeen = new Map<string, { x: number; y: number }>()
   private wasDead = new Map<string, boolean>()
   private lastHp = MAX_HP
@@ -1192,6 +1254,28 @@ export class Renderer {
     this.reloadBar.renderOrder = 2
     this.reloadBar.visible = false
     this.scene.add(this.reloadBar)
+
+    // A flat stripe the full width of the board, at `GROUND_Y + DECAL_LIFT`
+    // like every other decal. The lift is not decoration: the felt is at
+    // GROUND_Y and a decal placed at the same height z-fights, or worse, ends
+    // up *under* it and is drawn every frame for nobody.
+    this.strikeLane = new THREE.Mesh(
+      // Exactly the board's width. The first version was ARENA_W + 200 so the
+      // ends would not stop short, and the overhang painted an orange smear on
+      // the sky either side of the fence — the stripe is a mark on the felt and
+      // it has no business outside it.
+      new THREE.PlaneGeometry(ARENA_W, 128),
+      new THREE.MeshBasicMaterial({
+        color: 0xff6a3d,
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      }),
+    )
+    this.strikeLane.rotation.x = -Math.PI / 2
+    this.strikeLane.visible = false
+    this.scene.add(this.strikeLane)
 
     this.resize()
     window.addEventListener('resize', this.resize)
@@ -1497,12 +1581,14 @@ export class Renderer {
       gun: game.tank.gun,
       hp: game.tank.hp,
       maxHp,
+      ammo: game.tank.reloadingUntil ? 0 : game.tank.ammo,
       dead: game.tank.dead,
       hue: game.displayColor,
       name: game.name,
       picture: this.pictures(game.identity.isGuest ? null : game.identity.pubkey),
       verified: true,
       streak: game.streak,
+      skin: game.skin,
       mine: true,
     })
     // A spectator's tank exists in the simulation — it is where the board
@@ -1521,16 +1607,19 @@ export class Renderer {
         gun: peer.view.gun,
         hp: peer.view.hp,
         maxHp,
+        ammo: peer.view.ammo,
         dead: peer.view.dead,
         hue: peer.displayColor,
         name: peer.name,
         picture: this.pictures(peer.pubkey),
         verified: peer.pubkey !== null,
         streak: peer.streak,
+        skin: peer.skin,
         mine: localSessions?.has(peer.session) ?? false,
       })
     }
 
+    this.strikes(game, now)
     this.syncShells(game)
     this.syncPickups(game, now)
     if (!game.watching) {
@@ -1666,9 +1755,9 @@ export class Renderer {
     if (dead) {
       rig.body.color.setHex(0x57606e)
       rig.trim.color.setHex(0x3a4049)
+      rig.body.emissive.setHex(0x000000)
     } else {
-      rig.body.color.setHSL(hue / 360, 0.78, 0.58)
-      rig.trim.color.setHSL(hue / 360, 0.4, 0.26)
+      applySkin(rig, SKINS[v.skin] ?? SKINS[DEFAULT_SKIN], hue)
     }
 
     // A dead tank tips over and sinks rather than vanishing, so you can see
@@ -1695,12 +1784,18 @@ export class Renderer {
     rig.driver.visible = !dead
     for (const part of rig.domeParts) part.visible = true
 
-    const key = `${name}|${hue}|${verified}`
+    // The empty magazine is part of the key, so the plate is rebuilt when a tank
+    // runs dry and again when it reloads. That is two 512x128 canvases per
+    // magazine cycle per tank — about one a second in a full four-tank room —
+    // which is why the *previous* texture is disposed rather than left to the
+    // collector.
+    const magEmpty = !dead && v.ammo <= 0
+    const key = `${name}|${hue}|${verified}|${magEmpty}`
     if (rig.labelKey !== key) {
       rig.labelKey = key
       const material = rig.label.material as THREE.SpriteMaterial
       material.map?.dispose()
-      material.map = labelTexture(name, hue, verified)
+      material.map = labelTexture(name, hue, verified, magEmpty)
       material.needsUpdate = true
     }
     rig.label.visible = !dead
@@ -1881,6 +1976,54 @@ export class Renderer {
   }
 
   /** Confetti when anyone goes down — the party-game payoff for landing a shot. */
+  /**
+   * Air strikes: the warning lane, and the bombs going off.
+   *
+   * The lane is drawn as soon as a strike is known and *before* the first bomb
+   * lands, because the whole design of the reward is that it is survivable if
+   * you move. A strike you cannot see coming is not a kill streak, it is a
+   * random death — and the two feel completely different even when the damage
+   * numbers are identical.
+   *
+   * The blasts themselves come off `game.blasts`, which the simulation fills
+   * and this drains. A queue rather than a flag: at 190ms between bombs on a
+   * machine dropping frames, two can land inside one frame and a flag would
+   * draw one explosion for both.
+   */
+  private strikes(game: Game, now: number): void {
+    let lane: { y: number; warn: number } | null = null
+    for (const strike of game.strikes.values()) {
+      // Fade the lane in over the run so it is loudest before the first bomb
+      // and gone by the last, rather than sitting on the board afterwards.
+      const done = strike.fired.size / strike.n
+      if (done >= 1) continue
+      lane = { y: strike.y, warn: 1 - done * 0.8 }
+    }
+    if (lane) {
+      this.strikeLane.visible = true
+      this.strikeLane.position.set(ARENA_W / 2, GROUND_Y + DECAL_LIFT * 1.2, lane.y)
+      const mat = this.strikeLane.material as THREE.MeshBasicMaterial
+      // Floor of 0.30 rather than 0.22, and a shallower pulse. The first
+      // version bottomed out at 0.05 opacity, which on a bright green board is
+      // nothing at all — a warning stripe that is invisible for half of every
+      // pulse is not a warning, and the whole design of this reward is that it
+      // is survivable if you can see it coming.
+      mat.opacity = lane.warn * (0.30 + 0.14 * Math.sin(now / 110))
+    } else {
+      this.strikeLane.visible = false
+    }
+
+    for (const blast of game.blasts) {
+      this.confetti.burst(blast.x, blast.y, 26, 24, { speed: 300, up: 300, y: 14, size: 1.5, life: 0.9 })
+      this.confetti.burst(blast.x, blast.y, 14, 0, { speed: 150, up: 210, y: 10, size: 2.1, life: 1.3 })
+      // Shake scaled by how close it was, so a bomb at the far end of the board
+      // is somebody else's problem and one beside you is not.
+      const d = Math.hypot(blast.x - this.youAt.x, blast.y - this.youAt.y)
+      if (d < 420) this.shake = Math.max(this.shake, 24 * (1 - d / 420))
+    }
+    game.blasts.length = 0
+  }
+
   private deaths(game: Game): void {
     const check = (key: string, dead: boolean, x: number, y: number, hue: number, mine: boolean) => {
       const was = this.wasDead.get(key) ?? false

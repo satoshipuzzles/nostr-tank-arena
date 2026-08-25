@@ -11,7 +11,8 @@ import { type RelayProbe, checkRelay, parseRelayList } from './relays'
 import { Renderer, type ViewMode } from './render'
 import type { ClockDirection } from './nostr'
 import { modifierForBlock } from './modifiers'
-import { RELOAD } from './sim'
+import { MAG_SIZE, RELOAD } from './sim'
+import { SKINS, SKIN_IDS, asSkin } from './skins'
 import { type Buffs, PICKUPS, type PickupKind, iconSvg } from './pickups'
 import { type Profile, Profiles, shortNpub } from './profiles'
 import {
@@ -89,6 +90,22 @@ function segmented(id: string): { value: string } {
 
 const schemeInput = segmented('scheme')
 const soundInput = segmented('sound')
+// Built from `SKINS` before `segmented()` reads the DOM: the picker's options
+// *are* the skin table, so adding a finish is one edit rather than two that can
+// disagree.
+for (const id of SKIN_IDS) {
+  const b = document.createElement('button')
+  b.type = 'button'
+  b.dataset.value = id
+  b.textContent = SKINS[id].label
+  $('skin').appendChild(b)
+}
+const skinInput = segmented('skin')
+const paintSkinBlurb = () => {
+  $('skin-blurb').textContent = SKINS[asSkin(skinInput.value)].blurb
+}
+$('skin').addEventListener('click', paintSkinBlurb)
+
 const playersInput = segmented('players')
 
 /**
@@ -173,6 +190,8 @@ roomInput.value = params.get('room') ?? stored('tank.room') ?? 'lobby'
 relayInput.value = mergeRelays(stored('tank.relays'), stored('tank.relays.offered')).join('\n')
 schemeInput.value = stored('tank.scheme') === 'tank' ? 'tank' : 'direct'
 playersInput.value = stored('tank.players') === '2' ? '2' : '1'
+skinInput.value = asSkin(stored('tank.skin'))
+paintSkinBlurb()
 
 /* ------------------------------------------------------- the compact hud */
 
@@ -991,9 +1010,12 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     const twoPlayer = playersInput.value === '2' && !watching
     store('tank.players', twoPlayer ? '2' : '1')
 
+    const skin = asSkin(skinInput.value)
+    store('tank.skin', skin)
+
     const net = new Net(relays)
     const profiles = new Profiles(net)
-    const game = new Game(identity, net, room, name, color, watching)
+    const game = new Game(identity, net, room, name, color, watching, skin)
     // Only player one has an ear. Two local players share one set of speakers,
     // and every event player two publishes is already heard here as a peer —
     // positioned, through the same code a remote player's shot goes through. A
@@ -1037,7 +1059,9 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
       //
       // It costs a second subscription and double inbound. Worth it.
       const secondNet = new Net(relays)
-      const p2 = new Game(second, secondNet, room, `${name}-2`, (color + 137) % 360)
+      // Player two wears the same skin. It is a setting on the machine, not on
+      // the identity — there is one lobby and one picker in front of one couch.
+      const p2 = new Game(second, secondNet, room, `${name}-2`, (color + 137) % 360, false, skin)
       p2.chainClock = () => ({ seconds: clock.chainSeconds(), pending: clock.chainPending })
       await p2.start()
       // Each is an ordinary peer of the other, through the same signed events —
@@ -1205,6 +1229,7 @@ function loop(now = performance.now()): void {
   const local = new Set(players.map((p) => p.game.identity.sessionPubkey))
   renderer.draw(players[0].game, local)
   paintCrosshair(players[0].game, renderer.viewMode)
+  paintAmmo(players[0].game)
   drawHud(players[0].game)
   drawSecondPlayer(players[1] ?? null, now)
 }
@@ -1240,6 +1265,64 @@ function paintCrosshair(game: Game, view: ViewMode): void {
   // shot and zero at the moment the gun is ready.
   const frac = loading ? Math.min(1, remaining / (RELOAD * 1000)) : 0
   el.style.setProperty('--bloom', `${(frac * RELOAD_BLOOM).toFixed(1)}px`)
+}
+
+/**
+ * The magazine, painted every frame.
+ *
+ * Every frame rather than from `drawHud`, for the same reason as the reticle
+ * bloom above: the HUD repaints on a 120ms throttle, and a 2.4-second reload
+ * drawn in twenty steps reads as a ratchet rather than as a bar. It is also the
+ * one readout a player is watching *while* deciding whether to push, so a
+ * tenth of a second of lag in it is a tenth of a second of lying.
+ *
+ * The pip elements are built once and reused. Rebuilding four nodes a frame is
+ * cheap enough not to matter and still wrong: it throws away the CSS transition
+ * on every repaint, so the fill would jump instead of sweeping.
+ */
+let ammoPips: HTMLElement[] = []
+function paintAmmo(game: Game): void {
+  const box = $('ammo')
+  if (game.watching) {
+    box.hidden = true
+    return
+  }
+  box.hidden = false
+  if (ammoPips.length !== MAG_SIZE) {
+    const row = $('ammo-pips')
+    row.innerHTML = ''
+    ammoPips = Array.from({ length: MAG_SIZE }, () => {
+      const pip = document.createElement('i')
+      pip.className = 'pip'
+      row.appendChild(pip)
+      return pip
+    })
+  }
+
+  const now = performance.now()
+  const reloading = game.tank.reloadingUntil > now && !game.tank.dead
+  const ammo = game.tank.dead ? MAG_SIZE : game.tank.ammo
+  box.classList.toggle('reloading', reloading)
+  box.classList.toggle('dry', !reloading && ammo === 0)
+  if (reloading) {
+    // How far *through* the reload we are, so the pips fill up rather than
+    // draining — a bar that empties as you get closer to being ready is the
+    // wrong way round and people read it without thinking.
+    // Measured against the reload's *own* start and end rather than against the
+    // nominal duration: rapid fire shortens the reload, and a bar scaled to the
+    // full length would fill three fifths of the way and then jump.
+    const span = game.tank.reloadingUntil - game.tank.reloadingFrom
+    const done = span > 0 ? (now - game.tank.reloadingFrom) / span : 1
+    box.style.setProperty('--load', String(Math.max(0, Math.min(1, done))))
+  } else {
+    box.style.removeProperty('--load')
+  }
+  for (const [i, pip] of ammoPips.entries()) {
+    const live = !reloading && i < ammo
+    pip.classList.toggle('live', live && ammo > 1)
+    pip.classList.toggle('last', live && ammo === 1)
+  }
+  $('ammo-word').textContent = reloading ? 'reloading' : ammo === 0 ? 'empty' : ''
 }
 
 let hudAt = 0
