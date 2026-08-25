@@ -56,8 +56,32 @@ export const BEACON_EVERY_MS = 30_000
  */
 export const PRESENCE_TTL_S = 120
 
-/** Seats in a room. Four spawns, four tanks, and everyone can see everyone. */
-export const SEATS = 4
+/**
+ * Seats in a room.
+ *
+ * Puzz: "We need to have rooms with more than 4 players and different map sizes
+ * for different game types."
+ *
+ * Eight, and the number is bounded by the relay rather than by the game. Each
+ * client publishes its own position tick at 10Hz no matter how many people are
+ * in the room, so raising this does not change what anybody *sends* — what it
+ * changes is what everybody receives, which goes up linearly: three peers at
+ * 10Hz is thirty events a second, seven is seventy. Seventy is comfortable for
+ * a socket and uncomfortable for a relay operator, and it is the honest ceiling
+ * until the tick rate scales with occupancy.
+ *
+ * The board does not grow with the room, and that is deliberate. Board size
+ * comes from the block hash — eight layouts from 1500x1100 to 2100x1550 — so
+ * every client agrees on it without being told. Deriving it from *occupancy*
+ * would mean two clients with different relay visibility playing different
+ * board sizes, which is the one thing a shared arena cannot survive.
+ *
+ * This is a lobby number, not a rule. Nothing in the simulation enforces it:
+ * `roleFor` hands a ninth arrival a place in the queue rather than a seat, and
+ * a client that ignores that is a client that ignores it. The queue is a
+ * courtesy, and it has always been one.
+ */
+export const SEATS = 8
 
 export type Role = 'seat' | 'queue' | 'watch'
 

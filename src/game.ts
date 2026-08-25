@@ -374,8 +374,21 @@ export interface RoundResult {
   endedAt: number
 }
 
-/** Six hues nobody can confuse for each other, even as 40px tanks. */
-const PALETTE = [48, 190, 320, 100, 20, 265]
+/**
+ * Hues nobody can confuse for each other, even as 40px tanks.
+ *
+ * Ten, for a room of eight plus headroom. The first six are unchanged and in
+ * the same order, so a player who has been driving amber keeps driving amber —
+ * `spreadColors` walks this list from the slot nearest a player's chosen hue
+ * and takes the first free one, so appending rather than reordering is what
+ * keeps colours stable across a deploy while two tanks are in the same room.
+ *
+ * The four new ones are chosen for distance from the six, not for prettiness:
+ * a spring green between the amber and the lime, a violet, a rose, and a
+ * teal. Every pair on this list is at least 25 degrees apart, which is the gap
+ * at which two 40px tanks stop being the same colour on a phone.
+ */
+const PALETTE = [48, 190, 320, 100, 20, 265, 160, 295, 350, 225]
 
 const randomId = () => {
   const b = new Uint8Array(8)

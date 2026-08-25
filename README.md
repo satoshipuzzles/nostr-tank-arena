@@ -1,6 +1,6 @@
 # Nostr Tank Arena
 
-Four-player tank deathmatch on a board, with **no game server**. Your npub is
+Eight-player tank deathmatch on a board, with **no game server**. Your npub is
 your identity, Nostr relays are the netcode, and your score is an event you
 signed yourself.
 
@@ -70,6 +70,43 @@ fourteen. Damage travels in the payload for the same reason it travels on a
 shell: the *victim* applies it, and the victim cannot see what the caller had
 going on when they earned it. The caller is exempt, and the lane is chosen on
 the far side of the board from them.
+
+### How big a room gets
+
+Eight seats, and the number is bounded by the relay rather than by the game.
+Each client publishes its own tick at 10Hz however many people are in the room,
+so raising the ceiling does not change what anybody *sends* — it changes what
+everybody receives, and that goes up linearly: three peers is thirty events a
+second, seven is seventy. Seventy is comfortable for a socket and uncomfortable
+for a relay operator, and it is the honest ceiling until the tick rate scales
+with occupancy.
+
+Three things had to move together, and none of them fails loudly:
+
+- **Spawns.** Four seats and four spawn points were the same number by
+  coincidence. `respawn` picks the spot furthest from everybody alive, so a
+  room of eight sharing four spawns puts two tanks on top of each other about
+  as often as not — which reads as a netcode bug rather than as a missing spawn
+  point. Every board carries eight now: the four corners, then the middle of
+  each edge, still 180-degree rotationally symmetric.
+- **Colours.** `spreadColors` walks the palette from the slot nearest a
+  player's chosen hue and takes the first free one, so six slots and eight
+  players means two people driving the same colour — and that is only wrong at
+  the moment they meet. Ten hues now, every pair at least 25 degrees apart,
+  with the original six unchanged and in the same order so nobody's tank
+  changes colour across a deploy.
+- **The scoreboard**, which went from four rows to eight in a 800px window.
+
+The board does **not** grow with the room, deliberately. Board size comes from
+the block hash — eight layouts from 1500x1100 to 2100x1550 — so every client
+agrees on it without being told. Deriving it from occupancy would mean two
+clients with different relay visibility playing different board sizes, which is
+the one thing a shared arena cannot survive.
+
+`SEATS` is a lobby number, not a rule. Nothing in the simulation enforces it:
+`roleFor` hands a ninth arrival a place in the queue rather than a seat, and a
+client that ignores that is a client that ignores it. The queue has always been
+a courtesy.
 
 ### Breakable cover
 
@@ -167,7 +204,7 @@ setting ten times a second forever would be paying a tick-stream price for
 nothing.
 
 **A skin never takes a player's colour away.** Every tank's hue comes from its
-own pubkey and is spread across a fixed palette so four tanks are obviously four
+own pubkey and is spread across a fixed palette so eight tanks are obviously eight
 colours; that is the single most load-bearing piece of legibility in a four-way
 scramble. So a skin changes the *finish* — lightness, metalness, roughness, how
 much the hull glows — and the hue survives all six. `Carbon` is the exception

@@ -187,11 +187,29 @@ export interface LayoutSpec {
   pads: (w: number, h: number) => Pt[]
 }
 
+/**
+ * Eight spawns: the four corners, then the middle of each edge.
+ *
+ * Four was the room size and four was the spawn count, and the two were the
+ * same number by coincidence rather than by design — `respawn` picks the spot
+ * furthest from everybody alive, so a room of eight sharing four spawns puts
+ * two tanks on top of each other about as often as not.
+ *
+ * The order is corners first, deliberately. `makeBot` and anything else that
+ * takes "the first few spawns" gets the four that are furthest apart, and the
+ * edge spawns are the overflow rather than the default. Still 180-degree
+ * rotationally symmetric, which is what makes a board fair — every one of these
+ * has an opposite number the same distance from the middle.
+ */
 const corners = (w: number, h: number): Pt[] => [
   { x: 175, y: 175 },
   { x: w - 175, y: 175 },
   { x: 175, y: h - 175 },
   { x: w - 175, y: h - 175 },
+  { x: w / 2, y: 150 },
+  { x: w / 2, y: h - 150 },
+  { x: 150, y: h / 2 },
+  { x: w - 150, y: h / 2 },
 ]
 
 /**
@@ -299,6 +317,13 @@ export const LAYOUTS: LayoutSpec[] = [
       { x: w - 190, y: h / 2 },
       { x: w / 2, y: 170 },
       { x: w / 2, y: h - 170 },
+      // The overflow four, for a room bigger than the board was drawn for.
+      // Corners on this layout rather than edges, because this is the one board
+      // whose four authored spawns are already on the edges.
+      { x: 210, y: 210 },
+      { x: w - 210, y: 210 },
+      { x: 210, y: h - 210 },
+      { x: w - 210, y: h - 210 },
     ],
     pads: (w) => [
       { x: w / 2, y: 300 },
