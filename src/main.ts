@@ -1229,6 +1229,7 @@ function loop(now = performance.now()): void {
   const local = new Set(players.map((p) => p.game.identity.sessionPubkey))
   renderer.draw(players[0].game, local)
   paintCrosshair(players[0].game, renderer.viewMode)
+  paintDamage(players[0].game, renderer.viewMode)
   paintAmmo(players[0].game)
   drawHud(players[0].game)
   drawSecondPlayer(players[1] ?? null, now)
@@ -1265,6 +1266,43 @@ function paintCrosshair(game: Game, view: ViewMode): void {
   // shot and zero at the moment the gun is ready.
   const frac = loading ? Math.min(1, remaining / (RELOAD * 1000)) : 0
   el.style.setProperty('--bloom', `${(frac * RELOAD_BLOOM).toFixed(1)}px`)
+}
+
+/**
+ * Damage, on the edges of the screen, in cockpit view only.
+ *
+ * The board camera says this with the tank: soot, a smoke column off the rear
+ * deck, then flame. From inside the tank that emitter is *behind the near
+ * plane* — a burning tank in first person filled a 1280x800 screenshot with
+ * cream and orange and left one corner of green felt, which is what Puzz was
+ * looking at when he said the damage UI in first person is too much to see
+ * through. `Renderer.wear` now takes the plume off your own tank in this view,
+ * and this is where the information went instead.
+ *
+ * Same pattern as `paintCrosshair` above: the cockpit does not drop what the
+ * board camera showed, it moves it somewhere a driver can look through. The
+ * edges are the one part of a first-person frame nobody aims with.
+ *
+ * `--wear` is 0 at full hull and 1 at one hit from dead, so the glow rises with
+ * the damage the way the plume's spawn rate does rather than snapping between
+ * two states. A dead tank shows nothing — the death screen is its own thing and
+ * a corpse is not "hurt".
+ */
+function paintDamage(game: Game, view: ViewMode): void {
+  const el = $('damage')
+  const { hp, dead } = game.tank
+  const maxHp = game.maxHp
+  // Glass Cannon plays at one hull, where every hit kills: there is no damaged
+  // state to show, and the same reasoning is in `wear` for the plume.
+  const hurt = view === 'cockpit' && !dead && !game.watching && maxHp > 1 && hp < maxHp && hp > 0
+  el.hidden = !hurt
+  if (!hurt) {
+    el.classList.remove('burning')
+    return
+  }
+  const wear = Math.min(1, Math.max(0, (maxHp - hp) / (maxHp - 1)))
+  el.style.setProperty('--wear', wear.toFixed(2))
+  el.classList.toggle('burning', hp === 1)
 }
 
 /**
