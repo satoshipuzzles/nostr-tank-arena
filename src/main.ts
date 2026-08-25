@@ -317,6 +317,93 @@ $('sound-toggle').addEventListener('click', () => {
 })
 
 /**
+ * Publish this round's score when the block closes, or leave it to the button.
+ *
+ * This is the fix for "the block winner is decided only among players who
+ * published a score". The podium at the end of a round was always right — it
+ * reads the live roster and covers everybody in the room — but the leaderboard
+ * wall is built from signed kind-30078 records, and a record only exists if
+ * somebody clicked. So most blocks were won by whoever remembered.
+ *
+ * The default is split, because the cost of publishing is not the same for
+ * everybody:
+ *
+ *   - A **guest** plays on an ephemeral key this client holds itself. Signing
+ *     is free, silent, and asks nobody anything, so a guest who never opens a
+ *     menu should still land on the wall. On.
+ *   - An **npub login** signs through a NIP-07 extension, which puts a dialog
+ *     in front of the player roughly every ten minutes for as long as they play.
+ *     That is not a default anybody would choose for themselves. Off, with the
+ *     reason said out loud once, and one click to change it.
+ *
+ * Remembered per browser either way, and the stored value beats the default —
+ * so a player who turns it on stays on across a reload and a signer change.
+ */
+let autoPublishSet = stored('tank.autopublish')
+const autoPublishDefault = (): boolean => running?.players[0].game.identity.isGuest ?? true
+const autoPublishOn = (): boolean =>
+  autoPublishSet === null ? autoPublishDefault() : autoPublishSet === 'on'
+
+function paintAutoPublish(): void {
+  const btn = $('autopublish-toggle')
+  const on = autoPublishOn()
+  btn.textContent = on ? 'Auto-publish: on' : 'Auto-publish: off'
+  btn.title = on
+    ? 'Your score is signed and published when each block closes'
+    : 'Scores are only published when you press the button'
+}
+
+function setAutoPublish(on: boolean): void {
+  autoPublishSet = on ? 'on' : 'off'
+  store('tank.autopublish', autoPublishSet)
+  paintAutoPublish()
+  // Said once, when it is turned on by somebody who will feel it. A guest sees
+  // nothing because a guest is charged nothing.
+  const guest = running?.players[0].game.identity.isGuest ?? true
+  if (on && !guest) {
+    running?.players[0].game.pushFeed('auto-publish on — your signer will ask once a block')
+  }
+}
+
+$('autopublish-toggle').addEventListener('click', () => setAutoPublish(!autoPublishOn()))
+
+/**
+ * Publish the round that just closed, if the player has asked us to.
+ *
+ * Deliberately silent about success and about failure. This runs at a block
+ * boundary while the next round is already live underneath the podium, and a
+ * player who is driving does not need a toast telling them a relay accepted an
+ * event. A refused signature is the same: they chose the setting, the podium
+ * still has its button, and interrupting a fight to report it would be worse
+ * than the miss.
+ *
+ * A round nobody scored in is skipped. Publishing 0/0 puts a record on four
+ * relays that changes no leaderboard and adds a name to a block nobody played.
+ */
+function autoPublishRound(result: import('./game').RoundResult): void {
+  if (!running || !autoPublishOn()) return
+  const game = running.players[0].game
+  if (game.watching) return
+  const me = result.standings.find((r) => r.you)
+  if (!me || (me.kills === 0 && me.deaths === 0)) return
+  void publishScore(
+    game.identity,
+    game.net,
+    game.room,
+    me.kills,
+    me.deaths,
+    result.height,
+    result.layout,
+    // `result.bestStreak`, not `game.bestStreak`. `endRound` banks the round
+    // and then resets the live counter, and everything that publishes runs
+    // after that — which is why the podium's manual button has signed a best
+    // streak of zero for every round it has ever published. Broken on purpose
+    // to check: test/autopublish.mjs goes red on exactly this line.
+    result.bestStreak,
+  ).catch(() => {})
+}
+
+/**
  * Practice tanks, on or off.
  *
  * On by default and remembered, because the common first run of this game is
@@ -1117,22 +1204,42 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     // a local origin means two clients compute different ids for the same pad
     // and every claim between them is discarded without a word.
     game.chainClock = () => ({ seconds: clock.chainSeconds(), pending: clock.chainPending })
-    clock.onBlock((tip, previous) => {
-      setLayout(layoutForBlock(tip.hash))
-      if (!previous) {
-        // First tip of the session — this is the round we joined, not a new one.
-        for (const p of players) p.game.beginRound(tip.height, tip.hash)
-        return
-      }
+    /**
+     * A block closed: bank every local player's round, publish, show the podium.
+     *
+     * Pulled out of the `onBlock` callback so a suite can drive the real thing
+     * rather than a re-implementation of it. test/autopublish.mjs calls this;
+     * if it called `autoPublishRound` directly it would be testing the
+     * publisher given a result, which cannot tell you whether a block closing
+     * ever produces one.
+     */
+    const closeBlock = (height: number, hash: string): void => {
+      setLayout(layoutForBlock(hash))
       // Every local player banks their own round; only player one's podium is
       // shown, because there is one screen.
       let shown: ReturnType<Game['endRound']> | null = null
       for (const p of players) {
-        const result = p.game.endRound(tip.height, layoutName)
+        const result = p.game.endRound(height, layoutName)
         if (!shown) shown = result
-        p.game.beginRound(tip.height, tip.hash)
+        p.game.beginRound(height, hash)
       }
-      if (shown) showPodium(shown)
+      if (shown) {
+        // Before the podium, not after: the podium closes itself after nine
+        // seconds and a player who drives off does not come back to press it.
+        autoPublishRound(shown)
+        showPodium(shown)
+      }
+    }
+    ;(window as unknown as { __closeBlock: typeof closeBlock }).__closeBlock = closeBlock
+
+    clock.onBlock((tip, previous) => {
+      if (!previous) {
+        // First tip of the session — this is the round we joined, not a new one.
+        setLayout(layoutForBlock(tip.hash))
+        for (const p of players) p.game.beginRound(tip.height, tip.hash)
+        return
+      }
+      closeBlock(tip.height, tip.hash)
     })
     void clock.start()
 
@@ -1187,6 +1294,9 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     // player one, so the room is never empty and the bots stand down on their
     // own without this having to know about couch mode.
     for (const p of players) p.game.botsEnabled = botsWanted
+    // Repainted here rather than at module load: the default depends on whether
+    // this session is a guest, and that is not known until a game exists.
+    paintAutoPublish()
     cockpitAllowed = !twoPlayer
     if (!cockpitAllowed) view = 'board'
     renderer.setView(view)
@@ -1799,9 +1909,11 @@ function showPodium(result: import('./game').RoundResult): void {
       ? `That round played ${result.modifier}. This one is a straight deathmatch.`
       : `That round played ${result.modifier}. This one is ${next.name} — ${next.blurb.toLowerCase()}`
     : `That round played ${result.modifier}.`
-  $('podium-note').textContent =
-    'Publishing signs a record with your npub and puts it on the relays under this block height. ' +
-    'Nothing publishes itself.'
+  $('podium-note').textContent = autoPublishOn()
+    ? 'This round was signed and published under its block height automatically. ' +
+      'Auto-publish is on — turn it off in the buttons below the board.'
+    : 'Publishing signs a record with your npub and puts it on the relays under this block height. ' +
+      'Nothing publishes itself while auto-publish is off.'
 
   const rows = result.standings
   $('podium-rows').innerHTML = rows.length
@@ -1821,7 +1933,10 @@ function showPodium(result: import('./game').RoundResult): void {
 
   const publish = $<HTMLButtonElement>('podium-publish')
   publish.disabled = false
-  publish.textContent = 'Sign and publish this round'
+  // Still here with auto-publish on, and worth keeping: a signature can be
+  // refused, a relay can be down, and this is the one moment the player is
+  // looking at the round it belongs to. The label says which case they are in.
+  publish.textContent = autoPublishOn() ? 'Publish this round again' : 'Sign and publish this round'
   publish.onclick = async () => {
     if (!running) return
     publish.disabled = true
@@ -1836,7 +1951,10 @@ function showPodium(result: import('./game').RoundResult): void {
         me?.deaths ?? 0,
         result.height,
         result.layout,
-        running.players[0].game.bestStreak,
+        // `result.bestStreak`, not the live one. `endRound` banks the round and
+        // then resets the counter, and `showPodium` runs after it — so this
+        // published a streak of 0 for every round it has ever signed.
+        result.bestStreak,
       )
       publish.textContent = 'Published'
     } catch {

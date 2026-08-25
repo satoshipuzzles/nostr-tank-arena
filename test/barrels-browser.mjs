@@ -174,8 +174,22 @@ try {
     JSON.stringify(shot.hits),
   )
 
-  await wait(400)
-  const after = await drawn()
+  // Poll, do not wait a fixed 400ms. `syncCover` runs inside `draw`, and under
+  // a software rasteriser this page renders at three or four frames a second —
+  // so a fixed window is one or two frames and lands on the wrong side of the
+  // repaint often enough to matter. This check went red once on a build that
+  // was correct, which is the only kind of flake worth the time to remove.
+  const drawnOnce = async (id, want) => {
+    for (let i = 0; i < 60; i++) {
+      const rows = await drawn()
+      const row = rows.find((b) => b.id === id)
+      if (row && row.visible === want) return rows
+      await wait(100)
+    }
+    return drawn()
+  }
+
+  const after = await drawnOnce(shot.id, false)
   const hitOne = after.find((b) => b.id === shot.id)
   check('and the mesh comes off the board, not just the rect',
     hitOne?.gone === true && hitOne?.visible === false, JSON.stringify(hitOne))
@@ -221,8 +235,7 @@ try {
     fromPeer.gone === true && fromPeer.bits !== ourBits && (fromPeer.bits & ourBits) === ourBits,
     JSON.stringify({ ...fromPeer, ourBits }))
 
-  await wait(400)
-  const afterPeer = await drawn()
+  const afterPeer = await drawnOnce(fromPeer.id, false)
   const peerOne = afterPeer.find((b) => b.id === fromPeer.id)
   check('and that one leaves the screen too',
     peerOne?.visible === false, JSON.stringify(peerOne))
@@ -254,12 +267,11 @@ try {
     const g = window.__game, a = window.__arena, r = window.__renderer
     // `beginRound` was nailed shut above; call the real one off the prototype.
     Object.getPrototypeOf(g).beginRound.call(g, 900001, hash)
-    return { bits: a.coverBits(), hp: a.BARRELS.map((b) => b.hp), gen: a.coverGeneration(), gone: a.BARRELS.map((b) => b.gone), _r: !!r }
+    return { bits: a.coverBits(), hp: a.BARRELS.map((b) => b.hp), gen: a.coverGeneration(), gone: a.BARRELS.map((b) => b.gone), firstId: a.BARRELS[0].id, _r: !!r }
   }, HASH)
   check('a new round puts every barrel back',
     rebuilt.bits === 0 && rebuilt.gone.every((g) => g === false), JSON.stringify(rebuilt))
-  await wait(400)
-  const afterRound = await drawn()
+  const afterRound = await drawnOnce(rebuilt.firstId, true)
   check('and they are all drawn again',
     afterRound.every((b) => b.visible === true), JSON.stringify(afterRound))
 
