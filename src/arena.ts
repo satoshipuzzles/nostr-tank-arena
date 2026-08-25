@@ -89,8 +89,54 @@ export interface Rect {
  */
 const LOW_KINDS: ReadonlySet<CoverKind> = new Set<CoverKind>(['sandbag'])
 
+/**
+ * What a rect does to the things that run into it.
+ *
+ * This file used to say, in as many words:
+ *
+ * > Two predicates rather than a height on the rect because there are exactly
+ * > two questions anything in this game asks, and a number invites a third that
+ * > nobody has designed. Whoever adds a genuinely half-height wall later should
+ * > pay for the height field then.
+ *
+ * Puzz asked for the third question — rubble that slows a tank crossing it —
+ * so this is the bill. One enumeration, and both original predicates are now
+ * *derived* from it rather than sitting beside it. That is the part worth
+ * insisting on: three parallel booleans can disagree with each other, and the
+ * disagreement would be a tank standing on ground a shell flies through.
+ *
+ *   - `solid`  — stops a tank, stops a shell. Rocks, hedges, crates, drums.
+ *   - `low`    — stops a tank, shells go over. Sandbags.
+ *   - `rubble` — stops neither, but a tank crossing it is slowed. What a
+ *                destroyed crate or barrel leaves behind.
+ *   - `clear`  — nothing at all.
+ */
+export type Passing = 'solid' | 'low' | 'rubble' | 'clear'
+
+export function passing(r: Rect): Passing {
+  // Only cover that could be destroyed leaves anything behind; `gone` is never
+  // set on anything else. The `clear` branch is the honest answer for a rect
+  // that was removed some other way rather than a case that exists today.
+  if (r.gone) return r.hp !== undefined ? 'rubble' : 'clear'
+  return r.kind !== undefined && LOW_KINDS.has(r.kind) ? 'low' : 'solid'
+}
+
 /** True if shells pass over this rect. Tanks are stopped by it regardless. */
-export const isLow = (r: Rect): boolean => r.kind !== undefined && LOW_KINDS.has(r.kind)
+export const isLow = (r: Rect): boolean => passing(r) === 'low'
+
+/**
+ * How fast a tank crosses rubble, as a fraction of its normal forward speed.
+ *
+ * Puzz: "we want rubble to slow a tank crossing it." Fifty-five per cent,
+ * which is the number that makes cutting through a breach a *decision* — you
+ * arrive later than the man who went round, and you arrive somewhere he is not
+ * looking. Much lower and it reads as being stuck; much higher and breaching a
+ * wall is a free shortcut and cover stops meaning anything.
+ *
+ * Forward speed only. Turning is untouched, because a tank that cannot turn
+ * while it is on debris reads as broken rather than as slowed.
+ */
+export const RUBBLE_SPEED = 0.55
 
 /**
  * Cover that can be shot away, and how many hits each kind takes.
@@ -620,7 +666,8 @@ export function resolveCircle(pos: { x: number; y: number }, radius: number): vo
  */
 export function pointInWall(x: number, y: number): Rect | null {
   for (const w of WALLS) {
-    if (w.gone) continue
+    const p = passing(w)
+    if (p !== 'solid' && p !== 'low') continue
     if (x >= w.x && x <= w.x + w.w && y >= w.y && y <= w.y + w.h) return w
   }
   return null
@@ -636,11 +683,42 @@ export function pointInWall(x: number, y: number): Rect | null {
  */
 export function pointInTallWall(x: number, y: number): Rect | null {
   for (const w of WALLS) {
-    if (isLow(w) || w.gone) continue
+    if (passing(w) !== 'solid') continue
     if (x >= w.x && x <= w.x + w.w && y >= w.y && y <= w.y + w.h) return w
   }
   return null
 }
+
+/**
+ * The debris a tank is standing on, if any.
+ *
+ * The third predicate, and the reason `passing` exists — it is derived from the
+ * same enumeration as the other two rather than being a fourth loop with its
+ * own idea of what `gone` means.
+ */
+export function pointInRubble(x: number, y: number): Rect | null {
+  for (const w of WALLS) {
+    if (passing(w) !== 'rubble') continue
+    if (x >= w.x && x <= w.x + w.w && y >= w.y && y <= w.y + w.h) return w
+  }
+  return null
+}
+
+/**
+ * What the ground here does to a tank's forward speed.
+ *
+ * A multiplier rather than a boolean so callers do not each get to decide what
+ * "on rubble" costs — there is one number and it lives next to the enumeration
+ * that produced it.
+ *
+ * Derived entirely from the destroyed mask, which every client already unions,
+ * so two clients that agree about the board agree about this. It is applied
+ * only to tanks a client is *simulating* — its own and its bots — never to a
+ * remote tank, whose position is somebody else's self-report being interpolated
+ * and is not ours to second-guess.
+ */
+export const groundSpeed = (x: number, y: number): number =>
+  pointInRubble(x, y) ? RUBBLE_SPEED : 1
 
 /**
  * True if a straight line between two points is unobstructed. Used for spawn picking.
