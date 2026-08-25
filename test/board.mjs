@@ -480,6 +480,128 @@ try {
 
   await page.close()
 
+  // --- the same board on a phone -------------------------------------------
+  //
+  // Puzz reported the leaderboard as "not centered". It was centred; it was
+  // also 591px wide inside a 390px screen, so the half of it you could see
+  // was hard against the left edge and the rest was off the side of the glass.
+  //
+  // The cause is a CSS default rather than a layout mistake: a grid item's
+  // automatic minimum size is its *min-content* width, which silently outranks
+  // `width: min(880px, 100%)`. One wide row inside — the block wall — set the
+  // floor. `.card { min-width: 0 }` puts the floor back at zero.
+  //
+  // These checks measure the card against the viewport rather than reading a
+  // class or a computed `justify-items`, because the bug was never in the
+  // alignment. Both of them go red against the parent commit.
+
+  const phone = await browser.newPage()
+  await phone.setViewport({ width: 390, height: 844, isMobile: true, hasTouch: true })
+  await phone.goto(SITE, { waitUntil: 'domcontentloaded', timeout: 30_000 })
+  await phone.$eval('#relays', (el, v) => { el.value = v }, relayUrl)
+  await phone.type('#name', 'phonetest')
+  await phone.type('#room', 'phn' + Math.floor(Math.random() * 1e6))
+
+  // The lobby is the first thing a phone sees, and it had the same fault: the
+  // skin row is six buttons wide and used to drag the whole card off-screen.
+  const lobbyFit = await phone.evaluate(() => {
+    const card = document.querySelector('#lobby .card')
+    const r = card.getBoundingClientRect()
+    const skins = [...document.querySelectorAll('#skin button')].map((b) => {
+      const br = b.getBoundingClientRect()
+      return { name: b.textContent, right: Math.round(br.right) }
+    })
+    return { left: Math.round(r.left), right: Math.round(r.right), vw: window.innerWidth, skins }
+  })
+  check(
+    'the lobby card fits the phone it is being read on',
+    lobbyFit.right <= lobbyFit.vw && lobbyFit.left >= 0,
+    `card ${lobbyFit.left}..${lobbyFit.right} in ${lobbyFit.vw}`,
+  )
+  const offSkins = lobbyFit.skins.filter((s) => s.right > lobbyFit.vw)
+  check(
+    'and every skin can be reached with a thumb',
+    offSkins.length === 0,
+    offSkins.length ? `off the side: ${offSkins.map((s) => s.name).join(', ')}` : `${lobbyFit.skins.length} skins`,
+  )
+
+  await phone.click('#play-guest')
+  const phoneStarted = await phone
+    .waitForFunction(() => !!window.__game, { timeout: 25_000 })
+    .then(() => true)
+    .catch(() => false)
+  check('a session starts on a phone-sized screen', phoneStarted)
+
+  if (phoneStarted) {
+    // On a phone the actions row is collapsed behind the menu chip, so this is
+    // the path a player actually takes to the leaderboard.
+    await phone.evaluate(() => {
+      if (document.getElementById('hud-actions').hidden) document.getElementById('chip-menu').click()
+    })
+    await phone.click('#show-board')
+    const phoneWall = await until(() =>
+      phone.evaluate(() => document.getElementById('board-tab-wall')?.classList.contains('on')))
+    check('the leaderboard still opens on the blocks tab on a phone', !!phoneWall)
+    await until(async () => {
+      const n = await phone.evaluate(() => document.querySelectorAll('.blocktile').length)
+      return n > 0 ? n : null
+    })
+
+    const fit = await phone.evaluate(() => {
+      const card = document.querySelector('.board-card')
+      const cr = card.getBoundingClientRect()
+      // Anything sticking out of the card that cannot be scrolled to is
+      // unreachable, which is the same fault one level down.
+      const scrollable = (el) => {
+        for (let n = el; n && n !== card.parentElement; n = n.parentElement) {
+          const ox = getComputedStyle(n).overflowX
+          if (ox === 'auto' || ox === 'scroll') return true
+        }
+        return false
+      }
+      const spilled = []
+      for (const el of card.querySelectorAll('*')) {
+        const r = el.getBoundingClientRect()
+        if (!r.width) continue
+        if ((r.right > cr.right + 1 || r.left < cr.left - 1) && !scrollable(el))
+          spilled.push((el.id || el.className || el.tagName).toString().slice(0, 24))
+      }
+      return {
+        left: Math.round(cr.left),
+        right: Math.round(cr.right),
+        vw: window.innerWidth,
+        docScroll: document.documentElement.scrollWidth,
+        spilled: spilled.slice(0, 6),
+      }
+    })
+    check(
+      'the leaderboard card fits inside the phone',
+      fit.right <= fit.vw && fit.left >= 0,
+      `card ${fit.left}..${fit.right} in ${fit.vw}`,
+    )
+    check(
+      'and it is centred in it, not hard against one side',
+      Math.abs(fit.left - (fit.vw - fit.right)) <= 2,
+      `${fit.left}px left, ${fit.vw - fit.right}px right`,
+    )
+    check(
+      'and the page itself does not scroll sideways',
+      fit.docScroll <= fit.vw,
+      `document ${fit.docScroll} against ${fit.vw}`,
+    )
+    check(
+      'nothing inside the card is pushed off it without a way to scroll to it',
+      fit.spilled.length === 0,
+      fit.spilled.join(', '),
+    )
+
+    if (process.env.TANK_PHONE_SHOT) {
+      await phone.screenshot({ path: process.env.TANK_PHONE_SHOT })
+      console.log(`      wrote ${process.env.TANK_PHONE_SHOT}`)
+    }
+    await phone.close()
+  }
+
   // --- more history than the wall holds ------------------------------------
 
   const deep = await browser.newPage()
