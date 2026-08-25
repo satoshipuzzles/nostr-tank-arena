@@ -160,10 +160,27 @@ try {
     JSON.stringify(cards.map((c) => c.name)))
   check('deathmatch is the one a first visit lands on', cards[0]?.on === true && cards[0]?.id === 'mode-dm',
     JSON.stringify(cards.map((c) => [c.id, c.on])))
-  check('capture the flag is advertised and refuses the click', cards[2]?.disabled === true,
-    JSON.stringify(cards[2]))
-  check('and it says it is not ready rather than looking ready',
-    /not playable/i.test(cards[2]?.fine ?? ''), JSON.stringify(cards[2]?.fine))
+  // Capture the flag went live, so these two flipped. The *intent* is unchanged
+  // and worth keeping stated: a card must not lie about its own state. It used
+  // to be `disabled` with "In build. Not playable yet." and these asserted
+  // exactly that; now it is playable and they assert exactly that instead. A
+  // card that is live while claiming to be in build loses somebody who would
+  // have played it, which is the same failure as the other way round.
+  check('capture the flag is playable rather than advertised',
+    cards[2]?.disabled === false, JSON.stringify(cards[2]))
+  check('and its blurb describes the game rather than saying it is not ready',
+    !/not playable|in build/i.test(cards[2]?.fine ?? '') && (cards[2]?.fine ?? '').length > 10,
+    JSON.stringify(cards[2]?.fine))
+  // And clicking it selects it, which is the part "not disabled" does not prove.
+  const ctfSelects = await page.evaluate(() => {
+    document.getElementById('mode-ctf').click()
+    const on = document.getElementById('mode-ctf').classList.contains('on')
+    const side = !document.getElementById('row-side').hidden
+    document.getElementById('mode-dm').click()
+    return { on, side }
+  })
+  check('and picking it selects it and asks for a side',
+    ctfSelects.on === true && ctfSelects.side === true, JSON.stringify(ctfSelects))
 
   // A mode card that wraps its name reads as two modes. Measured, not eyeballed.
   const nameFits = await page.evaluate(() =>

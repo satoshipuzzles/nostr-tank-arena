@@ -1,5 +1,6 @@
 import './style.css'
 import * as arena from './arena'
+import * as flags from './flags'
 import { layoutForBlock, layoutName, setLayout } from './arena'
 import { Sfx } from './audio'
 import { BlockClock } from './blocks'
@@ -467,12 +468,12 @@ window.addEventListener('keydown', (e) => {
  * when you pick a side and nobody joins you. Whatever a real mode negotiation
  * looks like, it is a protocol change and it is not this.
  */
-type Mode = 'dm' | 'tdm'
+type Mode = 'dm' | 'tdm' | 'ctf'
 
 /** Remembered, and consistent with the side that was remembered next to it. */
 let mode: Mode = ((): Mode => {
   const v = stored('tank.mode')
-  if (v === 'tdm' || v === 'dm') return v
+  if (v === 'tdm' || v === 'dm' || v === 'ctf') return v
   // First run after this shipped: somebody who had already picked a side with
   // `T` is plainly playing a team game, so do not throw that away.
   return teamPick ? 'tdm' : 'dm'
@@ -494,7 +495,8 @@ function paintModes(): void {
     card.classList.toggle('on', on)
     card.setAttribute('aria-pressed', String(on))
   }
-  $('row-side').hidden = mode !== 'tdm'
+  // Both team modes need a side; only capture the flag puts flags out.
+  $('row-side').hidden = mode === 'dm'
   for (const b of $('side').querySelectorAll('button')) {
     const on = b.dataset.value === String(teamPick)
     b.setAttribute('aria-pressed', String(on))
@@ -507,12 +509,14 @@ function setMode(next: Mode): void {
   // The mode is not a third piece of state — it *is* the side, expressed the
   // way somebody picking a game thinks about it. Deathmatch means no side;
   // team deathmatch means a side, and Red if you have never picked one.
-  setTeam(mode === 'tdm' ? teamPick || 1 : 0)
+  setTeam(mode === 'dm' ? 0 : teamPick || 1)
+  if (running) for (const p of running.players) p.game.flagsOn = mode === 'ctf'
   paintModes()
 }
 
 $('mode-dm').addEventListener('click', () => setMode('dm'))
 $('mode-tdm').addEventListener('click', () => setMode('tdm'))
+$('mode-ctf').addEventListener('click', () => setMode('ctf'))
 $('side').addEventListener('click', (e) => {
   const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-value]')
   if (!b) return
@@ -1498,6 +1502,11 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     // number rather than a rule, and a suite has to be able to read the one the
     // build actually shipped rather than the one it was written against.
     ;(window as unknown as { __rooms: unknown }).__rooms = { SEATS }
+    // The flag rules, for test/flags.mjs. `carriers` is the one function in the
+    // game whose whole claim is that two clients hearing the same input agree,
+    // and the only way to check that is to run it twice with the input in a
+    // different order.
+    ;(window as unknown as { __flags: unknown }).__flags = flags
 
     // Faces on the tanks. The renderer asks by pubkey and never learns what a
     // relay is; `Profiles.get` queues an unknown npub for the next batch and
@@ -1512,6 +1521,9 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     // two people on one couch are on one team unless they say otherwise, which
     // is what a couch is.
     for (const p of players) p.game.team = teamPick
+    // The mode reaches the fresh `Game`. Flags are only on in the one mode that
+    // has them, which is why this is not derived from `team`.
+    for (const p of players) p.game.flagsOn = mode === 'ctf'
     // Repainted here rather than at module load: the default depends on whether
     // this session is a guest, and that is not known until a game exists.
     paintAutoPublish()
@@ -1673,22 +1685,48 @@ function watchActionsWidth(): void {
     // 999px pill radius rounding it into a dark circle. Below a readable width
     // they are worth less than the space they take.
     const room = document.documentElement.clientWidth - w - 30
-    hint.classList.toggle('cramped', room < 220)
+    // 320, not 220. The bar has grown again — a bots stepper and a team button
+    // since that number was picked — and at 240px of room the hints still
+    // wrapped to five lines. The threshold is "enough to read a couple of hints
+    // on one line", and it will need raising again the next time a button
+    // lands, which is why the radius above no longer depends on it.
+    hint.classList.toggle('cramped', room < 320)
 
     // And how tall they ended up, which the kill feed sits above. Every button
     // added on the right makes the hints one line taller on the left, and the
     // feed's `bottom` was a constant sized for one line — at three the feed
     // printed straight through them.
+  }
+
+  /**
+   * The hint row's own height, published from its own observer.
+   *
+   * Separate from `publish` on purpose, and the two attempts before this are
+   * why. Measuring in the same pass that toggles `cramped` reads the box as it
+   * was — it wrote 56px for a row that had just become 102px. Deferring that
+   * read to `requestAnimationFrame` swapped one bug for a worse one: `publish`
+   * runs several times as the bar settles, so an early frame's callback lands
+   * *after* a later one and overwrites the right answer with a stale one.
+   *
+   * A ResizeObserver on the element itself has neither problem. It fires after
+   * layout, by definition, and only when this box actually changed size — which
+   * includes the frame `cramped` takes it to zero and the frame it comes back.
+   */
+  const publishHeight = () => {
     const h = Math.round(hint.getBoundingClientRect().height)
     document.documentElement.style.setProperty('--hint-h', `${h}px`)
   }
+
   publish()
+  publishHeight()
   if (typeof ResizeObserver === 'function') {
-    const ro = new ResizeObserver(publish)
-    ro.observe(row)
-    ro.observe(hint)
+    new ResizeObserver(publish).observe(row)
+    new ResizeObserver(publishHeight).observe(hint)
   }
-  window.addEventListener('resize', publish)
+  window.addEventListener('resize', () => {
+    publish()
+    publishHeight()
+  })
 }
 watchActionsWidth()
 
@@ -1869,6 +1907,22 @@ function drawHud(game: Game): void {
   // them, which is the right threshold: a team of one is a person, and a
   // scoreboard that grows a "Red 0 — 0" header the instant you press T would
   // be reporting a game nobody is playing.
+  // Captures first when anybody has one. A flag game's score is not the kill
+  // tally, and a scoreboard that led with kills would be reporting the wrong
+  // game — but only once somebody has actually scored, so a team round that
+  // nobody is playing flags in reads exactly as it did before.
+  const flags = game.flagStandings()
+  const flagRows = flags
+    ? `<div class="team-tally flags">${flags
+        .map(
+          (t) =>
+            `<div class="team-row"><span class="team-dot" style="background:hsl(${TEAM_HUES[t.team]} 72% 56%)"></span>` +
+            `<span class="team-name">${escapeHtml(TEAM_NAMES[t.team] ?? String(t.team))}</span>` +
+            `<span class="team-caps">${t.captures}<i>&#9873;</i></span></div>`,
+        )
+        .join('')}</div>`
+    : ''
+
   const teams = game.teamStandings()
   const teamRows = teams
     ? `<div class="team-tally">${teams
@@ -1882,6 +1936,7 @@ function drawHud(game: Game): void {
     : ''
 
   $('scoreboard').innerHTML =
+    flagRows +
     teamRows +
     game
       .scoreboard()

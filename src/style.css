@@ -335,7 +335,14 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
   color: var(--dim);
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 999px;
+  /* 22px, not a 999px lozenge.
+     A pill radius is identical to this at one line and turns into a *circle*
+     the moment the row wraps — which it now does, because every button added to
+     the action bar takes width away from here. Photographed at 1280px it was a
+     large dark disc over the bottom-left corner of the board with words
+     scattered inside it. A radius that cannot exceed the corner is the fix that
+     survives the next button. */
+  border-radius: 22px;
   padding: 7px 14px;
   font-size: 12px;
 }
@@ -914,7 +921,13 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
 #scoreboard, #status { top: max(14px, env(safe-area-inset-top)); }
 #controls-hint, #hud-actions { bottom: max(14px, env(safe-area-inset-bottom)); }
 #touch-hint { top: max(14px, env(safe-area-inset-top)); }
-#feed { bottom: calc(84px + env(safe-area-inset-bottom)); }
+/* Same measured reserve as the base rule, plus the safe area. This line used
+   to hardcode 84px — one hint line plus a gap — and being later in the file it
+   silently beat the `--hint-h` rule above, so the feed sat 32px inside a
+   three-line hint row while the variable said 102px and everything looked
+   correct in isolation. A constant that overrides a measurement is worse than
+   no measurement. */
+#feed { bottom: calc(var(--hint-h, 42px) + 28px + env(safe-area-inset-bottom)); }
 
 /*
  * A phone in landscape is about 380px tall. Everything on the HUD has to give
@@ -925,7 +938,7 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
   .panel { padding: 7px 10px; font-size: 11px; }
   #scoreboard { min-width: 150px; }
   #hud-actions button { padding: 5px 9px; font-size: 11px; }
-  #feed { bottom: calc(58px + env(safe-area-inset-bottom)); font-size: 11px; }
+  #feed { bottom: calc(var(--hint-h, 30px) + 22px + env(safe-area-inset-bottom)); font-size: 11px; }
   #feed div { padding: 3px 9px; }
   .avatar { --av: 18px; }
 }
@@ -1331,6 +1344,18 @@ body.hud-compact #feed { bottom: max(10px, env(safe-area-inset-bottom)); }
   font-variant-numeric: tabular-nums;
 }
 .team-row .kd { margin-left: 8px; }
+
+/* Captures, above the team tally when anybody has one.
+   A flag round's score is not the kill tally, so it goes first — but only once
+   somebody has scored, so a team round nobody is playing flags in reads exactly
+   as it did before. */
+.team-tally.flags { border-bottom-style: dashed; }
+.team-caps {
+  margin-left: auto;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.team-caps i { margin-left: 3px; font-style: normal; opacity: 0.75; }
 
 /* The chopper clock.
    Top-centre, under the rules banner, because that is the one strip of screen a

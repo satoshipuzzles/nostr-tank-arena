@@ -36,6 +36,7 @@
     "test:chopper-browser": "node test/chopper-browser.mjs",
     "test:eight": "node test/eight.mjs",
     "test:teams": "node test/teams.mjs",
+    "test:flags": "node test/flags.mjs",
     "test:streak": "node test/streak.mjs",
     "test:hub": "node test/hub.mjs",
     "test:rubble": "node test/rubble.mjs",

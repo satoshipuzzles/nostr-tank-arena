@@ -419,6 +419,45 @@ try {
       !box.visible || box.hintRight > 40,
       JSON.stringify(box),
     )
+    // And the kill feed sits above them rather than through them. The feed's
+    // `bottom` used to be a constant sized for a one-line hint row, and every
+    // button added on the right makes that row one line taller on the left —
+    // at three lines the feed was printing straight over the hints.
+    // Put lines in the feed first. The check below tolerates an empty feed —
+    // there is nothing to overlap — and at 1440px the feed happened to be empty
+    // when it was measured, so it passed against a 32px overlap. A control that
+    // is only exercised when the thing under test is absent is not a control.
+    await page.evaluate(() => {
+      const g = window.__game
+      for (let i = 0; i < 3; i++) g.pushFeed(`layout probe line ${i + 1}`)
+    })
+    // Poll for it to settle. The height is published on the next animation
+    // frame, so a single read right after a viewport change catches the layout
+    // one pass early — which is a fact about the harness, not about the page.
+    for (let i = 0; i < 20; i++) {
+      const ok = await page.evaluate(() => {
+        const hint = document.getElementById('controls-hint').getBoundingClientRect()
+        const feed = document.getElementById('feed').getBoundingClientRect()
+        return hint.height === 0 || feed.height === 0 || feed.bottom <= hint.top
+      })
+      if (ok) break
+      await wait(100)
+    }
+    const stack = await page.evaluate(() => {
+      const hint = document.getElementById('controls-hint').getBoundingClientRect()
+      const feed = document.getElementById('feed').getBoundingClientRect()
+      return {
+        overlap: Math.round(feed.bottom - hint.top),
+        feedBottom: Math.round(feed.bottom),
+        hintTop: Math.round(hint.top),
+        feedRows: document.querySelectorAll('#feed div').length,
+      }
+    })
+    check(
+      `and the kill feed clears the hints at ${width}px`,
+      !box.visible || stack.feedRows === 0 || stack.overlap <= 0,
+      JSON.stringify(stack),
+    )
   }
   await page.setViewport({ width: 1280, height: 800 })
 
