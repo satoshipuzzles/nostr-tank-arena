@@ -42,7 +42,7 @@ import {
   parsePayload,
   roomTag,
 } from './protocol'
-import { BOT_COUNT, killBot, makeBot, stepBot } from './bots'
+import { BOT_COUNT, MAX_BOTS, killBot, makeBot, stepBot } from './bots'
 import {
   WALLS,
   applyCoverBits,
@@ -1346,13 +1346,34 @@ export class Game {
   private bots: Bot[] = []
 
   /**
-   * Whether to fill an empty room with bots. On by default.
+   * How many practice tanks to fill an empty room with. Three by default.
    *
    * A solo player joining a string nobody else has typed is the overwhelmingly
-   * common first run of this game, and an empty arena is not a game. Off is
-   * still one click away for anyone who wants the room they actually asked for.
+   * common first run of this game, and an empty arena is not a game. Zero is
+   * still one click away for anyone who wants the room they actually asked
+   * for — and now so is seven, which is a very different practice session.
+   *
+   * A *want*, not a spawn count: `syncBots` decides what actually appears, and
+   * bots only exist while no real player is in the room.
    */
-  botsEnabled = true
+  botsWanted = BOT_COUNT
+
+  /**
+   * The old on/off view of the same setting.
+   *
+   * Kept because half a dozen suites drive `botsEnabled = false` to get a
+   * quiet arena, and because "off" is a real state a player asks for rather
+   * than an implementation detail of a counter. Setting it back to `true`
+   * restores the default rather than whatever was last picked, which is the
+   * only sensible reading of "on" when the count it replaced is gone.
+   */
+  get botsEnabled(): boolean {
+    return this.botsWanted > 0
+  }
+
+  set botsEnabled(on: boolean) {
+    this.botsWanted = on ? BOT_COUNT : 0
+  }
 
   /** Kills against bots. Deliberately not `kills` — see the note in bots.ts. */
   botKills = 0
@@ -1445,11 +1466,15 @@ export class Game {
    */
   private syncBots(dt: number, now: number): void {
     const humans = [...this.peers.keys()].filter((k) => !this.isBot(k))
-    const wanted = this.botsEnabled && humans.length === 0 && !this.watching ? BOT_COUNT : 0
+    const asked = Math.max(0, Math.min(MAX_BOTS, Math.floor(this.botsWanted)))
+    const wanted = humans.length === 0 && !this.watching ? asked : 0
 
     if (this.bots.length > wanted) {
-      for (const bot of this.bots) this.peers.delete(bot.session)
-      this.bots = []
+      // Retire from the end rather than clearing the lot. Dropping one bot used
+      // to delete all three and respawn two, which reads as the arena blinking
+      // — and it threw away the state of tanks the player was mid-fight with.
+      const going = this.bots.splice(wanted)
+      for (const bot of going) this.peers.delete(bot.session)
       if (wanted === 0 && humans.length > 0) this.pushFeed('a real player joined — bots stood down')
     }
     while (this.bots.length < wanted) this.bots.push(makeBot(this.bots.length, now))

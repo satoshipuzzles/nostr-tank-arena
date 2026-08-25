@@ -350,6 +350,25 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
   flex-wrap: wrap;
 }
 #hud-actions button { padding: 7px 12px; font-size: 12px; }
+/*
+ * The bot stepper: three buttons that read as one control.
+ *
+ * Flanking buttons are square and the label is not, so "fewer / this many /
+ * more" is legible at a glance rather than being three words in a row. It is
+ * one flex item in `#hud-actions`, which is what keeps `--actions-w` — the
+ * reserve that stops the key hints being painted underneath this row —
+ * measuring it as the single control it looks like.
+ */
+.stepper { display: flex; gap: 4px; align-items: stretch; }
+.stepper button { padding: 7px 12px; font-size: 12px; }
+.stepper #bots-less,
+.stepper #bots-more {
+  min-width: 30px;
+  padding: 7px 0;
+  font-size: 14px;
+  line-height: 1;
+}
+.stepper button:disabled { opacity: 0.4; }
 /* Ghost buttons over the sky need a plate of their own for the same reason. */
 #hud-actions button.ghost { background: var(--panel); border-color: var(--line); }
 #hud-actions button.ghost:hover { background: #1b2536; filter: none; }

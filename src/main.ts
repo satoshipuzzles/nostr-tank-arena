@@ -3,6 +3,7 @@ import * as arena from './arena'
 import { layoutForBlock, layoutName, setLayout } from './arena'
 import { Sfx } from './audio'
 import { BlockClock } from './blocks'
+import { BOT_COUNT, MAX_BOTS } from './bots'
 import { Game, STREAK_LADDER, nextRung, rungFloor } from './game'
 import { Input, PLAYER_TWO, SOLO, type Scheme } from './input'
 import { TouchSticks } from './touch'
@@ -555,36 +556,85 @@ window.addEventListener('resize', () => preview?.resize())
 paintPreview()
 
 /**
- * Practice tanks, on or off.
+ * Practice tanks: how many, before the match and during it.
  *
- * On by default and remembered, because the common first run of this game is
- * one person joining a room string nobody else has typed, and an empty arena is
- * not a game. The `Game` decides whether the three actually appear — they only
- * exist while no real player is in the room — so this is a preference rather
- * than a spawn button, and the label says what is *wanted*, not what is on the
- * board this second.
+ * Puzz: "ability to add bots to the game both in pre game screen and while in
+ * game." It was a boolean, which cannot say three — and three was the only
+ * number the game had, chosen when a room held four. A room holds eight now,
+ * so seven is a legitimate thing to want and it was unreachable.
+ *
+ * Remembered, because the common first run of this game is one person joining
+ * a room string nobody else has typed and an empty arena is not a game. The
+ * `Game` decides whether any of them actually appear — bots only exist while no
+ * real player is in the room — so this is a preference, and the label says what
+ * is *wanted* rather than what is on the board this second.
+ *
+ * Changing it mid-match is free by construction: bots are entirely local and
+ * publish nothing, so adding one is not a thing anybody else has to agree to.
+ * That is the whole reason this can be a live control rather than a setting you
+ * restart for.
  */
-let botsWanted = stored('tank.bots') !== 'off'
+let botsWanted = ((): number => {
+  const raw = stored('tank.bots')
+  // `'on'`/`'off'` are what this preference used to be. Somebody who set it
+  // before today still has one of those in storage, and reading it as NaN
+  // would silently hand them an empty arena.
+  if (raw === 'off') return 0
+  if (raw === 'on' || raw === null) return BOT_COUNT
+  const n = Number(raw)
+  return Number.isFinite(n) ? Math.max(0, Math.min(MAX_BOTS, Math.floor(n))) : BOT_COUNT
+})()
+/** What the middle button restores when it is clicked back on. */
+let botsLast = botsWanted || BOT_COUNT
+
+for (let i = 0; i <= MAX_BOTS; i++) {
+  const b = document.createElement('button')
+  b.type = 'button'
+  b.dataset.value = String(i)
+  b.textContent = String(i)
+  $('bots').appendChild(b)
+}
+const botsInput = segmented('bots')
 
 function paintBotsButton(): void {
-  $('bots-toggle').textContent = botsWanted ? 'Bots: on' : 'Bots: off'
+  $('bots-toggle').textContent = botsWanted ? `Bots: ${botsWanted}` : 'Bots: off'
+  // A control that cannot go further should say so rather than doing nothing.
+  $<HTMLButtonElement>('bots-less').disabled = botsWanted <= 0
+  $<HTMLButtonElement>('bots-more').disabled = botsWanted >= MAX_BOTS
+  botsInput.value = String(botsWanted)
 }
+
+function setBots(n: number): void {
+  botsWanted = Math.max(0, Math.min(MAX_BOTS, Math.floor(n)))
+  if (botsWanted) botsLast = botsWanted
+  store('tank.bots', String(botsWanted))
+  paintBotsButton()
+  if (running) for (const p of running.players) p.game.botsWanted = botsWanted
+}
+// `paintBotsButton`, not `setBots`: `setBots` reaches for `running`, which is
+// declared further down this file, and calling it during module init is a
+// temporal-dead-zone crash that takes the whole lobby with it. Nothing needs
+// setting here anyway — the value was just read from storage.
 paintBotsButton()
 
-function setBots(on: boolean): void {
-  botsWanted = on
-  store('tank.bots', on ? 'on' : 'off')
-  paintBotsButton()
-  if (running) for (const p of running.players) p.game.botsEnabled = on
-}
-
-$('bots-toggle').addEventListener('click', () => setBots(!botsWanted))
+$('bots-toggle').addEventListener('click', () => setBots(botsWanted ? 0 : botsLast))
+$('bots-less').addEventListener('click', () => setBots(botsWanted - 1))
+$('bots-more').addEventListener('click', () => setBots(botsWanted + 1))
+$('bots').addEventListener('click', (e) => {
+  const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-value]')
+  if (b) setBots(Number(b.dataset.value))
+})
 
 window.addEventListener('keydown', (e) => {
-  if (e.code !== 'KeyB' || e.repeat) return
+  if (e.repeat) return
   const target = e.target as HTMLElement | null
   if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return
-  setBots(!botsWanted)
+  // B still toggles, because that is the thing people press mid-fight. The
+  // brackets are the fine adjustment, next to each other on every layout this
+  // game has been played on.
+  if (e.code === 'KeyB') setBots(botsWanted ? 0 : botsLast)
+  else if (e.code === 'BracketLeft') setBots(botsWanted - 1)
+  else if (e.code === 'BracketRight') setBots(botsWanted + 1)
 })
 
 window.addEventListener('keydown', (e) => {
@@ -1457,7 +1507,7 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     // whether any actually appear — in a couch match player two is a peer of
     // player one, so the room is never empty and the bots stand down on their
     // own without this having to know about couch mode.
-    for (const p of players) p.game.botsEnabled = botsWanted
+    for (const p of players) p.game.botsWanted = botsWanted
     // The remembered side reaches the fresh `Game`, and player two shares it —
     // two people on one couch are on one team unless they say otherwise, which
     // is what a couch is.

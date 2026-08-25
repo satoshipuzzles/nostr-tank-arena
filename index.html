@@ -77,7 +77,8 @@
       <div id="controls-hint">
         <span><b>WASD</b> drive</span><span><b>mouse</b> aim</span><span><b>click / space</b> fire</span
         ><span><b>R</b> reload</span><span><b>Q</b> hold to lob</span><span><b>V</b> cockpit</span
-        ><span><b>B</b> bots</span><span><b>gamepad</b> supported</span
+        ><span><b>B</b> bots</span><span><b>[ ]</b> fewer / more</span
+        ><span><b>gamepad</b> supported</span
         ><span id="hint-p2" hidden><b>P2:</b> arrows + enter, or pad 2</span>
       </div>
       <div id="touch-hint" hidden>
@@ -100,7 +101,16 @@
       <div id="hud-actions">
         <button id="view-toggle" class="ghost" title="Board view or cockpit (V)">View: board</button>
         <button id="sound-toggle" class="ghost" title="Sound on or off (M)">Sound: on</button>
-        <button id="bots-toggle" class="ghost" title="Fill an empty room with practice tanks (B)">Bots: on</button>
+        <!-- A stepper rather than a toggle: "add to the game and while in
+             game" was the ask, and on/off cannot say three. The middle button
+             keeps the old behaviour — click it to clear the arena, click again
+             to get your count back — so `B` and one click still do the simple
+             thing. -->
+        <span class="stepper">
+          <button id="bots-less" class="ghost" type="button" aria-label="One fewer bot">&minus;</button>
+          <button id="bots-toggle" class="ghost" title="Practice tanks on or off (B)">Bots: 3</button>
+          <button id="bots-more" class="ghost" type="button" aria-label="One more bot">+</button>
+        </span>
         <button id="autopublish-toggle" class="ghost" title="Publish your score when each block closes">Auto-publish: on</button>
         <button id="team-toggle" class="ghost" title="Pick a side, or none for a free-for-all (T)">Team: none</button>
         <button id="copy-link" class="ghost">Copy invite link</button>
@@ -167,6 +177,16 @@
         <div class="fields">
           <label>Callsign<input id="name" maxlength="16" placeholder="tank" autocomplete="off" /></label>
           <label>Room<input id="room" maxlength="24" placeholder="lobby" autocomplete="off" /></label>
+        </div>
+
+        <!-- How many practice tanks to open with. They only appear while the
+             room has nobody real in it, so this is a preference rather than a
+             spawn button — and it is on the lobby because deciding you want
+             seven of them after you have already spawned is a worse moment to
+             be reading a menu. -->
+        <div class="seg-row" id="row-bots">
+          <span class="seg-label">Bots</span>
+          <div class="seg" id="bots" role="group" aria-label="Practice tanks"></div>
         </div>
 
         <div class="seg-row" id="row-players">
