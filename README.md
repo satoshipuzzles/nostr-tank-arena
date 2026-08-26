@@ -50,12 +50,17 @@ Kills in a row, without dying:
 
 | Streak | Reward |
 | --- | --- |
-| 3 | Hull repaired to full |
-| 5 | **Air strike** — a line of bombs walks across the far half of the board |
-| 10 | **Chopper** — ten seconds out of the tank, flying a gun over the board |
-| 15 | Siege shells — every shot takes two hull points |
-| 20 | Juggernaut — full hull, shielded and fast |
-| 25 | Carpet bombing — a longer air strike |
+| 3 | Hull repaired to full — always |
+| 5, 7, 10, 15 | **Your loadout** — four slots you arrange in the lobby from five rewards: air strike, recon (every enemy marked through cover, for you *and* your teammates), chopper, siege shells, EMP (every other player's HUD goes dark) |
+| 20 | Juggernaut — full hull, shielded and fast — always |
+| 25 | Carpet bombing — a longer air strike — always |
+
+The default arrangement is air strike at 5, recon at 7, chopper at 10 and
+EMP at 15. One reward always stays home; no duplicates — picking a reward
+another rung holds swaps the two. Saved on this device (an npub-portable
+loadout is the next step). Everybody's rewards stay legible on every other
+screen no matter whose ladder produced them, because each reward already
+publishes or rides the tick.
 
 Separately, eight seconds without taking a hit gives one hull point back;
 `Game.regenAfter` is the knob.

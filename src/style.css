@@ -482,6 +482,35 @@ body.hud-compact #ctf {
 }
 
 /*
+ * The streak loadout: four rungs, five rewards, arranged in the lobby.
+ *
+ * Reads as a compact table — tier number on the left, one segmented row of
+ * rewards beside it — because five names four times is where a control stops
+ * being a row of chips and starts being a menu. The buttons stay `.seg`
+ * buttons so aria-pressed styling and touch targets come for free.
+ */
+.loadout { display: grid; gap: 6px; margin: 6px 0 2px; }
+.loadout-rows { display: grid; gap: 4px; }
+.loadout-row { display: grid; grid-template-columns: 44px 1fr; align-items: center; gap: 8px; }
+.loadout-tier {
+  font-size: 11px;
+  color: var(--dim);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.loadout-row .seg { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; }
+.loadout-row .seg button { padding: 7px 4px; font-size: 11px; white-space: nowrap; }
+.loadout > .fine { margin: 2px 0 0; }
+/* Five names in one row needs ~460px; under that the tier moves on top and
+   the rewards wrap to a 3-2 grid instead of clipping "EMP" off the edge. */
+@media (max-width: 560px) {
+  .loadout-row { grid-template-columns: 1fr; gap: 3px; }
+  .loadout-tier { text-align: left; }
+  .loadout-row .seg { grid-template-columns: repeat(3, 1fr); }
+}
+
+/*
  * Player two, on one screen. Not a second HUD — just the numbers that are
  * theirs: hull, score, and whatever is ticking down on them. Their name, kills
  * and deaths are already on the scoreboard, because to player one's client they
@@ -537,6 +566,65 @@ body.hud-compact #ctf {
 }
 #alarm b { font-size: 17px; letter-spacing: 0.5px; color: #ff9aa2; }
 #alarm span { font-size: 13px; color: #e8eef8; }
+
+/*
+ * An enemy EMP. The *instruments* go dark, the war does not: the arena, the
+ * crosshair and the touch sticks all keep working, because a blackout that
+ * takes the controls with it is four seconds of being dead rather than four
+ * seconds of flying blind. One class on `body` does all the hiding, so the
+ * next HUD element added is dark by default the moment it joins this list.
+ */
+body.emp #scoreboard,
+body.emp #status,
+body.emp #hud-chips,
+body.emp #feed,
+body.emp #ammo,
+body.emp #streak,
+body.emp #rules,
+body.emp #ctf,
+body.emp #buffs,
+body.emp #notice,
+body.emp #alarm,
+body.emp #controls-hint,
+body.emp #hud-actions {
+  visibility: hidden;
+}
+/* Static across the glass, so the dark reads as interference rather than as
+   a rendering bug. Cheap: one repeating gradient, one steps() flicker. */
+body.emp #hud::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent 0 3px,
+    rgba(255, 83, 64, 0.05) 3px 4px
+  );
+  animation: emp-flicker 0.14s steps(2) infinite;
+}
+@keyframes emp-flicker {
+  50% { opacity: 0.4; }
+}
+#emp {
+  position: absolute;
+  top: 18%;
+  left: 50%;
+  transform: translateX(-50%);
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+  padding: 10px 22px;
+  border-radius: 14px;
+  background: #1a0f0d;
+  border: 1px solid #ff5340;
+  text-align: center;
+  z-index: 6;
+  pointer-events: none;
+  animation: emp-flicker 0.35s steps(2) infinite;
+}
+#emp b { font-size: 17px; letter-spacing: 3px; color: #ff5340; }
+#emp span { font-size: 12px; color: #caa; letter-spacing: 0.08em; }
 #alarm code {
   font-size: 11px;
   color: var(--dim);
@@ -1102,6 +1190,7 @@ body.hud-compact #ctf {
       "fields   garage"
       "bots     garage"
       "players  garage"
+      "loadout  loadout"
       "steering sound"
       "row      row"
       "live     live"
@@ -1116,6 +1205,7 @@ body.hud-compact #ctf {
   .lobby-card > .fields { grid-area: fields; }
   .lobby-card > #row-bots { grid-area: bots; }
   .lobby-card > #row-players { grid-area: players; }
+  .lobby-card > #loadout { grid-area: loadout; }
   /*
    * Eight buttons is one too many for `.seg`'s flex-wrap to split evenly once
    * this row is squeezed into a half-width column: seven fit on the first

@@ -68,6 +68,9 @@
       <div id="rules" hidden></div>
       <div id="ctf" hidden></div>
       <div id="alarm" hidden></div>
+      <!-- An enemy EMP. While it runs the rest of the HUD is dark and this is
+           the one thing on screen that says why. -->
+      <div id="emp" hidden><b>EMP</b><span>instruments down</span></div>
       <div id="buffs" hidden></div>
       <!-- What the next kill buys you. Outside the collapsible panels for the
            same reason the magazine is: it is read during a fight, not glanced
@@ -203,6 +206,20 @@
             <button type="button" data-value="1">Solo</button>
             <button type="button" data-value="2">Two on this screen</button>
           </div>
+        </div>
+
+        <!-- The streak loadout. Repair at 3, juggernaut at 20 and carpet at 25
+             are house rules; the four rungs between are yours to arrange.
+             Rows are built from `REWARDS` x `LOADOUT_TIERS` in src/game.ts so
+             this list and the ladder `onOwnKill` awards from cannot drift
+             apart — same reason the skin picker is built from `SKINS`. -->
+        <div class="loadout" id="loadout">
+          <span class="seg-label">Streaks</span>
+          <div class="loadout-rows" id="loadout-rows"></div>
+          <p class="fine">
+            Repair at 3, juggernaut at 20, carpet at 25 — house rules. The four
+            rungs between are yours. Saved on this device.
+          </p>
         </div>
 
         <!-- The garage. Skins are cosmetic only: the finish changes, the

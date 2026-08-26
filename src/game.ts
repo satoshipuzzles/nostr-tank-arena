@@ -38,6 +38,7 @@ import {
   type SessionPayload,
   type ShellPayload,
   type StrikePayload,
+  type EmpPayload,
   type StatePayload,
   parsePayload,
   roomTag,
@@ -192,15 +193,58 @@ const CLAIM_TTL = 600
  */
 const STREAK_REPAIR = 3
 /** Kills in a row that call an air strike. The marquee reward. */
-const STREAK_STRIKE = 5
-/** Rapid fire and a fresh hull. */
-const STREAK_OVERDRIVE = 10
-/** Siege shells: every shot takes two hull points instead of one. */
-const STREAK_SIEGE = 15
 /** Shield and speed together, which is the "come and try it" tier. */
 const STREAK_JUGGERNAUT = 20
 /** A second, longer air strike. Nothing beyond this changes; 25 is the top. */
 const STREAK_CARPET = 25
+
+/**
+ * The tiers a player gets to fill, and the rewards they can put on them.
+ *
+ * Puzz: "players should be able to edit their loadouts including their kill
+ * streaks similar to call of duty." The bookends are not choices — three is
+ * always the comeback repair, twenty and twenty-five are always the endgame
+ * spectacle — but the four rungs in between are yours to arrange: five
+ * rewards, four slots, one always left at home. Every reward keeps working
+ * on every other screen no matter whose ladder it came off, because each one
+ * already has a wire format (the strike and EMP publish, the chopper, recon
+ * and siege ride the tick), so somebody else's loadout needs no negotiation
+ * to be legible — you see what they earned when they earn it.
+ */
+export const LOADOUT_TIERS = [5, 7, 10, 15] as const
+
+export type RewardId = 'strike' | 'recon' | 'chopper' | 'siege' | 'emp'
+
+export interface RewardDef {
+  id: RewardId
+  name: string
+  detail: string
+  /** The banner hue when the rung lands. */
+  hue: number
+}
+
+export const REWARDS: readonly RewardDef[] = [
+  { id: 'strike', name: 'air strike', detail: 'air strike inbound', hue: 20 },
+  { id: 'recon', name: 'recon', detail: 'recon — every enemy marked, eight seconds', hue: 155 },
+  { id: 'chopper', name: 'chopper', detail: 'chopper — ten seconds of gun', hue: 20 },
+  { id: 'siege', name: 'siege shells', detail: 'siege shells — two hull a hit', hue: 300 },
+  { id: 'emp', name: 'EMP', detail: 'EMP — every other screen goes dark', hue: 300 },
+]
+
+/** One reward per tier, indexed like `LOADOUT_TIERS`. */
+export type Loadout = [RewardId, RewardId, RewardId, RewardId]
+
+/** The ladder as it has always shipped: strike, recon, chopper, EMP. */
+export const DEFAULT_LOADOUT: Loadout = ['strike', 'recon', 'chopper', 'emp']
+
+/** A loadout from storage or the wire: four distinct known ids, or null. */
+export function parseLoadout(v: unknown): Loadout | null {
+  if (!Array.isArray(v) || v.length !== LOADOUT_TIERS.length) return null
+  const ids = v.filter((id): id is RewardId => REWARDS.some((r) => r.id === id))
+  if (ids.length !== LOADOUT_TIERS.length) return null
+  if (new Set(ids).size !== ids.length) return null
+  return [ids[0], ids[1], ids[2], ids[3]]
+}
 
 /**
  * The ladder as a table, because two places have to agree about it.
@@ -221,35 +265,31 @@ export interface StreakRung {
   at: number
   name: string
   detail: string
+  /** What lands, for `onOwnKill` to dispatch on. Bookends have their own. */
+  id: RewardId | 'repair' | 'juggernaut' | 'carpet'
 }
 
-export const STREAK_LADDER: readonly StreakRung[] = [
-  { at: STREAK_REPAIR, name: 'hull repair', detail: 'hull repaired' },
-  { at: STREAK_STRIKE, name: 'air strike', detail: 'air strike inbound' },
-  { at: STREAK_OVERDRIVE, name: 'chopper', detail: 'chopper — ten seconds of gun' },
-  { at: STREAK_SIEGE, name: 'siege shells', detail: 'siege shells — two hull a hit' },
-  { at: STREAK_JUGGERNAUT, name: 'juggernaut', detail: 'juggernaut — shielded and fast' },
-  { at: STREAK_CARPET, name: 'carpet bombing', detail: 'carpet bombing' },
-]
-
-/** The rung a given streak is climbing toward, or null at the top of the ladder. */
-export function nextRung(streak: number): StreakRung | null {
-  return STREAK_LADDER.find((r) => r.at > streak) ?? null
+/** The ladder a given loadout produces. Bookends fixed, middle four chosen. */
+export function ladderFor(loadout: Loadout): StreakRung[] {
+  const middle = loadout.map((id, i) => {
+    const def = REWARDS.find((r) => r.id === id) ?? REWARDS[0]
+    return { at: LOADOUT_TIERS[i], name: def.name, detail: def.detail, id: def.id }
+  })
+  return [
+    { at: STREAK_REPAIR, name: 'hull repair', detail: 'hull repaired', id: 'repair' },
+    ...middle,
+    { at: STREAK_JUGGERNAUT, name: 'juggernaut', detail: 'juggernaut — shielded and fast', id: 'juggernaut' },
+    { at: STREAK_CARPET, name: 'carpet bombing', detail: 'carpet bombing', id: 'carpet' },
+  ]
 }
 
-/**
- * The rung below, so the meter fills across one step rather than across the
- * whole ladder. Nineteen kills is one away from juggernaut, and a bar that
- * reads 76% there is measuring the wrong thing.
- */
-export function rungFloor(streak: number): number {
-  let floor = 0
-  for (const r of STREAK_LADDER) if (r.at <= streak) floor = r.at
-  return floor
+/** The banner hue when a rung lands. The bookends have house colours. */
+const rungHue = (id: StreakRung['id']): number => {
+  if (id === 'repair') return 130
+  if (id === 'juggernaut') return 190
+  if (id === 'carpet') return 0
+  return REWARDS.find((r) => r.id === id)?.hue ?? 45
 }
-
-/** The banner subtitle for a rung, read from the same table the HUD reads. */
-const detailAt = (at: number): string => STREAK_LADDER.find((r) => r.at === at)?.detail ?? ''
 
 /**
  * How many sides there are.
@@ -259,9 +299,13 @@ const detailAt = (at: number): string => STREAK_LADDER.find((r) => r.at === at)?
  * somebody onto a team of three.
  */
 const TEAMS = 5
-/** How long the streak reward's rapid fire lasts. */
-const STREAK_SIEGE_MS = 20_000
 const STREAK_JUGGER_MS = 12_000
+/** How long the streak reward's siege shells last. */
+const STREAK_SIEGE_MS = 20_000
+/** How long the recon sweep marks enemies. */
+const RECON_MS = 8_000
+/** How long an EMP keeps a victim's HUD dark. */
+const EMP_MS = 4_000
 
 /**
  * Bombs in a five-kill strike, and in the twenty-five-kill one.
@@ -353,6 +397,8 @@ export interface Peer {
     ammo: number
     /** True while their ticks say a shield is up. See `StatePayload.sh`. */
     shield: boolean
+    /** True while their ticks say their recon sweep is running. See `rn`. */
+    recon: boolean
     /**
      * When their chopper comes down, in our clock, or 0.
      *
@@ -434,6 +480,8 @@ interface StateSample {
   dead: boolean
   ammo: number
   shield: boolean
+  /** True while their recon sweep runs. See `StatePayload.rn`. */
+  recon: boolean
   /** Deadline in our clock, or 0. See `StatePayload.c`. */
   chopperUntil: number
   /** Ground point their rounds are landing on, or null. */
@@ -522,6 +570,36 @@ export class Game {
   /** Consecutive kills without dying. Resets on death, drives the repair. */
   streak = 0
   bestStreak = 0
+
+  /**
+   * This player's streak ladder, rebuilt when the loadout changes.
+   *
+   * A lobby setting like the skin and the mode: set before the match, never
+   * mid-round. Everybody's *rewards* stay legible to everybody else no matter
+   * whose ladder produced them — each one already publishes or rides the tick
+   * — so nothing about a loadout needs to travel except its consequences.
+   */
+  ladder: StreakRung[] = ladderFor(DEFAULT_LOADOUT)
+
+  setLoadout(loadout: Loadout): void {
+    this.ladder = ladderFor(loadout)
+  }
+
+  /** The rung this streak is climbing toward, or null at the top. */
+  nextRung(streak = this.streak): StreakRung | null {
+    return this.ladder.find((r) => r.at > streak) ?? null
+  }
+
+  /**
+   * The rung below, so the HUD meter fills across one step rather than across
+   * the whole ladder. Nineteen kills is one away from juggernaut, and a bar
+   * that reads 76% there is measuring the wrong thing.
+   */
+  rungFloor(streak = this.streak): number {
+    let floor = 0
+    for (const r of this.ladder) if (r.at <= streak) floor = r.at
+    return floor
+  }
   /** The block this round belongs to. 0 until the chain tip arrives. */
   round = 0
   /** The tip's hash, which seeds the pickup schedule. */
@@ -959,6 +1037,7 @@ export class Game {
         // joins, and "empty" is the reading that changes how you play.
         ammo: MAG_SIZE,
         shield: false,
+        recon: false,
         chopperUntil: 0,
         chopperAt: null,
         team: 0,
@@ -1019,6 +1098,10 @@ export class Game {
       // shot held back for a shield that was never there is a worse lie than a
       // shield that goes unadvertised.
       shield: p.sh === 1,
+      // Same rule as the shield: absent means no sweep, which is what an old
+      // client sends, and the safe way round — a marker that fails to light is
+      // a weaker recon, a marker lit for nobody's sweep is a lie on the board.
+      recon: p.rn === 1,
       // Clamped, and turned into a deadline in *our* clock. A hostile client
       // claiming an hour of gunship is claiming a tank nobody can shoot for an
       // hour, so the ceiling is the same window everybody else gets plus a
@@ -1218,7 +1301,7 @@ export class Game {
     this.streak++
     this.bestStreak = Math.max(this.bestStreak, this.streak)
 
-    const rung = STREAK_LADDER.find((r) => r.at === this.streak)
+    const rung = this.ladder.find((r) => r.at === this.streak)
     if (rung) {
       this.earn(rung.at)
       return
@@ -1233,12 +1316,12 @@ export class Game {
    * Puzz: "killstreaks should have to be triggered once obtained... be able to
    * select them by clicking on them or something to activate."
    *
-   * Before this, hitting a rung *fired* it. Three in a row repaired a hull that
-   * might be untouched; five called a strike at whatever the board happened to
-   * look like in that instant. The reward was a thing that happened to you, and
-   * the interesting part of a kill streak — deciding when it is worth
-   * spending — did not exist. An air strike held ten seconds until two tanks
-   * are in the same lane is worth three of one that goes off on the kill.
+   * Rung numbers rather than reward ids on purpose: the tray HUD numbers its
+   * pills by position, and the loadout is a lobby setting — fixed for the
+   * match — so the rung a pill was earned on and the reward it spends as
+   * cannot drift apart mid-round. `spend` resolves the rung through
+   * `this.ladder` at the moment of spending, which is the same table `earn`
+   * read, because there is only one.
    *
    * One of each at a time: earning a rung already held does nothing. The tray
    * cannot become a stockpile, and it cannot outgrow the strip it is drawn on.
@@ -1263,9 +1346,13 @@ export class Game {
     if (this.holding(at)) return
     this.earned.push(at)
     this.earned.sort((a, b) => a - b)
-    const rung = STREAK_LADDER.find((r) => r.at === at)
+    const rung = this.ladder.find((r) => r.at === at)
     this.sound('streak')
-    this.announce(`${at} IN A ROW`, `${rung?.name ?? 'reward'} ready — press ${this.earned.indexOf(at) + 1}`, 45)
+    this.announce(
+      `${at} IN A ROW`,
+      `${rung?.name ?? 'reward'} ready — press ${this.earned.indexOf(at) + 1}`,
+      45,
+    )
   }
 
   /**
@@ -1274,11 +1361,12 @@ export class Game {
    * `spend`, not `fire` — `fire` is the gun, and a method that means two things
    * in one class is a bug waiting for somebody in a hurry.
    *
-   * Every reward here except the air strike is self-authoritative — it changes
-   * only our own HP and our own buffs, which this client is already allowed to
-   * decide — and the strike already has its own wire format. Firing on a click
-   * rather than on the kill that earned it is a change of *when*, not of what
-   * anybody has to agree to, so nothing about the netcode moves.
+   * Every reward here except the air strike and the EMP is self-authoritative
+   * — it changes only our own HP and our own buffs, which this client is
+   * already allowed to decide — and both of those already have wire formats.
+   * Firing on a click rather than on the kill that earned it is a change of
+   * *when*, not of what anybody has to agree to, so nothing about the netcode
+   * moves.
    */
   spend(at: number): boolean {
     if (!this.holding(at)) return false
@@ -1286,40 +1374,45 @@ export class Game {
     // screen is one the player cannot see land, and boarding a second gunship
     // out of the first would need a state nothing else in here has.
     if (this.tank.dead || this.flying) return false
+    const rung = this.ladder.find((r) => r.at === at)
+    if (!rung) return false
     this.earned = this.earned.filter((a) => a !== at)
     const now = performance.now()
-    const rung = STREAK_LADDER.find((r) => r.at === at)
     this.sound('streak')
-    switch (at) {
-      case STREAK_REPAIR:
+    switch (rung.id) {
+      case 'repair':
         this.tank.hp = this.maxHp
         this.repairedAt = now
         break
-      case STREAK_STRIKE:
+      case 'strike':
         this.callStrike(now, STRIKE_BOMBS)
         break
-      case STREAK_OVERDRIVE:
+      case 'recon':
+        this.buffs.reconUntil = Math.max(this.buffs.reconUntil, now) + RECON_MS
+        break
+      case 'chopper':
         // A chopper is not a buff — it takes the tank away and hands over a
         // different vehicle. The rung used to give Overdrive, which still
         // exists as a pickup; what it does not do any more is duplicate one.
         this.boardChopper(now)
         break
-      case STREAK_SIEGE:
+      case 'siege':
         this.buffs.siegeUntil = Math.max(this.buffs.siegeUntil, now) + STREAK_SIEGE_MS
         break
-      case STREAK_JUGGERNAUT:
+      case 'emp':
+        this.callEmp(now)
+        break
+      case 'juggernaut':
         this.tank.hp = this.maxHp
         this.repairedAt = now
         this.buffs.shieldUntil = Math.max(this.buffs.shieldUntil, now) + STREAK_JUGGER_MS
         this.buffs.speedUntil = Math.max(this.buffs.speedUntil, now) + STREAK_JUGGER_MS
         break
-      case STREAK_CARPET:
+      case 'carpet':
         this.callStrike(now, CARPET_BOMBS)
         break
-      default:
-        return false
     }
-    this.announce((rung?.name ?? 'reward').toUpperCase(), detailAt(at), 20)
+    this.announce(rung.name.toUpperCase(), rung.detail, rungHue(rung.id))
     return true
   }
 
@@ -1364,9 +1457,56 @@ export class Game {
     this.publishAsSession(KIND_STRIKE, payload)
   }
 
+  /** When an enemy EMP stops blanking our HUD, in our clock, or 0. */
+  empUntil = 0
+
+  /** EMP event ids already applied, so a relay echo cannot double the dark. */
+  private readonly empSeen = new Set<string>()
+
+  /**
+   * Fifteen in a row: everybody else's HUD goes dark.
+   *
+   * One publish on the strike kind and nothing else — no position, no damage
+   * number, no target list. Every receiver decides for itself whether it is a
+   * victim, which is the same trust model as the bombs: the event asserts
+   * "an EMP went off", and applying it to yourself is exactly as
+   * self-authoritative as applying a shell's damage. The caller's own HUD is
+   * untouched, which is most of what makes earning one feel like something.
+   */
+  private callEmp(now: number): void {
+    const payload: EmpPayload = { k: 'emp', t0: now }
+    this.publishAsSession(KIND_STRIKE, payload)
+    this.pushFeed('EMP away — their screens go dark')
+  }
+
+  private onEmp(e: Event): void {
+    // Ours, echoed back. The caller is exempt by design, not by luck.
+    if (e.pubkey === this.identity.sessionPubkey) return
+    if (this.empSeen.has(e.id)) return
+    this.empSeen.add(e.id)
+    const peer = this.ensurePeer(e.pubkey)
+    peer.lastSeen = performance.now()
+    // A teammate's EMP hits the other side, and that includes not hitting us.
+    if (this.friendly(e.pubkey)) {
+      this.pushFeed(`${peer.name} set off an EMP`)
+      return
+    }
+    // A spectator has no HUD in the fight and keeps their view.
+    if (this.watching) return
+    const now = performance.now()
+    this.empUntil = Math.max(this.empUntil, now) + EMP_MS
+    this.sound('siren')
+    this.pushFeed(`${peer.name}'s EMP — instruments down`)
+  }
+
   private onStrike(e: Event): void {
-    const p = parsePayload<StrikePayload>(e.content)
-    if (!p || typeof p.t0 !== 'number' || typeof p.y !== 'number') return
+    const p = parsePayload<StrikePayload & Partial<EmpPayload>>(e.content)
+    if (!p) return
+    // An EMP rides this kind with no `y` on purpose: a client too old to know
+    // the branch below falls through to the shape check and drops it, rather
+    // than clamping it into a one-bomb strike along the top wall.
+    if (p.k === 'emp') return this.onEmp(e)
+    if (typeof p.t0 !== 'number' || typeof p.y !== 'number') return
     // Our own strike, echoed back by a relay. Every other handler guards
     // against this and this one did not, and the consequences were much worse
     // than a duplicate: `ensurePeer` created a peer *for ourselves*, which put
@@ -1762,6 +1902,21 @@ export class Game {
     if (!this.team || !owner) return false
     const peer = this.peers.get(owner)
     return !!peer && peer.view.team === this.team
+  }
+
+  /**
+   * Is a recon sweep lighting the enemy up for *this* client right now?
+   *
+   * Ours, or a teammate's — that is what makes recon the one reward that
+   * helps a side rather than its earner. Read by the renderer every frame,
+   * which is why it is a couple of map lookups and not a subscription.
+   */
+  reconSees(now = performance.now()): boolean {
+    if (hasBuff(this.buffs, 'reconUntil', now)) return true
+    for (const [session, peer] of this.peers) {
+      if (peer.view.recon && this.friendly(session)) return true
+    }
+    return false
   }
 
   /** How many sides a player can pick from. */
@@ -2684,6 +2839,8 @@ export class Game {
     this.tank.hp = 0
     this.streak = 0
     clearBuffs(this.buffs)
+    // Last round's EMP does not darken this round's first seconds.
+    this.empUntil = 0
     this.tank.respawnAt = performance.now() + RESPAWN_DELAY * 1000 * this.modifier.respawn
     // A bot killing you costs you the round and the streak, which is the part
     // that makes practice mean anything — but it does not go on the wire and it
@@ -2901,6 +3058,10 @@ export class Game {
       // Only when it is up, so the common case costs nothing on a tick that
       // goes out ten times a second.
       ...(hasBuff(this.buffs, 'shieldUntil', now) ? { sh: 1 as const } : {}),
+      // The recon sweep, on the same terms as the shield: a flag, not a
+      // deadline, and only while it runs. Teammates who see it light their own
+      // markers; enemies learn they are lit, which is half the pressure.
+      ...(hasBuff(this.buffs, 'reconUntil', now) ? { rn: 1 as const } : {}),
       // Same reasoning: omitted while the board is intact, which is most of a
       // round. Unioned by whoever receives it, so a tick lost on the way costs
       // nothing and a late joiner is caught up by the next one.
