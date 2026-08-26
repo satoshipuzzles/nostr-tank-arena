@@ -6,7 +6,8 @@ import { layoutForBlock, layoutName, setLayout } from './arena'
 import { Sfx } from './audio'
 import { BlockClock } from './blocks'
 import { BOT_COUNT, MAX_BOTS } from './bots'
-import { Game, STREAK_LADDER, nextRung, rungFloor } from './game'
+import { Game, REWARDS, LOADOUT_TIERS, DEFAULT_LOADOUT, parseLoadout } from './game'
+import type { Loadout } from './game'
 import { Input, PLAYER_TWO, SOLO, type Scheme } from './input'
 import { TouchSticks } from './touch'
 
@@ -634,6 +635,65 @@ $('bots-more').addEventListener('click', () => setBots(botsWanted + 1))
 $('bots').addEventListener('click', (e) => {
   const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-value]')
   if (b) setBots(Number(b.dataset.value))
+})
+
+// ---------------------------------------------------------------- loadout
+
+/**
+ * Which reward sits on which rung, arranged in the lobby.
+ *
+ * Local storage rather than the npub for now, and the card says so — a named
+ * multi-slot loadout that follows the npub across devices is the umbrella
+ * issue (258910a0) and rides a replaceable event; this is the first thing
+ * worth putting in it. Four slots, five rewards, no duplicates: picking a
+ * reward another slot holds swaps the two, which keeps every arrangement
+ * legal without ever telling the player "no".
+ */
+let loadout: Loadout = (() => {
+  try {
+    const saved = parseLoadout(JSON.parse(stored('tank.loadout') ?? ''))
+    if (saved) return saved
+  } catch {
+    // Unreadable is the same as unset.
+  }
+  return [...DEFAULT_LOADOUT] as Loadout
+})()
+
+function paintLoadout(): void {
+  $('loadout-rows').innerHTML = LOADOUT_TIERS.map(
+    (tier, i) =>
+      `<div class="loadout-row"><span class="loadout-tier">at ${tier}</span>` +
+      `<div class="seg">` +
+      REWARDS.map(
+        (r) =>
+          `<button type="button" data-slot="${i}" data-reward="${r.id}" ` +
+          // The names are this repo's own constants, not input — and
+          // `escapeHtml` lives far below this line, where calling it during
+          // module init is a temporal-dead-zone crash that takes the whole
+          // lobby with it. Same trap `paintBotsButton` documents.
+          `aria-pressed="${loadout[i] === r.id}">${r.name}</button>`,
+      ).join('') +
+      `</div></div>`,
+  ).join('')
+}
+
+function setLoadoutSlot(slot: number, reward: string): void {
+  if (!REWARDS.some((r) => r.id === reward)) return
+  const id = reward as Loadout[number]
+  const had = loadout.indexOf(id)
+  // Taken by another rung: swap rather than refuse. Every click succeeds and
+  // the no-duplicates rule holds without a single error state.
+  if (had !== -1 && had !== slot) loadout[had] = loadout[slot]
+  loadout[slot] = id
+  store('tank.loadout', JSON.stringify(loadout))
+  paintLoadout()
+  if (running) for (const p of running.players) p.game.setLoadout(loadout)
+}
+
+paintLoadout()
+$('loadout-rows').addEventListener('click', (e) => {
+  const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-slot]')
+  if (b) setLoadoutSlot(Number(b.dataset.slot), b.dataset.reward ?? '')
 })
 
 window.addEventListener('keydown', (e) => {
@@ -1539,6 +1599,8 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     for (const p of players) {
       p.game.flagsOn = mode === 'ctf'
       p.game.pointsOn = mode === 'dom'
+      // The ladder the lobby arranged. A lobby setting like the two above.
+      p.game.setLoadout(loadout)
     }
     // Repainted here rather than at module load: the default depends on whether
     // this session is a guest, and that is not known until a game exists.
@@ -2451,7 +2513,7 @@ function drawBuffs(game: Game, now: number): void {
  */
 function drawStreak(game: Game): void {
   const node = $('streak')
-  const rung = nextRung(game.streak)
+  const rung = game.nextRung(game.streak)
   if (!rung) {
     // Past the top of the ladder there is nothing left to earn, so the strip
     // stops making promises and just keeps count.
@@ -2462,7 +2524,7 @@ function drawStreak(game: Game): void {
       `<span class="streak-next">unstoppable</span></div>`
     return
   }
-  const floor = rungFloor(game.streak)
+  const floor = game.rungFloor(game.streak)
   const span = rung.at - floor
   const done = game.streak - floor
   const left = rung.at - game.streak
@@ -2532,7 +2594,7 @@ function drawTray(game: Game): void {
   // dim". `Game.spend` refuses in both states; this says so before the click.
   node.innerHTML = held
     .map((at, i) => {
-      const rung = STREAK_LADDER.find((r) => r.at === at)
+      const rung = game.ladder.find((r) => r.at === at)
       return (
         `<button type="button" class="reward" data-at="${at}"${usable ? '' : ' disabled'} ` +
         `title="${escapeHtml(rung?.detail ?? '')} — press ${i + 1}">` +
@@ -2585,7 +2647,7 @@ window.addEventListener('keydown', (e) => {
  * than a permanent panel, because a legend that never goes away is furniture.
  */
 function announceLadder(game: Game): void {
-  game.pushFeed('streaks: ' + STREAK_LADDER.map((r) => `${r.at} ${r.name}`).join(' · '))
+  game.pushFeed('streaks: ' + game.ladder.map((r) => `${r.at} ${r.name}`).join(' · '))
 }
 
 // ------------------------------------------------------------------ podium

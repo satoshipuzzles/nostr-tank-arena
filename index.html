@@ -208,6 +208,20 @@
           </div>
         </div>
 
+        <!-- The streak loadout. Repair at 3, juggernaut at 20 and carpet at 25
+             are house rules; the four rungs between are yours to arrange.
+             Rows are built from `REWARDS` x `LOADOUT_TIERS` in src/game.ts so
+             this list and the ladder `onOwnKill` awards from cannot drift
+             apart — same reason the skin picker is built from `SKINS`. -->
+        <div class="loadout" id="loadout">
+          <span class="seg-label">Streaks</span>
+          <div class="loadout-rows" id="loadout-rows"></div>
+          <p class="fine">
+            Repair at 3, juggernaut at 20, carpet at 25 — house rules. The four
+            rungs between are yours. Saved on this device.
+          </p>
+        </div>
+
         <!-- The garage. Skins are cosmetic only: the finish changes, the
              player's colour never does. Filled from `SKINS` in src/skins.ts so
              the markup and the renderer cannot drift apart — and the preview
