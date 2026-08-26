@@ -637,6 +637,45 @@ $('bots').addEventListener('click', (e) => {
   if (b) setBots(Number(b.dataset.value))
 })
 
+// ----------------------------------------------------------- reward icons
+
+/**
+ * One icon per reward *id*, drawn once, read everywhere: the loadout picker,
+ * the ladder strip, the tray pills and the buff chips. Keyed by id and not by
+ * rung number, because the loadout made rung numbers a choice — the old
+ * at-keyed table showed the air-strike star on rung 5 no matter what the
+ * player had actually slotted there.
+ */
+const REWARD_PATHS: Record<string, string> = {
+  repair:
+    '<path d="M14 3a5 5 0 0 0-4.6 7L3 16.4V21h4.6l6.4-6.4A5 5 0 1 0 14 3Z"/>',
+  strike:
+    '<path d="M9 2h6l-2 5h-2Z"/><circle cx="12" cy="15" r="6.5"/>',
+  recon:
+    '<circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2.5"/>' +
+    '<circle cx="12" cy="12" r="3"/>' +
+    '<path d="M12 1v4M12 19v4M1 12h4M19 12h4" stroke="currentColor" stroke-width="2.5"/>',
+  chopper:
+    '<path d="M3 6h18v2H13v3l6 4v2H5v-2l6-4V8H3Z"/><circle cx="12" cy="19" r="2"/>',
+  siege:
+    '<path d="M9 2h6v9h4.5L12 22 4.5 11H9Z"/>',
+  emp:
+    '<path d="M13.5 2 6 13.5h4L8 22l9.5-12h-4Z"/>' +
+    '<path d="M12 0a12 12 0 0 0 0 24" fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="3 5"/>' +
+    '<path d="M12 0a12 12 0 0 1 0 24" fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="3 5"/>',
+  juggernaut:
+    '<path d="M12 2 3 6v6c0 5 3.8 9.2 9 10 5.2-.8 9-5 9-10V6Z"/>',
+  carpet:
+    '<path d="M5 2h3v7H5Zm5.5 0h3v7h-3ZM16 2h3v7h-3ZM4 12h16l-8 10Z"/>',
+}
+
+/** The icon as inline SVG. Same contract as `iconSvg` for pickups. */
+function rewardIcon(id: string, cls = 'ricon'): string {
+  const paths = REWARD_PATHS[id]
+  if (!paths) return ''
+  return `<svg class="${cls}" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">${paths}</svg>`
+}
+
 // ---------------------------------------------------------------- loadout
 
 /**
@@ -671,7 +710,7 @@ function paintLoadout(): void {
           // `escapeHtml` lives far below this line, where calling it during
           // module init is a temporal-dead-zone crash that takes the whole
           // lobby with it. Same trap `paintBotsButton` documents.
-          `aria-pressed="${loadout[i] === r.id}">${r.name}</button>`,
+          `aria-pressed="${loadout[i] === r.id}">${rewardIcon(r.id)}${r.name}</button>`,
       ).join('') +
       `</div></div>`,
   ).join('')
@@ -2535,7 +2574,7 @@ function drawStreak(game: Game): void {
   node.innerHTML =
     `<div class="streak-line">` +
     (game.streak > 0 ? `<b>${game.streak}</b> in a row` : `<span class="dim">no streak</span>`) +
-    `<span class="streak-next">${left} more &rarr; ${escapeHtml(rung.name)}</span></div>` +
+    `<span class="streak-next">${left} more &rarr; ${rewardIcon(rung.id)}${escapeHtml(rung.name)}</span></div>` +
     `<div class="streak-bar"><i style="width:${Math.round((done / span) * 100)}%"></i></div>`
 }
 
@@ -2555,14 +2594,10 @@ function drawStreak(game: Game): void {
  * empties on a round boundary and on every spend, and a second copy of that
  * state is a second thing that can be wrong.
  */
-const REWARD_ICONS: Record<number, string> = {
-  3: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3a5 5 0 0 0-4.6 7L3 16.4V21h4.6l6.4-6.4A5 5 0 1 0 14 3Z"/></svg>',
-  5: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2 9 9H2l5.5 4L5 21l7-4.5L19 21l-2.5-8L22 9h-7Z"/></svg>',
-  10: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18v2H13v3l6 4v2H5v-2l6-4V8H3Z"/><circle cx="12" cy="19" r="2"/></svg>',
-  15: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2 8 8v9h8V8Zm-4 17h8v3H8Z"/></svg>',
-  20: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2 3 6v6c0 5 3.8 9.2 9 10 5.2-.8 9-5 9-10V6Z"/></svg>',
-  25: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 2h3v7H5Zm5.5 0h3v7h-3ZM16 2h3v7h-3ZM4 12h16l-8 10Z"/></svg>',
-}
+// Reward icons live in `REWARD_PATHS` near the top of this file — keyed by
+// reward id rather than rung number, because the loadout made rung numbers a
+// choice, and read at module init by the picker, where a table down here is
+// the temporal-dead-zone crash the picker already documents.
 
 /**
  * What the tray currently shows, so it is only rebuilt when it changes.
@@ -2598,7 +2633,7 @@ function drawTray(game: Game): void {
       return (
         `<button type="button" class="reward" data-at="${at}"${usable ? '' : ' disabled'} ` +
         `title="${escapeHtml(rung?.detail ?? '')} — press ${i + 1}">` +
-        `${REWARD_ICONS[at] ?? ''}` +
+        `${rewardIcon(rung?.id ?? '')}` +
         `<span class="reward-name">${escapeHtml(rung?.name ?? String(at))}</span>` +
         `<span class="reward-key">${i + 1}</span>` +
         `</button>`

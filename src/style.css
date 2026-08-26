@@ -706,6 +706,21 @@ body.emp #hud::before {
    player with than "why is that dim". */
 .reward:disabled { opacity: 0.45; cursor: default; }
 .reward svg { width: 15px; height: 15px; fill: currentColor; flex: none; }
+/* Pills pop on arrival. The tray only rebuilds on a state change (see
+   `trayKey`), so the animation plays on earn/spend rather than every frame. */
+#tray .reward { animation: reward-pop 0.22s cubic-bezier(0.2, 1.6, 0.4, 1); }
+@keyframes reward-pop {
+  from { transform: scale(0.55); opacity: 0; }
+}
+/* The reward icon anywhere it rides text: picker buttons, the ladder strip. */
+.ricon {
+  width: 13px;
+  height: 13px;
+  display: inline-block;
+  vertical-align: -2px;
+  margin-right: 5px;
+  fill: currentColor;
+}
 .reward-name { letter-spacing: 0.2px; }
 /* The number key, on the button, because a control whose shortcut is written
    somewhere else has no shortcut. */
