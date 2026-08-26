@@ -482,6 +482,35 @@ body.hud-compact #ctf {
 }
 
 /*
+ * The streak loadout: four rungs, five rewards, arranged in the lobby.
+ *
+ * Reads as a compact table — tier number on the left, one segmented row of
+ * rewards beside it — because five names four times is where a control stops
+ * being a row of chips and starts being a menu. The buttons stay `.seg`
+ * buttons so aria-pressed styling and touch targets come for free.
+ */
+.loadout { display: grid; gap: 6px; margin: 6px 0 2px; }
+.loadout-rows { display: grid; gap: 4px; }
+.loadout-row { display: grid; grid-template-columns: 44px 1fr; align-items: center; gap: 8px; }
+.loadout-tier {
+  font-size: 11px;
+  color: var(--dim);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.loadout-row .seg { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; }
+.loadout-row .seg button { padding: 7px 4px; font-size: 11px; white-space: nowrap; }
+.loadout > .fine { margin: 2px 0 0; }
+/* Five names in one row needs ~460px; under that the tier moves on top and
+   the rewards wrap to a 3-2 grid instead of clipping "EMP" off the edge. */
+@media (max-width: 560px) {
+  .loadout-row { grid-template-columns: 1fr; gap: 3px; }
+  .loadout-tier { text-align: left; }
+  .loadout-row .seg { grid-template-columns: repeat(3, 1fr); }
+}
+
+/*
  * Player two, on one screen. Not a second HUD — just the numbers that are
  * theirs: hull, score, and whatever is ticking down on them. Their name, kills
  * and deaths are already on the scoreboard, because to player one's client they
@@ -1096,6 +1125,7 @@ body.emp #hud::before {
       "fields   garage"
       "bots     garage"
       "players  garage"
+      "loadout  loadout"
       "steering sound"
       "row      row"
       "live     live"
@@ -1110,6 +1140,7 @@ body.emp #hud::before {
   .lobby-card > .fields { grid-area: fields; }
   .lobby-card > #row-bots { grid-area: bots; }
   .lobby-card > #row-players { grid-area: players; }
+  .lobby-card > #loadout { grid-area: loadout; }
   /*
    * Eight buttons is one too many for `.seg`'s flex-wrap to split evenly once
    * this row is squeezed into a half-width column: seven fit on the first

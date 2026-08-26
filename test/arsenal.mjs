@@ -349,6 +349,53 @@ try {
     [4, 6, 9].map((n) => `${n}:${rung[n].hp}`).join(' '),
   )
 
+  // --- the loadout ----------------------------------------------------------
+  //
+  // The ladder above was the *default* loadout, which is why every check
+  // passed without arranging anything. Now rearrange it and prove the rungs
+  // follow: siege first, strike last — the two rewards the default leaves at
+  // home or at the front, deliberately crossed over.
+  const kitted = await page.evaluate(() => {
+    const g = window.__game
+    g.setLoadout(['siege', 'emp', 'recon', 'strike'])
+    const real = g.publishAsSession.bind(g)
+    const sent = []
+    g.publishAsSession = (kind, payload) => {
+      if (kind === 21004) sent.push(payload)
+      return real(kind, payload)
+    }
+    const out = {}
+    const rungAt = (n) => {
+      g.streak = n - 1
+      g.tank.dead = false
+      g.tank.hp = 1
+      g.buffs.siegeUntil = 0
+      g.buffs.reconUntil = 0
+      g.onOwnKill()
+      const now = performance.now()
+      return {
+        siege: g.buffs.siegeUntil > now,
+        recon: g.buffs.reconUntil > now,
+        emps: sent.filter((p) => p && p.k === 'emp').length,
+        strikes: sent.filter((p) => !p || p.k !== 'emp').length,
+      }
+    }
+    out.at5 = rungAt(5)
+    out.at7 = rungAt(7)
+    out.at10 = rungAt(10)
+    out.at15 = rungAt(15)
+    out.ladder = g.ladder.map((r) => `${r.at}:${r.id}`).join(' ')
+    g.publishAsSession = real
+    g.setLoadout(['strike', 'recon', 'chopper', 'emp'])
+    g.streak = 0
+    return out
+  })
+  check(
+    'a rearranged loadout moves the rungs, not just the menu',
+    kitted.at5.siege && kitted.at7.emps === 1 && kitted.at10.recon && kitted.at15.strikes === 1,
+    kitted.ladder,
+  )
+
   // --- the air strike -------------------------------------------------------
   const IN_LANE = 'f2'.repeat(32)
   const strike = await page.evaluate(
