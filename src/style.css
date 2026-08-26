@@ -418,8 +418,12 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
   transform: translateX(-50%);
   /* Kept clear of the scoreboard and the status panel either side of it. On a
    * 800px window the centre band between them is about 360px, and without a
-   * cap the chip runs underneath both. */
-  max-width: min(420px, calc(100vw - 480px));
+   * cap the chip runs underneath both. The 240px floor is for when that
+   * arithmetic goes negative: below a 720px window `100vw - 480px` reserved
+   * the banner a strip narrower than its own padding, and "Supply Run" came
+   * out one word per line in a 30px sliver. A readable chip that grazes the
+   * panels beats an unreadable one that clears them. */
+  max-width: min(420px, max(calc(100vw - 480px), 240px));
   display: grid;
   justify-items: center;
   gap: 1px;
@@ -1208,14 +1212,27 @@ body.hud-compact #hud-actions button { padding: 11px 12px; font-size: 12px; }
    keyboard to be hinted about. */
 body.hud-compact #controls-hint { display: none; }
 
+/* One row down, not beside. The chip row owns the top edge on a phone, and the
+   rules pill centred at `top: 14px` sat underneath the chips while the desktop
+   width arithmetic (`100vw - 480px`, sized for flanking panels that are now
+   chips) squeezed it to a sliver. Below the chips it can have nearly the whole
+   width, which is what a banner whose job is "tell the newcomer what round
+   this is" needs on the smallest screens. */
+body.hud-compact #rules {
+  top: calc(max(10px, env(safe-area-inset-top)) + 58px);
+  max-width: min(420px, calc(100vw - 20px));
+}
+
 /* Too narrow to be worth reading. Set by `watchActionsWidth` in main.ts from
    the measured gap between the hints and the button row. */
 #controls-hint.cramped { display: none; }
 
-/* The kill feed sits at the bottom on a desk, on top of the action bar's old
-   corner. With the bar collapsed the feed is the only thing down there, so it
-   gets the room back rather than staying tucked above a bar that is gone. */
-body.hud-compact #feed { bottom: max(10px, env(safe-area-inset-bottom)); }
+/* No feed override here any more. This rule used to drop the feed to the very
+   bottom on the theory that with the bar collapsed the feed was the only thing
+   down there — but the magazine moved down there too (see `#ammo` above), and
+   the kill lines printed straight through the pips. With the hints hidden,
+   `--hint-h` now reserves the magazine's measured height (see `publishHeight`
+   in main.ts), so the ordinary `#feed` rule already puts the feed above it. */
 
 /* ----------------------------------------------------- the leaderboard wall */
 

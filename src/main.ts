@@ -1729,7 +1729,15 @@ function watchActionsWidth(): void {
    * includes the frame `cramped` takes it to zero and the frame it comes back.
    */
   const publishHeight = () => {
-    const h = Math.round(hint.getBoundingClientRect().height)
+    let h = Math.round(hint.getBoundingClientRect().height)
+    // A hidden hint row measures zero, and zero is the wrong reserve: with the
+    // hints gone (a phone's `hud-compact`, or `cramped` on a narrow window)
+    // the magazine is what lives along the bottom edge, and a feed that only
+    // cleared the hints printed its kill lines straight through the ammo pips.
+    // Reserve the magazine's height instead — measured, like everything else
+    // here, because the pips and the word under them are two more layouts that
+    // will not stay the same size forever.
+    if (h === 0) h = Math.round($('ammo').getBoundingClientRect().height)
     document.documentElement.style.setProperty('--hint-h', `${h}px`)
   }
 
@@ -1738,6 +1746,7 @@ function watchActionsWidth(): void {
   if (typeof ResizeObserver === 'function') {
     new ResizeObserver(publish).observe(row)
     new ResizeObserver(publishHeight).observe(hint)
+    new ResizeObserver(publishHeight).observe($('ammo'))
   }
   window.addEventListener('resize', () => {
     publish()
