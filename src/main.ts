@@ -15,6 +15,7 @@ import { DEFAULT_RELAYS, Identity, Net, mergeRelays } from './nostr'
 import { type RelayProbe, checkRelay, parseRelayList } from './relays'
 import { Renderer, TankPreview, type ViewMode } from './render'
 import type { ClockDirection } from './nostr'
+import type { Event as NostrEvent } from 'nostr-tools'
 import { modifierForBlock } from './modifiers'
 import { MAG_SIZE, RELOAD } from './sim'
 import { SKINS, SKIN_IDS, asSkin } from './skins'
@@ -1190,6 +1191,120 @@ function profilePeek(pubkey: string): void {
       .catch(() => {})
   }, 400)
 }
+
+// ---------------------------------------------------------------- profile
+
+/**
+ * The driver's card, in the garage, before there is a game.
+ *
+ * Puzz: "Users should be able to see their tank and kind 0 info on the
+ * landing page and customize their profile and save (publish to the relays)."
+ *
+ * Connect reads the npub over NIP-07 without starting anything; the kind 0 is
+ * fetched over the same `lobbyPool()` the live board uses. Save merges the
+ * edited fields OVER the profile as the relays have it — nip05, lud16, banner
+ * and anything else this card does not edit survive the publish untouched,
+ * because a profile editor that silently strips fields it never showed is a
+ * data-loss bug wearing a save button. Guests are told the truth: the
+ * dressing room needs a real key, the table never does.
+ */
+let profilePubkey: string | null = null
+let profileMeta: Record<string, unknown> = {}
+
+function paintProfileIdent(name: string, picture: string | null, sub: string): void {
+  $('profile-name').textContent = name
+  $('profile-npub').textContent = sub
+  const img = $<HTMLImageElement>('profile-pic')
+  if (picture) {
+    img.src = picture
+    img.hidden = false
+  } else {
+    img.hidden = true
+  }
+}
+
+async function connectProfile(): Promise<void> {
+  const note = $('profile-note')
+  if (!window.nostr) {
+    note.textContent =
+      'No NIP-07 extension found — a profile follows a real npub. Guest play needs nothing.'
+    return
+  }
+  try {
+    const pk = await window.nostr.getPublicKey()
+    profilePubkey = pk
+    $('profile-connect').hidden = true
+    note.textContent = 'looking for your profile…'
+    const events = await lobbyPool().list({ kinds: [0], authors: [pk], limit: 4 })
+    let newest: NostrEvent | null = null
+    for (const e of events) {
+      if (e.pubkey === pk && (!newest || e.created_at > newest.created_at)) newest = e
+    }
+    profileMeta = {}
+    if (newest) {
+      try {
+        const parsed = JSON.parse(newest.content)
+        if (parsed && typeof parsed === 'object') profileMeta = parsed as Record<string, unknown>
+      } catch {
+        // A malformed profile is a missing profile, same rule as `Profiles`.
+      }
+    }
+    const display =
+      typeof profileMeta.display_name === 'string' && profileMeta.display_name.trim()
+        ? profileMeta.display_name.trim()
+        : typeof profileMeta.name === 'string'
+          ? profileMeta.name.trim()
+          : ''
+    const picture = typeof profileMeta.picture === 'string' ? profileMeta.picture : null
+    paintProfileIdent(display || shortNpub(pk), picture, shortNpub(pk))
+    $<HTMLInputElement>('profile-name-input').value = display
+    $<HTMLInputElement>('profile-picture-input').value = picture ?? ''
+    $<HTMLInputElement>('profile-about-input').value =
+      typeof profileMeta.about === 'string' ? profileMeta.about : ''
+    $('profile-edit').hidden = false
+    note.textContent = newest
+      ? 'This is your kind 0 as the relays have it.'
+      : 'No profile on these relays yet — write one.'
+  } catch {
+    note.textContent = 'Could not read your npub — the extension said no.'
+  }
+}
+
+async function saveProfile(): Promise<void> {
+  if (!window.nostr || !profilePubkey) return
+  const note = $('profile-note')
+  const name = $<HTMLInputElement>('profile-name-input').value.trim()
+  const picture = $<HTMLInputElement>('profile-picture-input').value.trim()
+  const about = $<HTMLInputElement>('profile-about-input').value.trim()
+  const content: Record<string, unknown> = { ...profileMeta }
+  if (name) content.display_name = name
+  else delete content.display_name
+  if (picture) content.picture = picture
+  else delete content.picture
+  if (about) content.about = about
+  else delete content.about
+  note.textContent = 'waiting for the extension…'
+  try {
+    const signed = await window.nostr.signEvent({
+      kind: 0,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [],
+      content: JSON.stringify(content),
+    })
+    const outcome = await lobbyPool().publish(signed)
+    profileMeta = content
+    paintProfileIdent(name || shortNpub(profilePubkey), picture || null, shortNpub(profilePubkey))
+    note.textContent =
+      outcome.accepted > 0
+        ? `Published — ${outcome.accepted} relay${outcome.accepted === 1 ? '' : 's'} took it.`
+        : 'No relay accepted it. Check the list under Controllers and relays.'
+  } catch {
+    note.textContent = 'Signing was declined.'
+  }
+}
+
+$('profile-connect').addEventListener('click', () => void connectProfile())
+$('profile-save').addEventListener('click', () => void saveProfile())
 
 function paintLiveRooms(): void {
   const rows = $('live-rows')

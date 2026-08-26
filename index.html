@@ -240,6 +240,29 @@
             <p class="fine" id="garage-note">
               Your colour is dealt from your npub at the table. The finish is yours to pick.
             </p>
+            <!-- The driver, next to the machine. Inside the garage on purpose:
+                 your tank and your identity are one panel, and a new lobby-card
+                 child would need its own desktop grid area. Connect reads the
+                 npub over NIP-07 without starting a game; Save signs a kind 0
+                 and publishes it to the lobby's relays. Guests get told the
+                 truth: customisation needs a real key, play never does. -->
+            <div id="profile">
+              <div class="profile-row">
+                <img id="profile-pic" alt="" hidden />
+                <div class="profile-ident">
+                  <span id="profile-name"></span>
+                  <span id="profile-npub" class="fine"></span>
+                </div>
+                <button type="button" id="profile-connect" class="ghost tiny">Connect npub</button>
+              </div>
+              <div id="profile-edit" hidden>
+                <label>Display name<input id="profile-name-input" maxlength="28" autocomplete="off" /></label>
+                <label>Picture URL<input id="profile-picture-input" autocomplete="off" /></label>
+                <label>About<input id="profile-about-input" maxlength="160" autocomplete="off" /></label>
+                <button type="button" id="profile-save" class="tiny">Sign &amp; publish</button>
+              </div>
+              <p class="fine" id="profile-note"></p>
+            </div>
           </div>
         </div>
 
