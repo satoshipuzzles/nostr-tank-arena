@@ -399,6 +399,8 @@ export interface Peer {
     shield: boolean
     /** True while their ticks say their recon sweep is running. See `rn`. */
     recon: boolean
+    /** Streak rewards banked in their tray. See `StatePayload.e`. */
+    held: number
     /**
      * When their chopper comes down, in our clock, or 0.
      *
@@ -482,6 +484,8 @@ interface StateSample {
   shield: boolean
   /** True while their recon sweep runs. See `StatePayload.rn`. */
   recon: boolean
+  /** Streak rewards banked in their tray. See `StatePayload.e`. */
+  held: number
   /** Deadline in our clock, or 0. See `StatePayload.c`. */
   chopperUntil: number
   /** Ground point their rounds are landing on, or null. */
@@ -1038,6 +1042,7 @@ export class Game {
         ammo: MAG_SIZE,
         shield: false,
         recon: false,
+        held: 0,
         chopperUntil: 0,
         chopperAt: null,
         team: 0,
@@ -1080,6 +1085,15 @@ export class Game {
     peer.lastSeen = performance.now()
     this.updateOffset(peer, p.t)
 
+    // The tray count, compared before the view is overwritten: a rising count
+    // is the earn moment, and the feed is where the room learns to start
+    // hunting whoever is sitting on a bank. Falling counts say nothing here —
+    // every spend is already loud by its own effect or event.
+    const held = typeof p.e === 'number' ? Math.max(0, Math.min(8, Math.floor(p.e))) : 0
+    if (held > peer.view.held) {
+      this.pushFeed(`${peer.name} banked a reward — holding ${held}`)
+    }
+
     const sample: StateSample = {
       t: p.t + peer.offset,
       x: p.x,
@@ -1102,6 +1116,7 @@ export class Game {
       // client sends, and the safe way round — a marker that fails to light is
       // a weaker recon, a marker lit for nobody's sweep is a lie on the board.
       recon: p.rn === 1,
+      held,
       // Clamped, and turned into a deadline in *our* clock. A hostile client
       // claiming an hour of gunship is claiming a tank nobody can shoot for an
       // hour, so the ceiling is the same window everybody else gets plus a
@@ -1915,6 +1930,21 @@ export class Game {
     if (hasBuff(this.buffs, 'reconUntil', now)) return true
     for (const [session, peer] of this.peers) {
       if (peer.view.recon && this.friendly(session)) return true
+    }
+    return false
+  }
+
+  /**
+   * Is an *enemy's* recon sweep running — i.e. are we the one lit up?
+   *
+   * The `rn` flag was always on the wire for everybody; only the earner's
+   * side was reading it. Knowing you are marked is half the pressure of the
+   * reward, and it costs nothing new to carry.
+   */
+  markedByEnemy(): boolean {
+    if (this.watching) return false
+    for (const [session, peer] of this.peers) {
+      if (peer.view.recon && !peer.view.dead && !this.friendly(session)) return true
     }
     return false
   }
@@ -2944,6 +2974,12 @@ export class Game {
         peer.view.dead = newest.dead
         peer.view.ammo = newest.ammo
         peer.view.shield = newest.shield
+        // Steps, not slopes, like the shield — and the copy the whole feature
+        // hangs on: a sample field that never reaches the view is a wire flag
+        // nobody reads, which is exactly how the teammate half of recon
+        // shipped broken.
+        peer.view.recon = newest.recon
+        peer.view.held = newest.held
         peer.view.chopperUntil = newest.chopperUntil
         peer.view.chopperAt = newest.chopperAt
         peer.view.team = newest.team
@@ -2971,6 +3007,8 @@ export class Game {
       // step, not a slope, and half a shell is not a thing to draw.
       peer.view.ammo = bb.ammo
       peer.view.shield = bb.shield
+      peer.view.recon = bb.recon
+      peer.view.held = bb.held
       // The newer sample, like HP and ammo. A gunship is up or it is not, and
       // half a chopper is not a thing to draw or to be shot by. The *aim point*
       // is deliberately not interpolated either: it is where rounds are landing
@@ -3062,6 +3100,9 @@ export class Game {
       // deadline, and only while it runs. Teammates who see it light their own
       // markers; enemies learn they are lit, which is half the pressure.
       ...(hasBuff(this.buffs, 'reconUntil', now) ? { rn: 1 as const } : {}),
+      // The tray's held count, so a tank sitting on banked rewards is a
+      // visible threat. Absent while empty, which is most ticks.
+      ...(this.earned.length ? { e: this.earned.length } : {}),
       // Same reasoning: omitted while the board is intact, which is most of a
       // round. Unioned by whoever receives it, so a tick lost on the way costs
       // nothing and a late joiner is caught up by the next one.

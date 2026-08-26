@@ -2528,6 +2528,21 @@ function drawBuffs(game: Game, now: number): void {
         `${escapeHtml(spec.label)} <b>${left.toFixed(1)}s</b></span>`,
     )
   }
+  // Recon is a streak reward rather than a pickup, so the loop above never
+  // sees it — but it is a running buff like any other and earns the same chip.
+  const reconLeft = (game.buffs.reconUntil - now) / 1000
+  if (reconLeft > 0) {
+    live.push(
+      `<span class="buff" style="--buff-hue:155">recon <b>${reconLeft.toFixed(1)}s</b></span>`,
+    )
+  }
+  // And the other side of that coin: an enemy's sweep has you lit through
+  // cover. The `rn` flag was always on the wire for everybody; only the
+  // earner's side was reading it. Knowing you are marked is half the
+  // pressure of the reward — break line of sight, or stop mattering.
+  if (game.markedByEnemy()) {
+    live.push(`<span class="buff marked" style="--buff-hue:0">&#9673; you are marked</span>`)
+  }
   node.hidden = live.length === 0
   node.innerHTML = live.join('')
 }
