@@ -7,6 +7,10 @@ signed yourself.
 Slow shells, 3 hits to kill, cover you can hide behind, sandbags you can
 shoot over but not drive through, instant respawn.
 
+**Play:** https://nostr-tank-arena.vercel.app ·
+**Backlog:** https://tankops.vercel.app ·
+**What's next and why:** [ROADMAP.md](ROADMAP.md)
+
 ## Rounds are Bitcoin blocks
 
 A round lasts one block. That is not decoration — it is the only round timer
