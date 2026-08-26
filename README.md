@@ -48,10 +48,14 @@ Kills in a row, without dying:
 | --- | --- |
 | 3 | Hull repaired to full |
 | 5 | **Air strike** — a line of bombs walks across the far half of the board |
+| 7 | **Recon** — every enemy marked through cover for eight seconds, for you *and* your teammates |
 | 10 | **Chopper** — ten seconds out of the tank, flying a gun over the board |
-| 15 | Siege shells — every shot takes two hull points |
+| 15 | **EMP** — every other player's HUD goes dark for four seconds |
 | 20 | Juggernaut — full hull, shielded and fast |
 | 25 | Carpet bombing — a longer air strike |
+
+Siege shells (two hull a hit) still exist as a pickup; the 15 rung traded
+them for the EMP, and they come back as a choice when loadouts land.
 
 Separately, eight seconds without taking a hit gives one hull point back;
 `Game.regenAfter` is the knob.

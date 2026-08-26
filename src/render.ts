@@ -1158,6 +1158,8 @@ interface TankRig {
    * read is not a tactic, it is a private surprise — see `StatePayload.sh`.
    */
   bubble: THREE.Mesh
+  /** The recon ping over this tank. Visible only while a sweep marks it. */
+  ping: THREE.Mesh
   /**
    * Fractional puffs owed to the plume emitter.
    *
@@ -1204,6 +1206,21 @@ const BUBBLE_MAT = new THREE.MeshBasicMaterial({
  * being small, and they read as a shield rather than as a blue tank.
  */
 const BUBBLE_WIRE_GEO = new THREE.IcosahedronGeometry(TANK_RADIUS + 17, 2)
+/**
+ * The recon ping: a spinning diamond hung high over an enemy tank, drawn with
+ * `depthTest` off so it reads through rocks and hedges — that is the whole
+ * reward. High and small rather than an outline of the hull: an outline needs
+ * the hull's silhouette re-rendered per skin, a diamond needs one mesh, and
+ * from the board camera "there, behind that rock" is the information.
+ */
+const PING_GEO = new THREE.OctahedronGeometry(9)
+const PING_MAT = new THREE.MeshBasicMaterial({
+  color: 0xff5340,
+  transparent: true,
+  opacity: 0.95,
+  depthTest: false,
+})
+
 const BUBBLE_WIRE_MAT = new THREE.MeshBasicMaterial({
   color: 0xd6f4ff,
   wireframe: true,
@@ -1396,6 +1413,15 @@ function makeTank(): TankRig {
   bubble.add(new THREE.Mesh(BUBBLE_WIRE_GEO, BUBBLE_WIRE_MAT))
   root.add(bubble)
 
+  // On `root` like the bubble, and for the same reason: a marker that tips
+  // over with a wreck reads wrong, and it is hidden while dead anyway.
+  const ping = new THREE.Mesh(PING_GEO, PING_MAT)
+  ping.position.y = 108
+  ping.scale.set(1, 1.6, 1)
+  ping.visible = false
+  ping.renderOrder = 30
+  root.add(ping)
+
   const pips: THREE.Mesh[] = []
   for (let i = 0; i < MAX_HP; i++) {
     const pip = new THREE.Mesh(PIP_GEO, toy(0xffffff))
@@ -1420,6 +1446,7 @@ function makeTank(): TankRig {
     body,
     trim,
     bubble,
+    ping,
     smokeOwed: 0,
     labelKey: '',
     recoil: 0,
@@ -1838,6 +1865,10 @@ export class Renderer {
    */
   private youHull = 0
   private youAt = new THREE.Vector2(ARENA_W / 2, ARENA_H / 2)
+  /** True while a recon sweep (ours or a teammate's) lights enemies up. */
+  private reconLit = false
+  /** The viewer's declared side while it does, 0 in a free-for-all. */
+  private viewerTeam = 0
   /**
    * Where a real npub's kind 0 picture comes from. Injected rather than
    * imported: the renderer has no business knowing what a relay is, and the
@@ -2292,6 +2323,10 @@ export class Renderer {
     // in hand and needs the hull to measure the cockpit aim arc against.
     this.youHull = game.tank.hull
     this.youAt.set(game.tank.x, game.tank.y)
+    // Once per frame, not per rig: whether a sweep is lighting enemies up for
+    // this viewer, and which side counts as "ours" while it is.
+    this.reconLit = game.reconSees(now)
+    this.viewerTeam = game.team
     const maxHp = game.maxHp
     this.applyTank(this.you, dt, now, {
       x: game.tank.x,
@@ -2579,6 +2614,17 @@ export class Renderer {
     // in cockpit view, where you are inside the sphere.
     rig.bubble.visible = !dead && v.shield
     if (rig.bubble.visible) rig.bubble.scale.setScalar(1 + Math.sin(now / 180) * 0.04)
+
+    // The recon ping. Never on yourself — you know where you are — and never
+    // on a teammate: the sweep marks the *enemy*, and in a free-for-all
+    // everybody who is not you is one. Spins and bobs so it reads as a live
+    // sweep rather than as scenery that happens to float.
+    rig.ping.visible = this.reconLit && !eye && !dead &&
+      (this.viewerTeam === 0 || v.team !== this.viewerTeam)
+    if (rig.ping.visible) {
+      rig.ping.rotation.y = now / 300
+      rig.ping.position.y = 108 + Math.sin(now / 200) * 5
+    }
 
     const ringMat = rig.ring.material as THREE.MeshBasicMaterial
     const hot = v.streak >= 3
