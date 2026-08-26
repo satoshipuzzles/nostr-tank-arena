@@ -30,7 +30,8 @@ npub, the netcode is relays, and every round is a Bitcoin block.
   rubble that a tank crosses at 55% speed.
 - **Kill streaks** — repair at 3, air strike at 5, chopper at 10, siege shells at 15,
   juggernaut at 20, carpet bombing at 25, with a HUD strip that says what the next kill
-  buys.
+  buys. Reaching a rung **earns** the reward into a tray of icons; you spend it with a
+  click or its number key, when it is worth spending.
 - **Bots** — 0 to 7 practice tanks, picked on the lobby or stepped mid-match. Entirely
   local; they publish nothing and they stand down when a real player arrives.
 - **Modes** — deathmatch, team deathmatch, capture the flag with bases and a
@@ -49,19 +50,16 @@ npub, the netcode is relays, and every round is a Bitcoin block.
 
 In the order they get worked, and the reason each one is where it is.
 
-1. **Kill streaks you trigger rather than receive** — earn a reward into a tray of
-   icons and spend it when it is worth spending. The reward is currently a thing that
-   happens *to* you, and choosing the moment is the entire decision.
-2. **Kill streaks are invisible to everybody but the earner** — a chopper nobody else
-   can see is a private cutscene, not a threat. This is the other half of the one
-   above: a reward you choose to spend is only worth choosing if the room reacts.
-3. **Team deathmatch does not really work** — a mode that is on the hub and does not
+1. **Kill streaks are invisible to everybody but the earner** — a chopper nobody else
+   can see is a private cutscene, not a threat. It is the other half of the tray: a
+   reward you choose the moment for is only worth choosing if the room reacts to it.
+2. **Team deathmatch does not really work** — a mode that is on the hub and does not
    deliver is worse than one that is not there.
-4. **Per-mode leaderboards** — a flag capture, a captured point and a solo kill are
+3. **Per-mode leaderboards** — a flag capture, a captured point and a solo kill are
    three different units, and there are now four modes measured on one axis.
-5. **Custom skins and a picker that holds dozens** — upload your own art, save a
+4. **Custom skins and a picker that holds dozens** — upload your own art, save a
    collection, and a picker that does not fall over at thirty entries.
-6. **The feel pass on the rewards that exist** — the chopper out to twenty seconds,
+5. **The feel pass on the rewards that exist** — the chopper out to twenty seconds,
    carpet bombing retimed so it does not open on a corpse, and a kill feed with a skull
    and both faces.
 
@@ -94,10 +92,10 @@ Abstracting from one example is guessing.
 Carried on purpose, and worth seeing in one place because a red suite that everybody
 has learned to ignore is worse than no suite.
 
-- `test/arsenal.mjs` — red on `main` on "and they do not hurt the tank that called
-  them", which is the air-strike friendly-fire rule rather than the stale overdrive
-  check it used to fail on. Newer than this file; whoever is on the streak rewards owns
-  it.
+- `test/arsenal.mjs` and `test/chopper-browser.mjs` — each has one check that fails
+  about one run in three or four, on `main` and on every branch: the air-strike
+  friendly-fire case and the chopper's rake interval. Measured on both sides before
+  blaming a change, which is the only reason anybody knows they are flakes.
 - `test/relays.mjs` — four checks red on `main`, and the pacing ledger reads zero. A
   counter reading zero is the signature of a path that never ran rather than one that
   ran wrong, and while it is red nothing about publish pacing is actually covered.

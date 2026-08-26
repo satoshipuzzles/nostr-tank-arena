@@ -73,6 +73,12 @@
            same reason the magazine is: it is read during a fight, not glanced
            at between them. -->
       <div id="streak" hidden></div>
+      <!-- Earned rewards, waiting to be spent. Above the streak strip because
+           the strip says what the *next* kill buys and this says what you are
+           already holding, and those read top-to-bottom in that order. Its own
+           element rather than part of the strip: it takes clicks, and the strip
+           is `pointer-events: none` so a tank behind it stays shootable. -->
+      <div id="tray" hidden role="group" aria-label="Kill streak rewards"></div>
       <div id="p2" hidden></div>
       <div id="feed"></div>
       <div id="controls-hint">

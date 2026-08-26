@@ -1215,52 +1215,112 @@ export class Game {
    * hull points was already able to do exactly that.
    */
   private onOwnKill(): void {
-    const now = performance.now()
     this.streak++
     this.bestStreak = Math.max(this.bestStreak, this.streak)
 
-    switch (this.streak) {
+    const rung = STREAK_LADDER.find((r) => r.at === this.streak)
+    if (rung) {
+      this.earn(rung.at)
+      return
+    }
+    if (this.streak > STREAK_CARPET) this.announce(`${this.streak} IN A ROW`, 'unstoppable', 45)
+    else this.pushFeed(`${this.streak} in a row`)
+  }
+
+  /**
+   * Rewards earned and not yet spent, as rung numbers.
+   *
+   * Puzz: "killstreaks should have to be triggered once obtained... be able to
+   * select them by clicking on them or something to activate."
+   *
+   * Before this, hitting a rung *fired* it. Three in a row repaired a hull that
+   * might be untouched; five called a strike at whatever the board happened to
+   * look like in that instant. The reward was a thing that happened to you, and
+   * the interesting part of a kill streak — deciding when it is worth
+   * spending — did not exist. An air strike held ten seconds until two tanks
+   * are in the same lane is worth three of one that goes off on the kill.
+   *
+   * One of each at a time: earning a rung already held does nothing. The tray
+   * cannot become a stockpile, and it cannot outgrow the strip it is drawn on.
+   */
+  earned: number[] = []
+
+  /** True if that reward is sitting in the tray. */
+  holding(at: number): boolean {
+    return this.earned.includes(at)
+  }
+
+  /**
+   * Put a reward in the tray.
+   *
+   * Deliberately **not** cleared by `die`. The streak counter resets on death,
+   * so dying already costs you the next rung; taking back what you have already
+   * earned as well turns "hold it for the right moment" into a trap, which is
+   * the exact behaviour this change exists to encourage. It clears at the round
+   * boundary, with everything else.
+   */
+  private earn(at: number): void {
+    if (this.holding(at)) return
+    this.earned.push(at)
+    this.earned.sort((a, b) => a - b)
+    const rung = STREAK_LADDER.find((r) => r.at === at)
+    this.sound('streak')
+    this.announce(`${at} IN A ROW`, `${rung?.name ?? 'reward'} ready — press ${this.earned.indexOf(at) + 1}`, 45)
+  }
+
+  /**
+   * Spend one. Returns false if it was not in the tray.
+   *
+   * `spend`, not `fire` — `fire` is the gun, and a method that means two things
+   * in one class is a bug waiting for somebody in a hurry.
+   *
+   * Every reward here except the air strike is self-authoritative — it changes
+   * only our own HP and our own buffs, which this client is already allowed to
+   * decide — and the strike already has its own wire format. Firing on a click
+   * rather than on the kill that earned it is a change of *when*, not of what
+   * anybody has to agree to, so nothing about the netcode moves.
+   */
+  spend(at: number): boolean {
+    if (!this.holding(at)) return false
+    // Not while dead and not from a chopper: a reward spent from the respawn
+    // screen is one the player cannot see land, and boarding a second gunship
+    // out of the first would need a state nothing else in here has.
+    if (this.tank.dead || this.flying) return false
+    this.earned = this.earned.filter((a) => a !== at)
+    const now = performance.now()
+    const rung = STREAK_LADDER.find((r) => r.at === at)
+    this.sound('streak')
+    switch (at) {
       case STREAK_REPAIR:
         this.tank.hp = this.maxHp
         this.repairedAt = now
-        this.sound('streak')
-        this.announce(`${STREAK_REPAIR} IN A ROW`, detailAt(STREAK_REPAIR), 130)
-        return
+        break
       case STREAK_STRIKE:
-        this.sound('streak')
         this.callStrike(now, STRIKE_BOMBS)
-        this.announce(`${STREAK_STRIKE} IN A ROW`, detailAt(STREAK_STRIKE), 20)
-        return
+        break
       case STREAK_OVERDRIVE:
-        // Puzz asked for a chopper at ten, and a chopper is not a buff — it
-        // takes the tank away and hands over a different vehicle. The rung used
-        // to give Overdrive, which still exists as a pickup; what it does not
-        // do any more is duplicate a pickup as a reward.
-        this.sound('streak')
+        // A chopper is not a buff — it takes the tank away and hands over a
+        // different vehicle. The rung used to give Overdrive, which still
+        // exists as a pickup; what it does not do any more is duplicate one.
         this.boardChopper(now)
-        this.announce(`${STREAK_OVERDRIVE} IN A ROW`, detailAt(STREAK_OVERDRIVE), 20)
-        return
+        break
       case STREAK_SIEGE:
-        this.sound('streak')
         this.buffs.siegeUntil = Math.max(this.buffs.siegeUntil, now) + STREAK_SIEGE_MS
-        this.announce(`${STREAK_SIEGE} IN A ROW`, detailAt(STREAK_SIEGE), 300)
-        return
+        break
       case STREAK_JUGGERNAUT:
-        this.sound('streak')
         this.tank.hp = this.maxHp
         this.repairedAt = now
         this.buffs.shieldUntil = Math.max(this.buffs.shieldUntil, now) + STREAK_JUGGER_MS
         this.buffs.speedUntil = Math.max(this.buffs.speedUntil, now) + STREAK_JUGGER_MS
-        this.announce(`${STREAK_JUGGERNAUT} IN A ROW`, detailAt(STREAK_JUGGERNAUT), 190)
-        return
+        break
       case STREAK_CARPET:
-        this.sound('streak')
         this.callStrike(now, CARPET_BOMBS)
-        this.announce(`${STREAK_CARPET} IN A ROW`, detailAt(STREAK_CARPET), 0)
-        return
+        break
+      default:
+        return false
     }
-    if (this.streak > STREAK_CARPET) this.announce(`${this.streak} IN A ROW`, 'unstoppable', 45)
-    else this.pushFeed(`${this.streak} in a row`)
+    this.announce((rung?.name ?? 'reward').toUpperCase(), detailAt(at), 20)
+    return true
   }
 
   /**
@@ -2882,6 +2942,12 @@ export class Game {
    */
   /** A new block: reset the round clock and the derived pickup schedule. */
   beginRound(height: number, hash: string): void {
+    // Its own call, not a side effect of `endRound`. A client that joins
+    // halfway through a block runs this and never runs that, so a reset that
+    // only lives in the other one is a reset that skips exactly the player who
+    // most needs the board to look like everybody else's. Same lesson as
+    // `resetCover`, which had the same bug for the same reason.
+    this.earned = []
     this.round = height
     this.roundHash = hash
     this.roundStartedAt = performance.now()
@@ -2925,6 +2991,10 @@ export class Game {
     this.deaths = 0
     this.streak = 0
     this.bestStreak = 0
+    // The tray goes with the round, not with the life. Death costs you the
+    // next rung and nothing you have already earned; a block boundary costs
+    // you both, for the same reason the score resets.
+    this.earned = []
     clearBuffs(this.buffs)
     // A strike called under the old block does not keep bombing the new one.
     this.strikes.clear()
