@@ -2083,6 +2083,7 @@ function drawHud(game: Game): void {
   drawNotice(game, now)
   drawBuffs(game, now)
   drawStreak(game)
+  drawTray(game)
 }
 
 /**
@@ -2459,6 +2460,106 @@ function drawStreak(game: Game): void {
     `<span class="streak-next">${left} more &rarr; ${escapeHtml(rung.name)}</span></div>` +
     `<div class="streak-bar"><i style="width:${Math.round((done / span) * 100)}%"></i></div>`
 }
+
+/**
+ * The rewards you are holding, as icons you can spend.
+ *
+ * Puzz: "you should have a icons showing your kill streaks and should be able
+ * to select them by clicking on them or something to activate. (like call of
+ * duty)."
+ *
+ * One button per earned rung, in ladder order, each with its number key on it.
+ * The number is the *position in the tray*, not the rung — holding an air
+ * strike and a chopper means 1 and 2 whatever else you have earned, so a
+ * player's fingers learn a row rather than a lookup table.
+ *
+ * Drawn from `game.earned` every frame rather than from a local copy: the tray
+ * empties on a round boundary and on every spend, and a second copy of that
+ * state is a second thing that can be wrong.
+ */
+const REWARD_ICONS: Record<number, string> = {
+  3: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3a5 5 0 0 0-4.6 7L3 16.4V21h4.6l6.4-6.4A5 5 0 1 0 14 3Z"/></svg>',
+  5: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2 9 9H2l5.5 4L5 21l7-4.5L19 21l-2.5-8L22 9h-7Z"/></svg>',
+  10: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18v2H13v3l6 4v2H5v-2l6-4V8H3Z"/><circle cx="12" cy="19" r="2"/></svg>',
+  15: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2 8 8v9h8V8Zm-4 17h8v3H8Z"/></svg>',
+  20: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2 3 6v6c0 5 3.8 9.2 9 10 5.2-.8 9-5 9-10V6Z"/></svg>',
+  25: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 2h3v7H5Zm5.5 0h3v7h-3ZM16 2h3v7h-3ZM4 12h16l-8 10Z"/></svg>',
+}
+
+/**
+ * What the tray currently shows, so it is only rebuilt when it changes.
+ *
+ * Not an optimisation — a correctness fix. The HUD repaints eight times a
+ * second, and rewriting `innerHTML` every frame replaces the button under the
+ * cursor mid-click: a `mousedown` on one node and a `mouseup` on its
+ * replacement is not a click and the browser never fires one. At 8fps that is
+ * a 125ms window on every press, and a control that eats one click in ten is
+ * a control people stop trusting. The test caught it as "Node is detached from
+ * document", which is the same bug wearing a stack trace.
+ */
+let trayKey = ''
+
+function drawTray(game: Game): void {
+  const node = $('tray')
+  const held = game.earned
+  const usable = !game.tank.dead && !game.flying
+  const key = `${held.join(',')}|${usable}`
+  if (key === trayKey) return
+  trayKey = key
+  node.hidden = held.length === 0
+  if (!held.length) {
+    node.innerHTML = ''
+    return
+  }
+  // Dead or flying, the rewards are still yours and still shown — greyed,
+  // because "where did my air strike go" is a worse question than "why is it
+  // dim". `Game.spend` refuses in both states; this says so before the click.
+  node.innerHTML = held
+    .map((at, i) => {
+      const rung = STREAK_LADDER.find((r) => r.at === at)
+      return (
+        `<button type="button" class="reward" data-at="${at}"${usable ? '' : ' disabled'} ` +
+        `title="${escapeHtml(rung?.detail ?? '')} — press ${i + 1}">` +
+        `${REWARD_ICONS[at] ?? ''}` +
+        `<span class="reward-name">${escapeHtml(rung?.name ?? String(at))}</span>` +
+        `<span class="reward-key">${i + 1}</span>` +
+        `</button>`
+      )
+    })
+    .join('')
+}
+
+/**
+ * Spend by position, which is what a number key means.
+ *
+ * Read off `game.earned` at the moment of the press rather than off the drawn
+ * tray: the HUD repaints eight times a second, so a key pressed in the frame
+ * after a spend would otherwise address the button that *was* there.
+ */
+function spendSlot(game: Game, slot: number): void {
+  const at = game.earned[slot]
+  if (at === undefined) return
+  game.spend(at)
+  drawTray(game)
+}
+
+$('tray').addEventListener('click', (e) => {
+  const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-at]')
+  if (!btn || !running) return
+  const game = running.players[0].game
+  game.spend(Number(btn.dataset.at))
+  drawTray(game)
+})
+
+window.addEventListener('keydown', (e) => {
+  if (e.repeat || !running) return
+  const target = e.target as HTMLElement | null
+  if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return
+  // Digit row only. Numpad is where a second player's hands are on a couch.
+  const m = /^Digit([1-9])$/.exec(e.code)
+  if (!m) return
+  spendSlot(running.players[0].game, Number(m[1]) - 1)
+})
 
 /**
  * The whole ladder, once, on the way in.

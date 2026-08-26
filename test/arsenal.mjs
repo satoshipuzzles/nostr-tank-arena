@@ -306,6 +306,13 @@ try {
       g.buffs.speedUntil = 0
       g.chopperUntil = 0
       g.onOwnKill()
+      // Rewards are earned now and spent on a click — see `Game.spend` and
+      // test/tray.mjs. This file is about *what each rung does*, so it still
+      // walks the ladder and then spends whatever the rung put in the tray;
+      // that a rung no longer fires on its own is the tray suite's claim, not
+      // this one's, and asserting it in both places would mean changing it in
+      // both places the next time it moves.
+      if (g.holding(i)) g.spend(i)
       const now = performance.now()
       out[i] = {
         hp: g.tank.hp,
@@ -391,7 +398,12 @@ try {
     g.tank.hp = 3
     g.buffs.shieldUntil = 0
     g.streak = 4
-    g.onOwnKill() // fifth kill: our own strike
+    g.onOwnKill() // fifth kill: earns the strike
+    // ...and spending it is what calls it. The rung stopped firing on its own
+    // when rewards became a tray you spend from; without this the strike set
+    // below is empty and the next line reads `.y` off nothing, which is how
+    // this file reported the change as "Cannot read properties of undefined".
+    g.spend(5)
     // **Drive into our own lane.**
     //
     // Without this the check passed against code with the exemption deleted,

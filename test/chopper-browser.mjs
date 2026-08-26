@@ -102,8 +102,16 @@ try {
       pubkey: PEER, kind: 21002, created_at: Math.floor(Date.now() / 1000), tags: [], sig: '0'.repeat(128),
       content: JSON.stringify({ t: Date.now(), k: g.identity.sessionPubkey, x: 400, y: 400 }),
     }, false)
+    // The tenth kill *earns* it; spending it is what boards. Rewards became a
+    // tray you click from — see test/tray.mjs — and this file's claim is about
+    // the gunship rather than about when it launches, so it takes the reward
+    // out of the tray and uses it. That the rung no longer fires on its own is
+    // asserted once, over there.
+    const held = g.holding(10)
+    g.spend(10)
     return {
       before,
+      held,
       streak: g.streak,
       flying: g.flying,
       left: g.chopperLeft,
@@ -111,7 +119,8 @@ try {
     }
   }, PEER)
   check('the control: we were not flying a moment ago', boarded.before.flying === false)
-  check('a tenth kill in a row puts us in the chopper',
+  check('a tenth kill in a row earns the chopper', boarded.held === true, JSON.stringify(boarded.held))
+  check('and spending it puts us in',
     boarded.streak === 10 && boarded.flying === true, JSON.stringify(boarded))
   check('and it starts over our own tank rather than at a map edge',
     Math.abs(boarded.at.x - 800) < 2 && Math.abs(boarded.at.y - 600) < 2, JSON.stringify(boarded.at))
@@ -312,6 +321,7 @@ try {
       pubkey: 'e2'.repeat(32), kind: 21002, created_at: Math.floor(Date.now() / 1000), tags: [], sig: '0'.repeat(128),
       content: JSON.stringify({ t: Date.now(), k: g.identity.sessionPubkey, x: 400, y: 400 }),
     }, false)
+    g.spend(10)
     // Wind the clock to the last moment rather than waiting ten real seconds.
     g.chopperUntil = performance.now() + 60
   })

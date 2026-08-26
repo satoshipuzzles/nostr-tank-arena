@@ -574,6 +574,71 @@ body.hud-compact #ctf {
   pointer-events: none;
   z-index: 4;
 }
+/*
+ * The tray of earned rewards, above the strip.
+ *
+ * Buttons, not decorations: this is the one thing on the HUD that takes a
+ * click, which is why it is its own element rather than part of `#streak` —
+ * that strip is `pointer-events: none` so a tank behind it stays shootable,
+ * and a control inside it would be unclickable.
+ *
+ * Centred on the same axis as the strip and the magazine, so "what can I do
+ * right now" is one column of the screen instead of three places to look.
+ */
+#tray {
+  position: absolute;
+  bottom: 166px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: center;
+  max-width: min(560px, 92vw);
+  z-index: 5;
+}
+.reward {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 9px 5px 7px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #16120a;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  box-shadow: 0 3px 14px rgba(0, 0, 0, 0.45);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.reward:hover:not(:disabled) { filter: brightness(1.1); }
+/* Held but not spendable — dead, or already in a chopper. Shown rather than
+   removed, because "where did my air strike go" is a worse question to leave a
+   player with than "why is that dim". */
+.reward:disabled { opacity: 0.45; cursor: default; }
+.reward svg { width: 15px; height: 15px; fill: currentColor; flex: none; }
+.reward-name { letter-spacing: 0.2px; }
+/* The number key, on the button, because a control whose shortcut is written
+   somewhere else has no shortcut. */
+.reward-key {
+  min-width: 15px;
+  padding: 0 3px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.32);
+  color: #ffe6ab;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+@media (max-width: 620px) {
+  /* A thumb needs more than a mouse does, and the phone HUD has the room —
+     the key hints are hidden there, so the bottom of the screen is emptier. */
+  #tray { bottom: 150px; gap: 5px; }
+  .reward { padding: 7px 11px 7px 9px; font-size: 12px; }
+  .reward-key { display: none; }
+}
+
 #streak .streak-line { display: flex; align-items: baseline; gap: 8px; }
 #streak b { color: var(--text); font-size: 14px; font-variant-numeric: tabular-nums; }
 #streak .streak-next { color: var(--accent); }
