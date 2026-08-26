@@ -201,6 +201,19 @@ export interface StatePayload {
    */
   a?: number
   /**
+   * 1 while this tank's recon sweep is running, absent otherwise.
+   *
+   * Recon is the one streak reward that helps a side rather than its earner:
+   * while it runs, every enemy is marked through cover — for the earner *and*
+   * for teammates. The flag is how a teammate knows to light the markers up.
+   * Sent as a flag rather than a deadline for exactly the reason `sh` below
+   * is: the markers go out when the ticks stop saying `rn`, and no receiver
+   * ever has to read the sender's clock. A client too old to know the field
+   * ignores it and simply draws no markers, which degrades to "recon helps
+   * only the earner" rather than to anything wrong.
+   */
+  rn?: number
+  /**
    * 1 while a shield is up, absent otherwise.
    *
    * Here for the same reason `a` is: a defensive buff nobody else can see is
@@ -284,6 +297,22 @@ export interface StrikePayload {
   n: number
   /** Hull points each blast takes off. */
   d: number
+}
+
+/**
+ * An EMP, riding the strike kind rather than earning a kind of its own.
+ *
+ * One publish, no position, no damage: every receiver that is not on the
+ * caller's side blanks its own HUD for a few seconds, by the same
+ * victim-applies-it-to-itself trust model as the bombs. Deliberately missing
+ * the `y` a bomb run carries — `onStrike` on a client too old to know about
+ * EMPs validates `y` before anything else, so to an old client this payload
+ * is malformed and silently dropped, instead of being clamped into a
+ * one-bomb strike along the top wall.
+ */
+export interface EmpPayload {
+  k: 'emp'
+  t0: number // caller's clock at detonation, ms
 }
 
 export function parsePayload<T>(content: string): T | null {

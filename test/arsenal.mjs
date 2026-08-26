@@ -290,9 +290,13 @@ try {
     g.beginRound(900000, 'ab'.repeat(30) + '0300')
     const maxHp = g.maxHp
     const strikes = []
+    const emps = []
     const real = g.publishAsSession.bind(g)
     g.publishAsSession = (kind, payload) => {
-      if (kind === 21004) strikes.push(payload)
+      // The EMP rides the strike kind with `k: 'emp'` and no lane — counting
+      // it as a bomb run would fail every rung above fifteen for the wrong
+      // reason, and not counting it at all would leave rung fifteen unproven.
+      if (kind === 21004) (payload && payload.k === 'emp' ? emps : strikes).push(payload)
       return real(kind, payload)
     }
     const out = {}
@@ -304,6 +308,7 @@ try {
       g.buffs.siegeUntil = 0
       g.buffs.shieldUntil = 0
       g.buffs.speedUntil = 0
+      g.buffs.reconUntil = 0
       g.chopperUntil = 0
       g.onOwnKill()
       // Rewards are earned now and spent on a click — see `Game.spend` and
@@ -318,9 +323,11 @@ try {
         hp: g.tank.hp,
         rapid: g.buffs.rapidUntil > now,
         siege: g.buffs.siegeUntil > now,
+        recon: g.buffs.reconUntil > now,
         shield: g.buffs.shieldUntil > now,
         chopper: g.chopperUntil > now,
         strikes: strikes.length,
+        emps: emps.length,
         notice: g.notice?.sub ?? '',
       }
     }
@@ -333,8 +340,9 @@ try {
   const fullHull = ladder.maxHp
   check('3 in a row repairs the hull', rung[3].hp === fullHull, JSON.stringify(rung[3]))
   check('5 calls an air strike', rung[5].strikes === 1, JSON.stringify(rung[5]))
+  check('7 is recon: the sweep is running', rung[7].recon, JSON.stringify(rung[7]))
   check('10 boards the chopper', rung[10].chopper, JSON.stringify(rung[10]))
-  check('15 is siege shells', rung[15].siege, JSON.stringify(rung[15]))
+  check('15 publishes an EMP, and hands its earner nothing', rung[15].emps === 1 && !rung[15].siege && !rung[15].rapid, JSON.stringify(rung[15]))
   check('20 is the juggernaut: shielded and repaired', rung[20].shield && rung[20].hp === fullHull,
     JSON.stringify(rung[20]))
   check('25 calls a second, bigger strike', rung[25].strikes === 2, JSON.stringify(rung[25]))

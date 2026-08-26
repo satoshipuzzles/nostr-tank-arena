@@ -1634,6 +1634,7 @@ function loop(now = performance.now()): void {
   syncFlyingView(players[0].game, renderer)
   paintCrosshair(players[0].game, renderer.viewMode)
   paintChopper(players[0].game)
+  paintEmp(players[0].game)
   paintDamage(players[0].game, renderer.viewMode)
   paintAmmo(players[0].game)
   drawHud(players[0].game)
@@ -1787,6 +1788,21 @@ function syncFlyingView(game: Game, renderer: Renderer): void {
  * in eight visible steps. The reticle bloom is on the same rule for the same
  * reason.
  */
+/**
+ * An enemy EMP: the HUD goes dark, the arena does not.
+ *
+ * Painted from `loop` rather than the throttled `drawHud`, because four
+ * seconds of blackout that arrives 120ms late reads as a glitch rather than
+ * as a hit. The class does the hiding in CSS — one toggle, not a dozen
+ * elements to remember — and the `#emp` pill is the single thing left lit,
+ * so the player knows they were hit rather than that the game broke.
+ */
+function paintEmp(game: Game): void {
+  const down = game.empUntil > performance.now()
+  document.body.classList.toggle('emp', down)
+  $('emp').hidden = !down
+}
+
 function paintChopper(game: Game): void {
   const el = $('chopper')
   const left = game.chopperLeft

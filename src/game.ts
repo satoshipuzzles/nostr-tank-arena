@@ -38,6 +38,7 @@ import {
   type SessionPayload,
   type ShellPayload,
   type StrikePayload,
+  type EmpPayload,
   type StatePayload,
   parsePayload,
   roomTag,
@@ -193,10 +194,23 @@ const CLAIM_TTL = 600
 const STREAK_REPAIR = 3
 /** Kills in a row that call an air strike. The marquee reward. */
 const STREAK_STRIKE = 5
+/**
+ * Recon: every enemy marked through cover, for the earner and their side.
+ * The one reward that helps a team rather than the person who earned it,
+ * which is worth having exactly one of.
+ */
+const STREAK_RECON = 7
 /** Rapid fire and a fresh hull. */
 const STREAK_OVERDRIVE = 10
-/** Siege shells: every shot takes two hull points instead of one. */
-const STREAK_SIEGE = 15
+/**
+ * EMP: every other player's HUD goes dark for a few seconds.
+ *
+ * This rung used to be siege shells. Siege still exists as a pickup and its
+ * buff plumbing is untouched; when loadouts land the rung becomes a choice
+ * and siege is one of the options. Until then the default ladder carries the
+ * reward that is horrible to be on the end of in the right way.
+ */
+const STREAK_EMP = 15
 /** Shield and speed together, which is the "come and try it" tier. */
 const STREAK_JUGGERNAUT = 20
 /** A second, longer air strike. Nothing beyond this changes; 25 is the top. */
@@ -226,8 +240,9 @@ export interface StreakRung {
 export const STREAK_LADDER: readonly StreakRung[] = [
   { at: STREAK_REPAIR, name: 'hull repair', detail: 'hull repaired' },
   { at: STREAK_STRIKE, name: 'air strike', detail: 'air strike inbound' },
+  { at: STREAK_RECON, name: 'recon', detail: 'recon — every enemy marked, eight seconds' },
   { at: STREAK_OVERDRIVE, name: 'chopper', detail: 'chopper — ten seconds of gun' },
-  { at: STREAK_SIEGE, name: 'siege shells', detail: 'siege shells — two hull a hit' },
+  { at: STREAK_EMP, name: 'EMP', detail: 'EMP — every other screen goes dark' },
   { at: STREAK_JUGGERNAUT, name: 'juggernaut', detail: 'juggernaut — shielded and fast' },
   { at: STREAK_CARPET, name: 'carpet bombing', detail: 'carpet bombing' },
 ]
@@ -259,9 +274,11 @@ const detailAt = (at: number): string => STREAK_LADDER.find((r) => r.at === at)?
  * somebody onto a team of three.
  */
 const TEAMS = 5
-/** How long the streak reward's rapid fire lasts. */
-const STREAK_SIEGE_MS = 20_000
 const STREAK_JUGGER_MS = 12_000
+/** How long the recon sweep marks enemies. */
+const RECON_MS = 8_000
+/** How long an EMP keeps a victim's HUD dark. */
+const EMP_MS = 4_000
 
 /**
  * Bombs in a five-kill strike, and in the twenty-five-kill one.
@@ -353,6 +370,8 @@ export interface Peer {
     ammo: number
     /** True while their ticks say a shield is up. See `StatePayload.sh`. */
     shield: boolean
+    /** True while their ticks say their recon sweep is running. See `rn`. */
+    recon: boolean
     /**
      * When their chopper comes down, in our clock, or 0.
      *
@@ -434,6 +453,8 @@ interface StateSample {
   dead: boolean
   ammo: number
   shield: boolean
+  /** True while their recon sweep runs. See `StatePayload.rn`. */
+  recon: boolean
   /** Deadline in our clock, or 0. See `StatePayload.c`. */
   chopperUntil: number
   /** Ground point their rounds are landing on, or null. */
@@ -959,6 +980,7 @@ export class Game {
         // joins, and "empty" is the reading that changes how you play.
         ammo: MAG_SIZE,
         shield: false,
+        recon: false,
         chopperUntil: 0,
         chopperAt: null,
         team: 0,
@@ -1019,6 +1041,10 @@ export class Game {
       // shot held back for a shield that was never there is a worse lie than a
       // shield that goes unadvertised.
       shield: p.sh === 1,
+      // Same rule as the shield: absent means no sweep, which is what an old
+      // client sends, and the safe way round — a marker that fails to light is
+      // a weaker recon, a marker lit for nobody's sweep is a lie on the board.
+      recon: p.rn === 1,
       // Clamped, and turned into a deadline in *our* clock. A hostile client
       // claiming an hour of gunship is claiming a tank nobody can shoot for an
       // hour, so the ceiling is the same window everybody else gets plus a
@@ -1304,8 +1330,11 @@ export class Game {
         // exists as a pickup; what it does not do any more is duplicate one.
         this.boardChopper(now)
         break
-      case STREAK_SIEGE:
-        this.buffs.siegeUntil = Math.max(this.buffs.siegeUntil, now) + STREAK_SIEGE_MS
+      case STREAK_RECON:
+        this.buffs.reconUntil = Math.max(this.buffs.reconUntil, now) + RECON_MS
+        break
+      case STREAK_EMP:
+        this.callEmp(now)
         break
       case STREAK_JUGGERNAUT:
         this.tank.hp = this.maxHp
@@ -1364,9 +1393,56 @@ export class Game {
     this.publishAsSession(KIND_STRIKE, payload)
   }
 
+  /** When an enemy EMP stops blanking our HUD, in our clock, or 0. */
+  empUntil = 0
+
+  /** EMP event ids already applied, so a relay echo cannot double the dark. */
+  private readonly empSeen = new Set<string>()
+
+  /**
+   * Fifteen in a row: everybody else's HUD goes dark.
+   *
+   * One publish on the strike kind and nothing else — no position, no damage
+   * number, no target list. Every receiver decides for itself whether it is a
+   * victim, which is the same trust model as the bombs: the event asserts
+   * "an EMP went off", and applying it to yourself is exactly as
+   * self-authoritative as applying a shell's damage. The caller's own HUD is
+   * untouched, which is most of what makes earning one feel like something.
+   */
+  private callEmp(now: number): void {
+    const payload: EmpPayload = { k: 'emp', t0: now }
+    this.publishAsSession(KIND_STRIKE, payload)
+    this.pushFeed('EMP away — their screens go dark')
+  }
+
+  private onEmp(e: Event): void {
+    // Ours, echoed back. The caller is exempt by design, not by luck.
+    if (e.pubkey === this.identity.sessionPubkey) return
+    if (this.empSeen.has(e.id)) return
+    this.empSeen.add(e.id)
+    const peer = this.ensurePeer(e.pubkey)
+    peer.lastSeen = performance.now()
+    // A teammate's EMP hits the other side, and that includes not hitting us.
+    if (this.friendly(e.pubkey)) {
+      this.pushFeed(`${peer.name} set off an EMP`)
+      return
+    }
+    // A spectator has no HUD in the fight and keeps their view.
+    if (this.watching) return
+    const now = performance.now()
+    this.empUntil = Math.max(this.empUntil, now) + EMP_MS
+    this.sound('siren')
+    this.pushFeed(`${peer.name}'s EMP — instruments down`)
+  }
+
   private onStrike(e: Event): void {
-    const p = parsePayload<StrikePayload>(e.content)
-    if (!p || typeof p.t0 !== 'number' || typeof p.y !== 'number') return
+    const p = parsePayload<StrikePayload & Partial<EmpPayload>>(e.content)
+    if (!p) return
+    // An EMP rides this kind with no `y` on purpose: a client too old to know
+    // the branch below falls through to the shape check and drops it, rather
+    // than clamping it into a one-bomb strike along the top wall.
+    if (p.k === 'emp') return this.onEmp(e)
+    if (typeof p.t0 !== 'number' || typeof p.y !== 'number') return
     // Our own strike, echoed back by a relay. Every other handler guards
     // against this and this one did not, and the consequences were much worse
     // than a duplicate: `ensurePeer` created a peer *for ourselves*, which put
@@ -1762,6 +1838,21 @@ export class Game {
     if (!this.team || !owner) return false
     const peer = this.peers.get(owner)
     return !!peer && peer.view.team === this.team
+  }
+
+  /**
+   * Is a recon sweep lighting the enemy up for *this* client right now?
+   *
+   * Ours, or a teammate's — that is what makes recon the one reward that
+   * helps a side rather than its earner. Read by the renderer every frame,
+   * which is why it is a couple of map lookups and not a subscription.
+   */
+  reconSees(now = performance.now()): boolean {
+    if (hasBuff(this.buffs, 'reconUntil', now)) return true
+    for (const [session, peer] of this.peers) {
+      if (peer.view.recon && this.friendly(session)) return true
+    }
+    return false
   }
 
   /** How many sides a player can pick from. */
@@ -2684,6 +2775,8 @@ export class Game {
     this.tank.hp = 0
     this.streak = 0
     clearBuffs(this.buffs)
+    // Last round's EMP does not darken this round's first seconds.
+    this.empUntil = 0
     this.tank.respawnAt = performance.now() + RESPAWN_DELAY * 1000 * this.modifier.respawn
     // A bot killing you costs you the round and the streak, which is the part
     // that makes practice mean anything — but it does not go on the wire and it
@@ -2901,6 +2994,10 @@ export class Game {
       // Only when it is up, so the common case costs nothing on a tick that
       // goes out ten times a second.
       ...(hasBuff(this.buffs, 'shieldUntil', now) ? { sh: 1 as const } : {}),
+      // The recon sweep, on the same terms as the shield: a flag, not a
+      // deadline, and only while it runs. Teammates who see it light their own
+      // markers; enemies learn they are lit, which is half the pressure.
+      ...(hasBuff(this.buffs, 'reconUntil', now) ? { rn: 1 as const } : {}),
       // Same reasoning: omitted while the board is intact, which is most of a
       // round. Unioned by whoever receives it, so a tick lost on the way costs
       // nothing and a late joiner is caught up by the next one.

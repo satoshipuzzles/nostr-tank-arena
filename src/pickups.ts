@@ -357,6 +357,8 @@ export interface Buffs {
   speedUntil: number
   scatterUntil: number
   siegeUntil: number
+  /** Recon sweep: enemies marked through cover. A streak reward, not a pad. */
+  reconUntil: number
 }
 
 export const noBuffs = (): Buffs => ({
@@ -365,6 +367,7 @@ export const noBuffs = (): Buffs => ({
   speedUntil: 0,
   scatterUntil: 0,
   siegeUntil: 0,
+  reconUntil: 0,
 })
 
 /** Which timer each pickup runs. `repair` has none — it is instant. */
