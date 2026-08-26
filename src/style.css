@@ -768,6 +768,16 @@ body.emp #hud::before {
   gap: 6px;
 }
 .buff b { color: #fff; }
+/* Being marked is a warning, not a perk: the one chip in this row that is
+   about what somebody is doing TO you, so it pulses where the others sit. */
+.buff.marked {
+  background: #2a1216;
+  font-weight: 700;
+  animation: marked-pulse 1.1s ease-in-out infinite;
+}
+@keyframes marked-pulse {
+  50% { opacity: 0.55; }
+}
 
 /*
  * The pickup icon, in the chip and anywhere else a pickup is named. It is the

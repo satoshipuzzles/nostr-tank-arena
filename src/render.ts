@@ -614,6 +614,7 @@ function labelTexture(
   hue: number,
   verified: boolean,
   dry: boolean,
+  held: number,
 ): THREE.Texture {
   const canvas = document.createElement('canvas')
   canvas.width = 512
@@ -637,6 +638,25 @@ function labelTexture(
   ctx.textBaseline = 'middle'
   ctx.fillStyle = dry ? '#f0b23c' : verified ? '#ffffff' : '#e2d3a8'
   ctx.fillText(text, 256, 66)
+
+  // Banked rewards, as a badge riding the plate's top-right corner. The tray
+  // is the earner's private HUD; this is the room's copy of the only part it
+  // needs — that this tank is sitting on something. Amber like the pips, a
+  // count rather than icons, because from two thousand units back one bright
+  // digit reads and five tiny glyphs do not.
+  if (held > 0) {
+    const bx = Math.min(512 - 34, x + w - 6)
+    ctx.beginPath()
+    ctx.arc(bx, 30, 28, 0, Math.PI * 2)
+    ctx.fillStyle = '#f0b23c'
+    ctx.fill()
+    ctx.strokeStyle = '#141a26'
+    ctx.lineWidth = 7
+    ctx.stroke()
+    ctx.font = '800 42px ui-monospace, Menlo, monospace'
+    ctx.fillStyle = '#141a26'
+    ctx.fillText(String(held), bx, 32)
+  }
 
   const texture = new THREE.CanvasTexture(canvas)
   texture.colorSpace = THREE.SRGBColorSpace
@@ -1240,6 +1260,8 @@ interface TankView {
   maxHp: number
   /** Shells left in their magazine. 0 means empty or mid-reload. */
   ammo: number
+  /** Streak rewards banked in their tray, drawn as a badge on the plate. */
+  held: number
   /** True while a shield is up, for them as well as for you. */
   shield: boolean
   dead: boolean
@@ -2336,6 +2358,7 @@ export class Renderer {
       hp: game.tank.hp,
       maxHp,
       ammo: game.tank.reloadingUntil ? 0 : game.tank.ammo,
+      held: game.earned.length,
       shield: hasBuff(game.buffs, 'shieldUntil', now),
       dead: game.tank.dead,
       hue: game.displayColor,
@@ -2376,6 +2399,7 @@ export class Renderer {
         hull: peer.view.hull,
         gun: peer.view.gun,
         hp: peer.view.hp,
+        held: peer.view.held,
         maxHp,
         ammo: peer.view.ammo,
         shield: peer.view.shield,
@@ -2578,12 +2602,12 @@ export class Renderer {
     // which is why the *previous* texture is disposed rather than left to the
     // collector.
     const magEmpty = !dead && v.ammo <= 0
-    const key = `${name}|${hue}|${verified}|${magEmpty}`
+    const key = `${name}|${hue}|${verified}|${magEmpty}|${v.held}`
     if (rig.labelKey !== key) {
       rig.labelKey = key
       const material = rig.label.material as THREE.SpriteMaterial
       material.map?.dispose()
-      material.map = labelTexture(name, hue, verified, magEmpty)
+      material.map = labelTexture(name, hue, verified, magEmpty, v.held)
       material.needsUpdate = true
     }
     rig.label.visible = !dead

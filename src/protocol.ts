@@ -214,6 +214,16 @@ export interface StatePayload {
    */
   rn?: number
   /**
+   * How many streak rewards are banked in this tank's tray, absent at zero.
+   *
+   * The count and not the contents: what the room needs is the pressure —
+   * a tank sitting on three banked rewards is a different target from one
+   * holding nothing — and the contents become visible the moment they are
+   * spent, each by its own event or effect. Self-reported like `hp` and `k`
+   * beside it, and exactly as forgeable, which the README already owns.
+   */
+  e?: number
+  /**
    * 1 while a shield is up, absent otherwise.
    *
    * Here for the same reason `a` is: a defensive buff nobody else can see is
