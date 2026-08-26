@@ -183,6 +183,11 @@ function startRelay(behaviour, opts = {}) {
     // kind-scoped policy raises: did the client stop sending the *one* kind
     // this relay refuses, and keep sending the rest.
     byKind: {},
+    // Every `d` tag seen, so a check that hand-publishes addressable probes can
+    // count *its own* events rather than a kind the game also emits — the
+    // presence beacon is kind 30078 too, and it photobombed a count of eight
+    // probe claims as "9 of 8" whenever the beacon timer fired in the window.
+    dTags: [],
     closeSubs: !!opts.closeSubs,
     // Every REQ filter this relay was sent, so a test can see what the client
     // asked for rather than only what it did with the answer.
@@ -231,6 +236,8 @@ function startRelay(behaviour, opts = {}) {
       if (msg[0] === 'EVENT') {
         state.received++
         state.byKind[msg[1].kind] = (state.byKind[msg[1].kind] ?? 0) + 1
+        const d = (msg[1].tags ?? []).find((t) => t[0] === 'd')
+        if (d) state.dTags.push(d[1])
         const verdict = BEHAVIOURS[state.behaviour](msg[1])
         if (!verdict) return // silence, on purpose
         ws.send(JSON.stringify(['OK', msg[1].id, verdict.ok, verdict.msg]))
@@ -801,6 +808,12 @@ try {
 
   const openAgainst = async (urls, tag) => {
     const pg = await browser.newPage()
+    // Foreground, explicitly. These sessions publish from the game's rAF loop,
+    // and a tab that loses frontmost status when a sibling closes gets its rAF
+    // frozen — the gate section below sat at zero publishes for twenty seconds
+    // that way, which read as "the quorum never outvoted" when the page had
+    // never been given a frame to publish from.
+    await pg.bringToFront()
     await pg.goto(URL, { waitUntil: 'domcontentloaded', timeout: 30_000 })
     await pg.$eval('#relays', (el, v) => { el.value = v }, urls.join('\n'))
     await pg.type('#name', tag)
@@ -843,12 +856,19 @@ try {
       biased.alarm === null,
       biased.alarm ? `ALARM RAISED on a sample of one: ${biased.alarm.reason}` : 'no alarm',
     )
+    // Polled rather than sampled once, same reasoning as the tick-stream check
+    // below: under swiftshader the frame loop — and with it the publish rate —
+    // runs at whatever fraction of real time the machine allows, so "more than
+    // ten events in six seconds" was a claim about the laptop, not the client.
+    // What is being asserted is that the stream did not *stop*: held publishing
+    // means one probe a minute, so eight more events is unreachable held and
+    // trivial unheld.
     const keptStart = oddOne.received
-    await wait(6000)
+    const kept = await until(() => oddOne.received - keptStart >= 8, 20_000)
     check(
       'and publishing is not held on that relay',
-      oddOne.received - keptStart > 10,
-      `${oddOne.received - keptStart} events in 6s`,
+      kept,
+      `${oddOne.received - keptStart} more events reached it`,
     )
     await biasPage.close()
   }
@@ -910,13 +930,27 @@ try {
 
   if (gatePage) {
     // Five all-malformed publishes raise the alarm and fifteen refusals mute a
-    // relay, so there is a wide window where the blocker is still live and the
-    // streak would already have been long enough. Sample inside it.
-    await wait(1500)
-    const early = await gatePage.evaluate(() => ({
-      alarm: window.__game.net.clockAlarm ?? null,
-      muted: window.__game.net.mutedRelays.length,
-    }))
+    // relay, so the alarm always lands first — but *when* it lands depends on
+    // the publish rate, which under swiftshader is whatever fraction of real
+    // time the machine allows. A fixed 1.5s sample read "no alarm" on a page
+    // that had simply not published five times yet. So: poll until either the
+    // alarm is up or the blocker got muted, and judge whichever came first —
+    // the outvote claim needs the alarm to arrive while the blocker is live.
+    // The deadline is measured in *publishes*, not seconds: the alarm needs
+    // five all-refused publishes, so the poll only gives up once the page has
+    // demonstrably made well more than five (7 publishes x 4 relays of
+    // rejections) and still raised nothing — at which point the outvote
+    // genuinely failed, and the detail says what the netcode had counted.
+    let early = { alarm: null, muted: 0, rejected: -1, published: -1 }
+    await until(async () => {
+      early = await gatePage.evaluate(() => ({
+        alarm: window.__game.net.clockAlarm ?? null,
+        muted: window.__game.net.mutedRelays.length,
+        rejected: window.__game.net.rejected ?? 0,
+        published: window.__game.net.published ?? 0,
+      }))
+      return early.alarm !== null || early.muted > 0 || early.rejected >= 28
+    }, 60_000)
     // This used to assert the opposite, and the rule it encoded has been
     // superseded on purpose rather than deleted for being inconvenient.
     //
@@ -929,8 +963,11 @@ try {
     // nobody has named the timestamp at all.
     check(
       'a quorum on the clock outvotes one relay that passed the timestamp',
-      early.alarm !== null,
-      early.alarm ? `alarm up: ${early.alarm.reason}` : 'no alarm — one blocker vetoed three accusers',
+      early.alarm !== null && early.muted === 0,
+      early.alarm
+        ? `alarm up with the blocker still live: ${early.alarm.reason}`
+        : `no alarm — one blocker vetoed three accusers ` +
+          `(published ${early.published}, rejected ${early.rejected}, muted ${early.muted})`,
     )
     // And it has to be able to let go. A relay list that starts complaining and
     // then stops is a clock somebody just fixed, and an alarm that cannot clear
@@ -1465,8 +1502,14 @@ try {
     }, CLAIMS)
     await wait(2500)
 
+    // Two different counts on purpose. The refusing relay is judged by *kind*
+    // — the game's own presence beacon is also 30078 and a refused beacon
+    // burns a kind-strike exactly like a refused probe, so "stopped after
+    // three" is a claim about every 30078 it saw. The accepting relay is
+    // judged by the probes' own `d` tags, because a beacon landing inside the
+    // window used to photobomb eight probe claims into "9 of 8".
     const claimsAtWot = wot.byKind[30078] ?? 0
-    const claimsAtGood = alsoGood.byKind[30078] ?? 0
+    const claimsAtGood = alsoGood.dTags.filter((d) => String(d).startsWith('kindmute-probe-')).length
     // The quantity that changes. A counter of refusals would move either way —
     // it climbs whether the client learned or not. What only a client that
     // learned produces is a *stalled* count: three offered, five withheld.

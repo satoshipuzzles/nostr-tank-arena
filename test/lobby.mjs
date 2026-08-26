@@ -3,7 +3,7 @@
 //   npm run build && npm run preview &
 //   node test/lobby.mjs
 //
-// The lobby is a claim about other people: "three of four seats taken in room
+// The lobby is a claim about other people: "three of eight seats taken in room
 // `pit`". There is no server holding that, so it is assembled from presence
 // beacons other clients signed — which means the only way to check it is to be
 // the one who signed them.
@@ -97,9 +97,10 @@ const beacon = (who, room, name, role, at = now, extra = {}) =>
     who.sk,
   )
 
-// `pit` is full: four seats taken, one person waiting and one watching.
+// `pit` is full: every seat taken, one person waiting and one watching.
 // `yard` has two seats gone. `stale` had one player an hour ago and nobody now.
-const pit = ['a', 'b', 'c', 'd'].map(key)
+const SEATS = 8 // mirrors SEATS in src/rooms.ts
+const pit = Array.from({ length: SEATS }, key)
 const waiting = key()
 const watcher = key()
 const yard = ['e', 'f'].map(key)
@@ -109,8 +110,8 @@ const twice = pit[0]
 const BEACONS = [
   ...pit.map((k, i) => beacon(k, 'pit', `pit${i}`, 'seat')),
   // The same player again, newer. An addressable event legitimately comes back
-  // in both versions, and counting it twice would make a four-seat room show
-  // five people and lose a chair.
+  // in both versions, and counting it twice would make a full room show one
+  // person too many and lose a chair.
   beacon(twice, 'pit', 'pit0', 'seat', now - 5),
   beacon(waiting, 'pit', 'queued', 'queue'),
   beacon(watcher, 'pit', 'lurker', 'watch'),
@@ -195,13 +196,13 @@ try {
 
   check(
     'a full table reads as full',
-    byName.pit?.seats === '4/4' && byName.pit?.full === true,
+    byName.pit?.seats === `${SEATS}/${SEATS}` && byName.pit?.full === true,
     JSON.stringify(byName.pit),
   )
   check(
     'one player republishing is still one player',
-    byName.pit?.taken === 4 && byName.pit?.free === 0,
-    `${byName.pit?.taken} taken, ${byName.pit?.free} free — five beacons from four people`,
+    byName.pit?.taken === SEATS && byName.pit?.free === 0,
+    `${byName.pit?.taken} taken, ${byName.pit?.free} free — ${SEATS + 1} beacons from ${SEATS} people`,
   )
   check(
     'a queued player does not take a seat',
@@ -221,7 +222,7 @@ try {
 
   check(
     'a room with space shows the empty chairs',
-    byName.yard?.seats === '2/4' && byName.yard?.free === 2 && byName.yard?.taken === 2,
+    byName.yard?.seats === `2/${SEATS}` && byName.yard?.free === SEATS - 2 && byName.yard?.taken === 2,
     JSON.stringify(byName.yard),
   )
   check(
@@ -240,7 +241,7 @@ try {
   //
   // A spectator is in the room and on the wire with no tank. The claim worth
   // checking is not that they render differently, it is that they do not
-  // *publish*: a spectator that ticks is a fifth tank in a four-seat room,
+  // *publish*: a spectator that ticks is a ninth tank in an eight-seat room,
   // drawn on everybody's board.
   //
   // "No ticks arrived" is a number that also reads zero when the client never
