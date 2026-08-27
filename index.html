@@ -90,6 +90,11 @@
            element rather than part of the strip: it takes clicks, and the strip
            is `pointer-events: none` so a tank behind it stays shootable. -->
       <div id="tray" hidden role="group" aria-label="Kill streak rewards"></div>
+      <!-- The death card: who killed you, and what they were on when they did.
+           Over the middle of the board because for three seconds there is
+           nothing else to look at, and `pointer-events: none` because the
+           respawn is on a clock rather than a button. -->
+      <div id="death" hidden></div>
       <div id="p2" hidden></div>
       <div id="feed"></div>
       <div id="controls-hint">

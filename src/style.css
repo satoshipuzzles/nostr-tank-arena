@@ -2237,3 +2237,67 @@ button.blocktile:focus-visible {
 @keyframes doom-pulse {
   50% { opacity: 0.35; }
 }
+
+
+/*
+ * The death card.
+ *
+ * Centred over the board, because for two and a half seconds there is nothing
+ * else on the screen worth looking at, and `pointer-events: none` throughout —
+ * the respawn is on a clock, so there is nothing here to click and the board
+ * behind it stays live for the tank that is about to appear.
+ *
+ * `--killer` is the killer's own hue, set per death from `paintDeath`, so the
+ * card is *theirs*. It is the same number their tank and their name plate have
+ * been wearing all round, which is most of what makes "who was that" answerable
+ * at a glance.
+ *
+ * `[hidden] { display: none !important }` at the top of this file is what keeps
+ * `display: grid` here from pinning the card on screen for the rest of the
+ * round — the trap this repo has shipped twice.
+ */
+#death {
+  position: fixed;
+  top: 44%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 6;
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  min-width: 250px;
+  padding: 16px 26px 14px;
+  border-radius: 16px;
+  background: rgba(10, 12, 18, 0.9);
+  border: 1px solid hsl(var(--killer, 0) 70% 55% / 0.65);
+  box-shadow: 0 0 34px hsl(var(--killer, 0) 70% 45% / 0.35);
+  pointer-events: none;
+  text-align: center;
+}
+#death[hidden] { display: none !important; }
+.death-title {
+  font-size: 11px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: #ff8f7a;
+}
+.death-who { display: grid; justify-items: center; gap: 6px; }
+.death-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 20px;
+  font-weight: 700;
+  color: hsl(var(--killer, 0) 80% 76%);
+}
+.death-note { font-size: 12px; color: var(--dim); }
+.death-clock { font-size: 12px; color: #cbd6e6; font-variant-numeric: tabular-nums; }
+.death-clock b { color: #fff; }
+/* The calling card lands here. Left in on purpose: an empty slot costs one
+   element and keeps the layout it drops into honest. */
+.death-card-slot:empty { display: none; }
+
+@media (max-width: 560px) {
+  #death { min-width: 0; padding: 12px 18px 10px; }
+  .death-name { font-size: 17px; }
+}
