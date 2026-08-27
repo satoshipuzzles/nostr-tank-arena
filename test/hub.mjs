@@ -271,10 +271,10 @@ try {
   // *turning*. The metric was measuring rotation, not finish. Saturation of the
   // lit pixels is what actually separates them — a metal hull takes the hue out
   // of itself — and the sample spread underneath is the control that says so.
-  await spinPage.select('#skin-select', 'matte')
+  await spinPage.click('#skin-finish button[data-value="matte"]')
   await wait(500)
   const matte = await previewSeries(spinPage)
-  await spinPage.select('#skin-select', 'chrome')
+  await spinPage.click('#skin-finish button[data-value="chrome"]')
   await wait(500)
   const chrome = await previewSeries(spinPage)
   const noise = Math.max(matte.spread, chrome.spread)
@@ -289,6 +289,56 @@ try {
     /chrome|mirror|polish/i.test(await spinPage.evaluate(() =>
       document.getElementById('skin-blurb').textContent ?? '')),
     await spinPage.evaluate(() => document.getElementById('skin-blurb').textContent),
+  )
+
+  // The pattern axis, same discipline as the finish axis above: measured on
+  // the pixels, not the model. A camo hull is blotches in several tones, so
+  // the lightness VARIANCE of the lit pixels separates it from a solid hull
+  // the way saturation separated chrome from matte — and like there, the
+  // wobble of a turning tank is sampled as the control.
+  const litLightSd = () =>
+    spinPage.evaluate(() => {
+      const c = document.getElementById('tank-cam')
+      const off = document.createElement('canvas')
+      off.width = c.width
+      off.height = c.height
+      const ctx = off.getContext('2d')
+      ctx.drawImage(c, 0, 0)
+      const { data } = ctx.getImageData(0, 0, off.width, off.height)
+      let n = 0
+      let mean = 0
+      let m2 = 0
+      for (let i = 0; i < data.length; i += 4) {
+        const r = data[i]
+        const g = data[i + 1]
+        const b = data[i + 2]
+        if ((r + g + b) / 3 <= 90) continue
+        const l = (Math.max(r, g, b) + Math.min(r, g, b)) / 2
+        n++
+        const d = l - mean
+        mean += d / n
+        m2 += d * (l - mean)
+      }
+      return Math.sqrt(m2 / Math.max(1, n))
+    })
+  const sdSeries = async () => {
+    const a = await litLightSd()
+    await wait(400)
+    const b = await litLightSd()
+    return { mean: (a + b) / 2, spread: Math.abs(a - b) }
+  }
+  await spinPage.click('#skin-pattern button[data-value="solid"]')
+  await spinPage.click('#skin-finish button[data-value="plastic"]')
+  await wait(500)
+  const solidSd = await sdSeries()
+  await spinPage.click('#skin-pattern button[data-value="tiger"]')
+  await wait(500)
+  const tigerSd = await sdSeries()
+  const sdNoise = Math.max(solidSd.spread, tigerSd.spread, 0.5)
+  check(
+    'and the pattern you pick is painted on the tank it shows',
+    tigerSd.mean - solidSd.mean > 4 * sdNoise,
+    `solid sd ${solidSd.mean.toFixed(2)} against tiger ${tigerSd.mean.toFixed(2)}, wobble ${sdNoise.toFixed(2)}`,
   )
   check(
     'and the garage admits it cannot know your colour',

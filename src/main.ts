@@ -19,8 +19,8 @@ import type { ClockDirection } from './nostr'
 import type { Event as NostrEvent } from 'nostr-tools'
 import { modifierForBlock } from './modifiers'
 import { MAG_SIZE, RELOAD } from './sim'
-import { SKINS, SKIN_IDS, SKIN_GROUPS, asSkin } from './skins'
-import type { SkinId } from './skins'
+import { SKINS, PATTERNS, FINISHES, skinFor, patternOf, finishOf, asSkin } from './skins'
+import type { Pattern, FinishId } from './skins'
 import { CARDS, DEFAULT_CARD, asCard, cardArt, cardOf, noCareer, unlocked } from './cards'
 import type { CardId, Career } from './cards'
 import { type Buffs, PICKUPS, type PickupKind, iconSvg } from './pickups'
@@ -107,38 +107,59 @@ const soundInput = segmented('sound')
 // Built from `SKINS` before `segmented()` reads the DOM: the picker's options
 // *are* the skin table, so adding a finish is one edit rather than two that can
 // disagree.
-// A dropdown, not a button row: the catalog outgrew buttons the moment camo
-// landed (issue 5446f565 asked for "a picker that scales", and Puzz suggested
-// the dropdown himself). Grouped so the plain finishes and the camo rack read
-// as the two ideas they are. Still built from the skin table — adding an
-// entry is one edit, not two that can disagree.
-const skinSelect = document.createElement('select')
-skinSelect.id = 'skin-select'
-skinSelect.setAttribute('aria-label', 'Tank skin')
-for (const group of SKIN_GROUPS) {
-  const og = document.createElement('optgroup')
-  og.label = group.label
-  for (const id of group.ids) {
-    const o = document.createElement('option')
-    o.value = id
-    o.textContent = SKINS[id].label
-    og.appendChild(o)
-  }
-  skinSelect.appendChild(og)
+// Two rows, not one long list: the catalog is a matrix now (pattern ×
+// finish, 36 reachable skins), and the dropdown that replaced the button row
+// would have needed seven optgroups to hold it. Picking on two axes keeps
+// every skin two taps away, and adding a pattern adds one button rather than
+// six entries. Both rows are built from the skins tables, so the picker and
+// the catalog cannot disagree.
+for (const p of PATTERNS) {
+  const b = document.createElement('button')
+  b.type = 'button'
+  b.dataset.value = p
+  b.textContent = p === 'solid' ? 'Solid' : SKINS[p].label
+  $('skin-pattern').appendChild(b)
 }
-$('skin').appendChild(skinSelect)
+for (const f of FINISHES) {
+  const b = document.createElement('button')
+  b.type = 'button'
+  b.dataset.value = f
+  b.textContent = SKINS[f].label
+  $('skin-finish').appendChild(b)
+}
+const patternInput = segmented('skin-pattern')
+const finishInput = segmented('skin-finish')
+/**
+ * Carbon's trick — hue on the trim, hull near-black — hides any pattern, so
+ * the cell does not exist in the catalog and the button says so under a
+ * pattern rather than silently painting something else.
+ */
+const paintCarbonButton = () => {
+  const carbon = $('skin-finish').querySelector<HTMLButtonElement>('button[data-value="carbon"]')!
+  const off = patternInput.value !== 'solid'
+  carbon.disabled = off
+  carbon.title = off ? 'Carbon hides the hull — no pattern survives it' : ''
+  if (off && finishInput.value === 'carbon') finishInput.value = 'plastic'
+}
 const skinInput = {
   get value() {
-    return skinSelect.value
+    return skinFor(patternInput.value as Pattern, finishInput.value as FinishId)
   },
   set value(v: string) {
-    if (SKIN_IDS.includes(v as SkinId)) skinSelect.value = v
+    const id = asSkin(v)
+    patternInput.value = patternOf(id)
+    finishInput.value = finishOf(id)
+    paintCarbonButton()
   },
 }
 const paintSkinBlurb = () => {
   $('skin-blurb').textContent = SKINS[asSkin(skinInput.value)].blurb
 }
-skinSelect.addEventListener('change', paintSkinBlurb)
+$('skin-pattern').addEventListener('click', () => {
+  paintCarbonButton()
+  paintSkinBlurb()
+})
+$('skin-finish').addEventListener('click', paintSkinBlurb)
 
 const playersInput = segmented('players')
 
@@ -635,7 +656,8 @@ function paintPreview(): void {
   preview.setSkin(asSkin(skinInput.value), PREVIEW_HUE)
   preview.setDriver(nameInput.value.trim() || 'tank', null, PREVIEW_HUE)
 }
-skinSelect.addEventListener('change', paintPreview)
+$('skin-pattern').addEventListener('click', paintPreview)
+$('skin-finish').addEventListener('click', paintPreview)
 nameInput.addEventListener('input', paintPreview)
 window.addEventListener('resize', () => preview?.resize())
 paintPreview()

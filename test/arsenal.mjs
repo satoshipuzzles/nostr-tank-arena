@@ -71,21 +71,35 @@ try {
   await page.goto(URL, { waitUntil: 'domcontentloaded', timeout: 30_000 })
 
   // --- skins: the lobby half ------------------------------------------------
-  // The picker is a grouped dropdown now — the catalog outgrew buttons when
-  // the camo rack landed.
+  // The picker is two axes now — pattern × finish — because the catalog is a
+  // matrix: 36 reachable skins, every one two taps away.
   const picker = await page.evaluate(() => ({
-    options: [...document.querySelectorAll('#skin-select option')].map((o) => o.value),
-    groups: [...document.querySelectorAll('#skin-select optgroup')].map((g) => g.label),
+    patterns: [...document.querySelectorAll('#skin-pattern button')].map((b) => b.dataset.value),
+    finishes: [...document.querySelectorAll('#skin-finish button')].map((b) => b.dataset.value),
     blurb: document.getElementById('skin-blurb').textContent,
   }))
   check(
-    'the lobby offers every skin in the table, finishes and camo both',
-    picker.options.length >= 12 && picker.options[0] === 'plastic' && picker.groups.length === 2,
-    `${picker.options.join(',')} [${picker.groups.join('/')}]`,
+    'the lobby offers both axes — every pattern, every finish',
+    picker.patterns.length === 7 && picker.patterns[0] === 'solid' && picker.finishes.length === 6,
+    `${picker.patterns.join(',')} × ${picker.finishes.join(',')}`,
   )
   check('and says what the selected one looks like', (picker.blurb ?? '').length > 8, picker.blurb)
 
-  await page.select('#skin-select', 'carbon')
+  // A matrix cell: the composed entries exist and the blurb follows both axes.
+  await page.click('#skin-pattern button[data-value="woodland"]')
+  await page.click('#skin-finish button[data-value="chrome"]')
+  const combo = await page.evaluate(() =>
+    document.getElementById('skin-blurb').textContent)
+  check('a pattern in a finish composes — woodland chrome is a skin', /woodland/i.test(combo) && /polish|shine/i.test(combo), combo)
+
+  // The impossible cell says so instead of painting something else: carbon
+  // hides the hull, so no pattern survives it.
+  const carbonOff = await page.evaluate(() =>
+    document.querySelector('#skin-finish button[data-value="carbon"]').disabled)
+  check('carbon is refused under a pattern rather than lying', carbonOff === true)
+
+  await page.click('#skin-pattern button[data-value="solid"]')
+  await page.click('#skin-finish button[data-value="carbon"]')
   const afterPick = await page.evaluate(() =>
     document.getElementById('skin-blurb').textContent)
   check('picking one updates the blurb', /trim/i.test(afterPick), afterPick)
