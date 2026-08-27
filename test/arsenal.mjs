@@ -462,16 +462,50 @@ try {
       // because a tank that was never in range takes no damage either way.
       const y = g.tank.y
       g.tank.x = 800
+      // The bomb count a *real* client would send on this board, not a
+      // hand-written fourteen.
+      //
+      // Fourteen was right when Crossroads was the only board. The boards are
+      // 1500 to 2100 across now and the game derives the count from the width,
+      // so fourteen on Pillars puts the bombs 160 apart against a 64-unit blast
+      // radius — the nearest one lands 65 units from a tank parked at x=800 and
+      // it takes nothing. That is not a strike that failed, it is a payload no
+      // client would ever send. Measured: a real strike on the same board drops
+      // 19 bombs, 115 apart, nearest 56, and the tank dies.
+      //
+      // The board comes off the chain tip, so this went red and green with the
+      // *block* rather than with any commit — which is exactly what a bisect
+      // against a moving environment looks like.
+      const { bombsFor, STRIKE_GAP, STRIKE_RADIUS } = window.__strike
+      const span = window.__arena.ARENA_W + STRIKE_RADIUS * 2
+      const n = bombsFor(span, STRIKE_GAP)
       g.onEvent({
         id: 'strike' + Math.random().toString(16).slice(2),
         pubkey: IN_LANE, kind: 21004, created_at: Math.floor(Date.now() / 1000), tags: [], sig: '0'.repeat(128),
-        content: JSON.stringify({ t0: performance.now(), y, dir: 1, n: 14, d: 2 }),
+        content: JSON.stringify({ t0: performance.now(), y, dir: 1, n, d: 2 }),
       }, false)
-      return { known: g.strikes.size, hp: g.tank.hp }
+      // Where the bombs will actually land, so the precondition below can be
+      // asserted rather than assumed: the same walk `stepStrikes` does.
+      const bombs = []
+      for (let i = 0; i < n; i++) {
+        const t = n > 1 ? i / (n - 1) : 0.5
+        bombs.push(Math.round(-STRIKE_RADIUS + t * span))
+      }
+      const nearest = Math.min(...bombs.map((b) => Math.abs(b - 800)))
+      return { known: g.strikes.size, hp: g.tank.hp, n, nearest, radius: STRIKE_RADIUS }
     },
     IN_LANE,
   )
   check('an air strike event is picked up and simulated', strike.known === 1, JSON.stringify(strike))
+  // The precondition, named. Without this, a run of this board where the
+  // victim happens to sit between two bombs reports "damage does not land",
+  // which is a sentence about the game and not about the arithmetic that put
+  // the tank in a gap.
+  check(
+    'and the tank really is under one of its bombs',
+    strike.nearest < strike.radius,
+    `nearest bomb ${strike.nearest} away, blast radius ${strike.radius}, ${strike.n} bombs`,
+  )
 
   const hit = await until(async () =>
     page.evaluate(() => {

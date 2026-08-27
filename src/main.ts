@@ -7,7 +7,7 @@ import { layoutForBlock, layoutName, setLayout } from './arena'
 import { Sfx } from './audio'
 import { BlockClock } from './blocks'
 import { BOT_COUNT, MAX_BOTS } from './bots'
-import { Game, NUKE_FLASH_MS, LOADOUT_TIERS, TIER_LABELS, DEFAULT_LOADOUT, parseLoadout, rewardsForTier } from './game'
+import { Game, NUKE_FLASH_MS, STRIKE_GAP, STRIKE_RADIUS, bombsFor, LOADOUT_TIERS, TIER_LABELS, DEFAULT_LOADOUT, parseLoadout, rewardsForTier } from './game'
 import type { Loadout } from './game'
 import { Input, PLAYER_TWO, SOLO, type Scheme } from './input'
 import { TouchSticks } from './touch'
@@ -2101,6 +2101,15 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     // number rather than a rule, and a suite has to be able to read the one the
     // build actually shipped rather than the one it was written against.
     ;(window as unknown as { __rooms: unknown }).__rooms = { SEATS }
+    // The bomb-run rule, for test/arsenal.mjs. A suite that builds a fake
+    // peer's strike has to build the one a real client would send on *this*
+    // board, and a hand-written bomb count is a number that was true when there
+    // was one board — see the note in `bombsFor`.
+    ;(window as unknown as { __strike: unknown }).__strike = {
+      bombsFor,
+      STRIKE_GAP,
+      STRIKE_RADIUS,
+    }
     // The flag rules, for test/flags.mjs. `carriers` is the one function in the
     // game whose whole claim is that two clients hearing the same input agree,
     // and the only way to check that is to run it twice with the input in a
