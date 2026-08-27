@@ -389,6 +389,26 @@ export interface EmpPayload {
   t0: number // caller's clock at detonation, ms
 }
 
+/**
+ * A spitfire strafing run, riding the strike kind like its siblings.
+ *
+ * One publish carrying a corner and a start time: the plane's whole flight is
+ * a pure function of the two (`spitfirePos`), so every client watches the same
+ * pass and the victims apply the gunfire to themselves — the same trust model
+ * as the bombs and the chopper. No `y`, same as `lane`/`nuke`/`emp`: a client
+ * that predates this drops the payload as malformed instead of walking a
+ * corner index along the top wall as a one-bomb strike.
+ */
+export interface StrafePayload {
+  k: 'strafe'
+  /** Caller's clock at the moment the plane crosses the fence, ms. */
+  t0: number
+  /** Which corner it enters from: 0 NW, 1 NE, 2 SE, 3 SW. */
+  c: 0 | 1 | 2 | 3
+  /** Hull points per hit. */
+  d: number
+}
+
 export function parsePayload<T>(content: string): T | null {
   try {
     const v = JSON.parse(content)

@@ -49,7 +49,9 @@
     "test:roommode": "node test/roommode.mjs",
     "test:nuke": "node test/nuke.mjs",
     "test:creategame": "node test/creategame.mjs",
-    "test:suit": "node test/suit.mjs"
+    "test:suit": "node test/suit.mjs",
+    "test:spitfire": "node test/spitfire.mjs",
+    "test:spitfire-browser": "node test/spitfire-browser.mjs"
   },
   "dependencies": {
     "nostr-tools": "^2.10.4",

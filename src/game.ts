@@ -41,6 +41,7 @@ import {
   type LanePayload,
   type EmpPayload,
   type NukePayload,
+  type StrafePayload,
   type StatePayload,
   parsePayload,
   roomTag,
@@ -78,6 +79,16 @@ import {
   stepChopper,
   underFire,
 } from './chopper'
+import {
+  SPITFIRE_DAMAGE,
+  SPITFIRE_HIT_MS,
+  SPITFIRE_LEAD_MS,
+  type Corner,
+  asCorner,
+  cornerAt,
+  spitfirePos,
+  underStrafe,
+} from './spitfire'
 import type { Rect } from './arena'
 import type { Bot, BotTarget } from './bots'
 import {
@@ -253,6 +264,7 @@ export type RewardId =
   | 'emp'
   | 'blitz'
   | 'drone'
+  | 'spitfire'
   // Tier 15 — heavy.
   | 'jugger'
   | 'salvo'
@@ -290,6 +302,9 @@ export const REWARDS: readonly RewardDef[] = [
   { id: 'emp', name: 'EMP', detail: 'EMP — every other screen goes dark', hue: 300, tier: 10 },
   { id: 'blitz', name: 'blitz', detail: 'blitz — fast, and reloading faster', hue: 285, tier: 10 },
   { id: 'drone', name: 'repair drone', detail: 'a hull point back every two seconds', hue: 130, tier: 10 },
+  // Six in the pool: five is the floor Puzz asked for, not a cap — the same
+  // precedent the nuke set in the apex tier.
+  { id: 'spitfire', name: 'spitfire', detail: 'a strafing run — pick its corner', hue: 100, tier: 10 },
   // --- 15: heavy. Two things at once, or something that covers the board.
   { id: 'jugger', name: 'juggernaut', detail: 'juggernaut — shielded and fast', hue: 190, tier: 15 },
   { id: 'salvo', name: 'salvo', detail: 'two bomb runs, both halves of the board', hue: 20, tier: 15 },
@@ -745,6 +760,16 @@ export class Game {
    * than driven by per-bomb events, so a whole run costs one event.
    */
   readonly strikes = new Map<string, Strike>()
+  /** In-flight spitfire passes, keyed by event id. The renderer reads this. */
+  readonly strafes = new Map<
+    string,
+    { id: string; owner: string; corner: Corner; t0: number; damage: number; hitAt: Map<string, number> }
+  >()
+  /**
+   * A spitfire has been spent and is waiting for its corner. The tray paints a
+   * four-way pad while this is true; `callSpitfire` clears it.
+   */
+  pendingStrafe = false
   /**
    * Blasts that went off since the renderer last looked.
    *
@@ -1637,6 +1662,12 @@ export class Game {
         this.extend('regenUntil', now, DRONE_MS)
         this.regenAt = now + DRONE_STEP_MS
         break
+      case 'spitfire':
+        // The first reward with a second decision: nothing happens until a
+        // corner is picked. The tray repaints into a four-way pad while this
+        // is set (`drawTray` reads it), and `callSpitfire` clears it.
+        this.pendingStrafe = true
+        break
       // --- 15: heavy -----------------------------------------------------
       case 'jugger':
         // Not three numbers going up any more — a vehicle swap. See src/suit.ts.
@@ -1849,6 +1880,34 @@ export class Game {
     this.publishAsSession(KIND_STRIKE, payload)
   }
 
+  /**
+   * The corner is picked; the plane is inbound.
+   *
+   * Same shape as `callStrike`: one publish carrying the numbers, and our own
+   * copy inserted locally from the same `t0` so the caller is not watching
+   * their own pass arrive a round trip late.
+   */
+  callSpitfire(corner: Corner): boolean {
+    if (!this.pendingStrafe) return false
+    this.pendingStrafe = false
+    const now = performance.now()
+    const t0 = now + SPITFIRE_LEAD_MS
+    const payload: StrafePayload = { k: 'strafe', t0, c: corner, d: SPITFIRE_DAMAGE }
+    const id = randomId()
+    this.strafes.set(id, {
+      id,
+      owner: this.identity.sessionPubkey,
+      corner,
+      t0,
+      damage: SPITFIRE_DAMAGE,
+      hitAt: new Map(),
+    })
+    this.publishAsSession(KIND_STRIKE, payload)
+    this.sound('siren', { at: cornerAt(corner) })
+    this.pushFeed('spitfire inbound')
+    return true
+  }
+
   /** When an enemy EMP stops blanking our HUD, in our clock, or 0. */
   empUntil = 0
 
@@ -2027,7 +2086,11 @@ export class Game {
 
   private onStrike(e: Event): void {
     const p = parsePayload<
-      StrikePayload & Partial<EmpPayload> & Partial<LanePayload> & Partial<NukePayload>
+      StrikePayload &
+        Partial<EmpPayload> &
+        Partial<LanePayload> &
+        Partial<NukePayload> &
+        Partial<StrafePayload>
     >(e.content)
     if (!p) return
     // An EMP rides this kind with no `y` on purpose: a client too old to know
@@ -2035,6 +2098,7 @@ export class Game {
     // than clamping it into a one-bomb strike along the top wall.
     if (p.k === 'emp') return this.onEmp(e)
     if (p.k === 'nuke') return this.onNuke(e)
+    if (p.k === 'strafe') return this.onStrafe(e)
     // A lane run says where it is in `x`, and deliberately carries no `y`.
     const vertical = p.k === 'lane'
     const lane = vertical ? p.x : p.y
@@ -2069,6 +2133,88 @@ export class Game {
     })
     this.sound('siren', { at: vertical ? { x: lane, y: ARENA_H / 2 } : { x: ARENA_W / 2, y: lane } })
     this.pushFeed(`${peer.name} called ${vertical ? 'a thermite lane' : 'an air strike'}`)
+  }
+
+  /** A peer's spitfire pass. Same discipline as `onStrike`, one shape over. */
+  private onStrafe(e: Event): void {
+    const p = parsePayload<StrafePayload>(e.content)
+    if (!p || typeof p.t0 !== 'number') return
+    const corner = asCorner(p.c)
+    if (corner === null) return
+    // Our own pass, echoed back by a relay: we already run it locally.
+    if (e.pubkey === this.identity.sessionPubkey) return
+    if (this.strafes.has(e.id)) return
+    const peer = this.ensurePeer(e.pubkey)
+    peer.lastSeen = performance.now()
+    this.updateOffset(peer, p.t0)
+    this.strafes.set(e.id, {
+      id: e.id,
+      owner: e.pubkey,
+      corner,
+      t0: p.t0 + peer.offset,
+      damage: Math.max(1, Math.min(MAX_HULL, Math.floor(p.d))),
+      hitAt: new Map(),
+    })
+    this.sound('siren', { at: cornerAt(corner) })
+    this.pushFeed(`${peer.name} called a spitfire`)
+  }
+
+  /**
+   * Fly every live spitfire pass forward and rake whatever is under it.
+   *
+   * The gun works like the chopper's, one notch slower: a per-victim cooldown
+   * (`SPITFIRE_HIT_MS` against the chopper's 520) on a footprint centred under
+   * the plane. Damage is applied the way every area effect here applies it —
+   * by the victim, to itself; by this client, to its own local bots — and the
+   * caller and their side are exempt.
+   */
+  private stepStrafes(now: number): void {
+    for (const [id, s] of this.strafes) {
+      const t = now - s.t0
+      if (t < 0) continue
+      const pos = spitfirePos(s.corner, t)
+      if (pos.done) {
+        this.strafes.delete(id)
+        continue
+      }
+      const mine = s.owner === this.identity.sessionPubkey
+      // Our own local bots, whoever's pass it is.
+      for (const bot of this.bots) {
+        if (bot.tank.dead) continue
+        const peerTeam = this.peers.get(bot.session)?.view.team ?? 0
+        if (peerTeam && this.teamOf(s.owner) === peerTeam) continue
+        if (!underStrafe(pos.x, pos.y, bot.tank.x, bot.tank.y)) continue
+        const key = 'bot:' + bot.session
+        if (now < (s.hitAt.get(key) ?? 0)) continue
+        s.hitAt.set(key, now + SPITFIRE_HIT_MS)
+        bot.tank.hp -= s.damage
+        if (bot.tank.hp > 0) {
+          this.sound('hit', { at: { x: bot.tank.x, y: bot.tank.y } })
+          continue
+        }
+        killBot(bot, now, this.modifier.respawn)
+        this.sound('death', { at: { x: bot.tank.x, y: bot.tank.y } })
+        if (mine) {
+          this.botKills++
+          this.sound('kill')
+          this.onOwnKill()
+          this.pushFeed(`you killed ${bot.name}`)
+        }
+      }
+      // Ourselves, when it is somebody else's.
+      if (mine || this.watching || this.tank.dead || this.flying) continue
+      if (this.friendly(s.owner)) continue
+      if (!underStrafe(pos.x, pos.y, this.tank.x, this.tank.y)) continue
+      if (now < (s.hitAt.get('self') ?? 0)) continue
+      s.hitAt.set('self', now + SPITFIRE_HIT_MS)
+      if (hasBuff(this.buffs, 'shieldUntil', now)) {
+        this.popShield()
+        continue
+      }
+      this.tank.hp -= s.damage
+      if (this.tank.hp > 0) this.sound('hit')
+      if (this.tank.hp <= 0) this.die(s.owner)
+    }
   }
 
   /**
@@ -3374,6 +3520,7 @@ export class Game {
     }
 
     this.stepStrikes(now)
+    this.stepStrafes(now)
     this.interpolate(now)
     this.prunePeers(now)
     this.spreadColors()

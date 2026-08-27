@@ -755,6 +755,8 @@ const REWARD_PATHS: Record<string, string> = {
     '<path d="M12 1v4M12 19v4M1 12h4M19 12h4" stroke="currentColor" stroke-width="2.5"/>',
   chopper:
     '<path d="M3 6h18v2H13v3l6 4v2H5v-2l6-4V8H3Z"/><circle cx="12" cy="19" r="2"/>',
+  spitfire:
+    '<path d="M11 2h2l1.2 6.5L22 12v2.5l-7.8-1.3v4.3l2.8 2V22l-5-1-5 1v-2.5l2.8-2v-4.3L2 14.5V12l7.8-3.5Z"/>',
   siege:
     '<path d="M9 2h6v9h4.5L12 22 4.5 11H9Z"/>',
   emp:
@@ -3092,9 +3094,33 @@ function drawTray(game: Game): void {
   const node = $('tray')
   const held = game.earned
   const usable = !game.tank.dead && !game.flying
-  const key = `${held.join(',')}|${usable}`
+  const key = `${held.join(',')}|${usable}|${game.pendingStrafe}`
   if (key === trayKey) return
   trayKey = key
+  // A spitfire waiting for its corner takes over the tray: the spend already
+  // happened, and the only question left on screen is *which corner*. Four
+  // buttons, one per corner, keys 1-4.
+  if (game.pendingStrafe) {
+    node.hidden = false
+    const corners: [number, string, string][] = [
+      [0, '↖', 'top left'],
+      [1, '↗', 'top right'],
+      [2, '↘', 'bottom right'],
+      [3, '↙', 'bottom left'],
+    ]
+    node.innerHTML = corners
+      .map(
+        ([c, arrow, name], i) =>
+          `<button type="button" class="reward corner" data-corner="${c}" ` +
+          `title="spitfire from the ${name} — press ${i + 1}">` +
+          `<span class="corner-arrow">${arrow}</span>` +
+          `<span class="reward-name">${name}</span>` +
+          `<span class="reward-key">${i + 1}</span>` +
+          `</button>`,
+      )
+      .join('')
+    return
+  }
   node.hidden = held.length === 0
   if (!held.length) {
     node.innerHTML = ''
@@ -3133,6 +3159,13 @@ function spendSlot(game: Game, slot: number): void {
 }
 
 $('tray').addEventListener('click', (e) => {
+  const corner = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-corner]')
+  if (corner && running) {
+    const game = running.players[0].game
+    game.callSpitfire(Number(corner.dataset.corner) as 0 | 1 | 2 | 3)
+    drawTray(game)
+    return
+  }
   const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-at]')
   if (!btn || !running) return
   const game = running.players[0].game
@@ -3147,7 +3180,17 @@ window.addEventListener('keydown', (e) => {
   // Digit row only. Numpad is where a second player's hands are on a couch.
   const m = /^Digit([1-9])$/.exec(e.code)
   if (!m) return
-  spendSlot(running.players[0].game, Number(m[1]) - 1)
+  const game = running.players[0].game
+  // While a spitfire waits for its corner, the digits mean the corners.
+  if (game.pendingStrafe) {
+    const c = Number(m[1]) - 1
+    if (c <= 3) {
+      game.callSpitfire(c as 0 | 1 | 2 | 3)
+      drawTray(game)
+    }
+    return
+  }
+  spendSlot(game, Number(m[1]) - 1)
 })
 
 /**
