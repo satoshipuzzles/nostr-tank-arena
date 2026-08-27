@@ -379,6 +379,9 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
 /* Ghost buttons over the sky need a plate of their own for the same reason. */
 #hud-actions button.ghost { background: var(--panel); border-color: var(--line); }
 #hud-actions button.ghost:hover { background: #1b2536; filter: none; }
+/* Mid-match the team button is a badge, not a control: the side is locked. */
+#team-toggle.locked { opacity: 0.68; cursor: default; }
+#team-toggle.locked:hover { background: var(--panel); }
 
 /* --------------------------------------------------- banners and buffs */
 
