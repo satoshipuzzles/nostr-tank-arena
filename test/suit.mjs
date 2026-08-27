@@ -132,8 +132,18 @@ try {
     const up = g.buffs.shieldUntil > now
     g.popShield()
     const down = g.buffs.shieldUntil > performance.now()
-    await sleep(2400)
-    return { up, down, back: g.buffs.shieldUntil > performance.now(), suited: g.suited }
+    // Polled, not slept. The re-arm is booked for two seconds and `stepRewards`
+    // runs from the render loop, which is a quarter speed under a software
+    // rasteriser — so a 2.4s sleep is 400ms of headroom against a frame gap
+    // that can be 250ms on its own. Seen failing once and passing twice
+    // straight after, which is what a window that barely contains the
+    // behaviour looks like from outside.
+    let back = false
+    for (let i = 0; i < 80 && !back; i++) {
+      await sleep(100)
+      back = g.buffs.shieldUntil > performance.now()
+    }
+    return { up, down, back, suited: g.suited }
   })
   check('the plating holds a shot', armour.up && armour.down === false, JSON.stringify(armour))
   check('and comes back a couple of seconds later', armour.back && armour.suited, JSON.stringify(armour))
