@@ -288,6 +288,23 @@ try {
       JSON.stringify(chipText),
     )
 
+    // The chips wear house-style silhouettes now — and "has an svg" is only
+    // half the claim, because an svg the stylesheet never sized renders at
+    // 300×150, the SVG default. Measured, not just found.
+    const chipIcons = await page.evaluate(() =>
+      ['chip-score', 'chip-status', 'chip-menu'].map((id) => {
+        const r = document
+          .querySelector(`#${id} svg.chip-ico`)
+          ?.getBoundingClientRect()
+        return r ? Math.round(r.width) : 0
+      }),
+    )
+    check(
+      'each chip wears a house-style icon at icon size',
+      chipIcons.every((w) => w >= 10 && w <= 24),
+      JSON.stringify(chipIcons),
+    )
+
     // Centre of the chip, computed. A hardcoded coordinate here would be a test
     // that passes because the chip happens to be where it was last week.
     const chipAt = (id) =>

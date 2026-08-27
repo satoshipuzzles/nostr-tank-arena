@@ -877,6 +877,8 @@ body.emp #hud::before {
   fill: currentColor;
 }
 .reward-name { letter-spacing: 0.2px; }
+/* The team pennant, on the lobby side buttons and the in-game toggle. */
+.side-ico { width: 13px; height: 13px; margin-right: 6px; vertical-align: -2px; }
 /* The number key, on the button, because a control whose shortcut is written
    somewhere else has no shortcut. */
 .reward-key {
@@ -1614,6 +1616,8 @@ body.hud-compact #hud-chips { display: flex; }
 .chip:hover { background: #1b2536; filter: none; }
 .chip[aria-expanded='true'] { border-color: var(--accent); color: var(--accent); }
 .chip .chip-ico { font-size: 13px; opacity: 0.85; }
+/* The chips wear house-style silhouettes now, not font glyphs. */
+svg.chip-ico { width: 15px; height: 15px; flex: none; }
 /* Trouble is the one thing worth colouring in a collapsed HUD: a player who
    cannot see the relay line still needs to know their ticks are not landing. */
 .chip.bad { border-color: #e26a6a; color: #e26a6a; }
@@ -2149,8 +2153,12 @@ button.tiny {
   height: 24px;
   border-radius: 999px;
   border: 1px dashed var(--line);
-  display: block;
+  display: grid;
+  place-items: center;
+  color: var(--dim);
 }
+/* The faint tank inside the ring: a seat a tank could take. */
+.seat.free svg { width: 14px; height: 14px; opacity: 0.55; }
 .seat.taken {
   display: block;
   line-height: 0;

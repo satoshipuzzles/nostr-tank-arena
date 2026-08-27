@@ -190,6 +190,30 @@ try {
   check('the lobby finds live games', !!rooms, JSON.stringify(rooms))
   if (!rooms) throw new Error('no rooms rendered')
 
+  // A free seat is a rendered thing now (the faint tank in the dashed ring),
+  // so the count above proving the *class* exists is no longer the whole
+  // claim — the icon has to have made it into the markup too.
+  const freeSeatIcons = await page.evaluate(() => {
+    const svgs = [...document.querySelectorAll('.seat.free svg')]
+    // Sized as well as present: an svg the stylesheet never matched renders
+    // at the 300×150 SVG default and blows the row apart.
+    const w = svgs[0] ? Math.round(svgs[0].getBoundingClientRect().width) : 0
+    return { count: svgs.length, w }
+  })
+  const freeSeats = rooms.reduce((n, r) => n + r.free, 0)
+  check('every free seat draws its tank silhouette, at seat size',
+    freeSeatIcons.count === freeSeats && freeSeatIcons.w >= 8 && freeSeatIcons.w <= 24,
+    `${freeSeatIcons.count} icons (${freeSeatIcons.w}px) for ${freeSeats} free seats`)
+
+  if (process.env.TANK_SHOT) {
+    await page.evaluate(() => {
+      const open = [...document.querySelectorAll('.live-room')].find((n) => n.querySelector('.seat.free'))
+      open?.scrollIntoView({ block: 'center' })
+    })
+    await page.screenshot({ path: process.env.TANK_SHOT })
+    console.log(`      wrote ${process.env.TANK_SHOT}`)
+  }
+
   const byName = Object.fromEntries(rooms.map((r) => [r.room, r]))
   check('a room nobody has been in for hours is not live', !byName.stale, JSON.stringify(Object.keys(byName)))
   check('the busy room is listed first', rooms[0].room === 'pit', rooms.map((r) => r.room).join(','))
