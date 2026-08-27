@@ -19,9 +19,25 @@
 // re-transmitted ten times a second forever would be paying a tick-stream
 // price for a lobby setting.
 
-export type SkinId =
+type BaseSkinId =
   | 'plastic' | 'matte' | 'chrome' | 'neon' | 'rust' | 'carbon'
   | 'woodland' | 'desert' | 'digital' | 'tiger' | 'navy' | 'urban'
+
+/**
+ * The finishes a camo pattern can be struck in, beyond its plain (plastic)
+ * base. Carbon is deliberately absent: its whole trick is a near-black hull
+ * with the hue moved to the trim, and a pattern painted in shades of the hue
+ * on a hull that dark is a pattern nobody can see.
+ */
+export type CamoFinish = 'matte' | 'chrome' | 'neon' | 'rust'
+
+/**
+ * Twelve hand-tuned entries plus the generated matrix: every camo pattern in
+ * every finish that can carry one. The bare camo ids ('woodland') predate the
+ * matrix and stay valid on the wire — they are the pattern in its plastic
+ * base, and renaming them would strand every stored and attested skin.
+ */
+export type SkinId = BaseSkinId | `${CamoId}-${CamoFinish}`
 
 /**
  * A camouflage pattern, painted procedurally in shades of the tank's own hue.
@@ -58,7 +74,7 @@ export interface Skin {
   camo: CamoId | null
 }
 
-export const SKINS: Record<SkinId, Skin> = {
+const BASE: Record<BaseSkinId, Skin> = {
   plastic: {
     id: 'plastic',
     label: 'Plastic',
@@ -198,11 +214,77 @@ export const SKINS: Record<SkinId, Skin> = {
   },
 }
 
-/** The picker groups the catalog: plain finishes first, then the camo rack. */
-export const SKIN_GROUPS: { label: string; ids: SkinId[] }[] = [
-  { label: 'Finishes', ids: ['plastic', 'matte', 'chrome', 'neon', 'rust', 'carbon'] },
-  { label: 'Camo', ids: ['woodland', 'desert', 'digital', 'tiger', 'navy', 'urban'] },
-]
+export const CAMO_IDS: CamoId[] = ['woodland', 'desert', 'digital', 'tiger', 'navy', 'urban']
+const CAMO_FINISHES: CamoFinish[] = ['matte', 'chrome', 'neon', 'rust']
+
+/**
+ * The generated three-quarters of the catalog: pattern × finish, composed
+ * from the hand-tuned entries rather than tuned 24 more times. The pattern
+ * contributes its camo and its darkness; the finish contributes the surface
+ * (metalness, roughness, glow, trim). Neon is clamped below the pure-neon
+ * glow so the pattern still reads through it — a camo you cannot see through
+ * the light is just neon with extra steps.
+ */
+const combos = {} as Record<`${CamoId}-${CamoFinish}`, Skin>
+const FINISH_BLURB: Record<CamoFinish, string> = {
+  matte: 'dead flat',
+  chrome: 'polished to a shine',
+  neon: 'lit from inside',
+  rust: 'field-worn',
+}
+for (const c of CAMO_IDS) {
+  for (const f of CAMO_FINISHES) {
+    const pattern = BASE[c]
+    const finish = BASE[f]
+    const id = `${c}-${f}` as const
+    combos[id] = {
+      id,
+      label: `${pattern.label} ${finish.label}`,
+      blurb: `${pattern.label}, ${FINISH_BLURB[f]}.`,
+      light: Math.round(pattern.light * finish.light * 100) / 100,
+      metalness: finish.metalness,
+      roughness: finish.roughness,
+      emissive: f === 'neon' ? 0.32 : finish.emissive,
+      trim: finish.trim ?? pattern.trim,
+      camo: pattern.camo,
+    }
+  }
+}
+
+export const SKINS: Record<SkinId, Skin> = { ...BASE, ...combos }
+
+// ------------------------------------------------------------ the two axes
+
+/** What the picker rows offer: a pattern (or none) and a finish. */
+export type Pattern = 'solid' | CamoId
+export type FinishId = 'plastic' | 'matte' | 'chrome' | 'neon' | 'rust' | 'carbon'
+export const PATTERNS: Pattern[] = ['solid', ...CAMO_IDS]
+export const FINISHES: FinishId[] = ['plastic', 'matte', 'chrome', 'neon', 'rust', 'carbon']
+
+/**
+ * The axes back to an id. A solid tank in a finish IS that finish's entry; a
+ * camo in its plastic base is the bare camo id, for wire compatibility. The
+ * one impossible cell — carbon under a pattern — resolves to the pattern's
+ * matte, which is the closest thing to what was asked for; the picker
+ * disables the button so the fallback is a guard, not a path.
+ */
+export function skinFor(pattern: Pattern, finish: FinishId): SkinId {
+  if (pattern === 'solid') return finish
+  if (finish === 'plastic') return pattern
+  if (finish === 'carbon') return `${pattern}-matte`
+  return `${pattern}-${finish}`
+}
+
+export function patternOf(id: SkinId): Pattern {
+  const camo = SKINS[id].camo
+  return camo ?? 'solid'
+}
+
+export function finishOf(id: SkinId): FinishId {
+  const dash = id.indexOf('-')
+  if (dash !== -1) return id.slice(dash + 1) as FinishId
+  return (CAMO_IDS as string[]).includes(id) ? 'plastic' : (id as FinishId)
+}
 
 export const SKIN_IDS = Object.keys(SKINS) as SkinId[]
 

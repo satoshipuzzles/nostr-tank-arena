@@ -504,17 +504,20 @@ try {
 
   // The lobby is the first thing a phone sees, and it had the same fault: the
   // skin row used to be six buttons wide and dragged the whole card
-  // off-screen. It is a dropdown now, so the check is that the dropdown (and
-  // the card around it) stays inside the glass — and that it is not empty.
+  // off-screen. The picker is two wrapping axes now (pattern × finish), so
+  // the check is that both rows (and the card around them) stay inside the
+  // glass — and that the full matrix is behind them.
   const lobbyFit = await phone.evaluate(() => {
     const card = document.querySelector('#lobby .card')
     const r = card.getBoundingClientRect()
-    const sel = document.getElementById('skin-select')
-    const sr = sel.getBoundingClientRect()
-    return {
-      left: Math.round(r.left), right: Math.round(r.right), vw: window.innerWidth,
-      selRight: Math.round(sr.right), options: sel.querySelectorAll('option').length,
-    }
+    const rows = ['skin-pattern', 'skin-finish'].map((id) => {
+      const el = document.getElementById(id)
+      return {
+        right: Math.round(el.getBoundingClientRect().right),
+        buttons: el.querySelectorAll('button').length,
+      }
+    })
+    return { left: Math.round(r.left), right: Math.round(r.right), vw: window.innerWidth, rows }
   })
   check(
     'the lobby card fits the phone it is being read on',
@@ -522,9 +525,10 @@ try {
     `card ${lobbyFit.left}..${lobbyFit.right} in ${lobbyFit.vw}`,
   )
   check(
-    'and the skin picker is on the glass with a full rack behind it',
-    lobbyFit.selRight <= lobbyFit.vw && lobbyFit.options >= 12,
-    `picker ends at ${lobbyFit.selRight} in ${lobbyFit.vw}, ${lobbyFit.options} options`,
+    'and both skin axes are on the glass with the full matrix behind them',
+    lobbyFit.rows.every((row) => row.right <= lobbyFit.vw) &&
+      lobbyFit.rows[0].buttons === 7 && lobbyFit.rows[1].buttons === 6,
+    JSON.stringify(lobbyFit.rows) + ` in ${lobbyFit.vw}`,
   )
 
   await phone.click('#play-guest')
