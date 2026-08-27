@@ -454,9 +454,18 @@ let teamPick = Math.max(0, Math.min(5, Number(stored('tank.team') ?? 0) || 0))
 // further down and would be a dead-zone read from the initial paint here.
 let sideLocked = false
 
+/** The team pennant, in a given hue — the side buttons and the toggle agree. */
+const sideBanner = (hue: number): string =>
+  `<svg class="side-ico" viewBox="0 0 24 24" aria-hidden="true" ` +
+  `style="fill:hsl(${hue} 72% 62%)"><path d="M5 2h14v18l-7-5-7 5Z"/></svg>`
+
 function paintTeamButton(): void {
   const btn = $('team-toggle')
-  btn.textContent = `Team: ${TEAM_NAMES[teamPick]}`
+  // TEAM_NAMES is this repo's own constant, not input — same escapeHtml
+  // temporal-dead-zone hazard as paintLoadout documents.
+  btn.innerHTML = teamPick
+    ? `${sideBanner(TEAM_HUES[teamPick])}Team: ${TEAM_NAMES[teamPick]}`
+    : `Team: ${TEAM_NAMES[teamPick]}`
   btn.style.borderColor = teamPick ? `hsl(${TEAM_HUES[teamPick]} 72% 58%)` : ''
   btn.style.color = teamPick ? `hsl(${TEAM_HUES[teamPick]} 78% 72%)` : ''
   btn.classList.toggle('locked', sideLocked)
@@ -526,7 +535,7 @@ for (let i = 1; i < TEAM_NAMES.length; i++) {
   const b = document.createElement('button')
   b.type = 'button'
   b.dataset.value = String(i)
-  b.textContent = TEAM_NAMES[i]
+  b.innerHTML = `${sideBanner(TEAM_HUES[i])}${TEAM_NAMES[i]}`
   b.style.setProperty('--side-hue', String(TEAM_HUES[i]))
   $('side').appendChild(b)
 }
@@ -1551,7 +1560,17 @@ function paintLiveRooms(): void {
     .map((room) => {
       const seats = Array.from({ length: SEATS }, (_, i) => {
         const who = room.players[i]
-        if (!who) return `<span class="seat free" title="open seat"></span>`
+        // A faint tank in the dashed ring, so an open seat reads as "a tank
+        // could be here" rather than as a hole in the row. House icon style.
+        if (!who)
+          return (
+            `<span class="seat free" title="open seat">` +
+            `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">` +
+            `<rect x="6" y="9" width="12" height="10" rx="2"/>` +
+            `<rect x="10.7" y="3" width="2.6" height="8"/>` +
+            `<circle cx="12" cy="14" r="3" fill-opacity="0.5"/>` +
+            `</svg></span>`
+          )
         const face = lobbyFaces.get(who.pubkey) ?? null
         return `<span class="seat taken" title="${escapeHtml(who.name)}">${avatar(
           face,
