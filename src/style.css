@@ -2370,6 +2370,14 @@ button.blocktile:focus-visible {
   text-align: center;
 }
 #death[hidden] { display: none !important; }
+/* While the kill cam runs, the card steps out of the middle. Same card, same
+   contents — it is the *replay* that owns the centre of the screen for those
+   two and a half seconds. */
+#death.replaying {
+  top: auto;
+  bottom: 92px;
+  transform: translate(-50%, 0);
+}
 .death-title {
   font-size: 11px;
   letter-spacing: 0.22em;

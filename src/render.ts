@@ -2849,9 +2849,149 @@ export class Renderer {
    * same events, same interpolation — so without this they would render as a
    * stranger and go looking for a ring that is under the other player's tank.
    */
+  /**
+   * The kill cam: the last couple of seconds, from behind whoever did it.
+   *
+   * Poses the board from the victim's own recorded tape rather than from live
+   * state, which is the honest half of this feature and the reason it needed no
+   * wire at all — see `Game.record`. It replays what *this* screen showed. It
+   * makes no claim about what the killer's screen showed, because this client
+   * has no way to know that and inventing it would be presenting an animation
+   * as evidence.
+   *
+   * Cosmetics still come from the live model — name, hue, skin, the plate — and
+   * only the *motion* comes from the tape. A replay that also rewound somebody's
+   * name would be reconstructing an identity nobody asked about, and the tape is
+   * deliberately six numbers a tank.
+   *
+   * The camera borrows the cockpit rig: a low eye behind the killer, looking at
+   * the victim. Same fov and near plane the cockpit uses, restored by the next
+   * ordinary frame.
+   */
+  replay(
+    game: Game,
+    frame: { tanks: { s: string; x: number; y: number; hull: number; gun: number; dead: boolean }[] },
+    killer: string,
+    /**
+     * Where the camera sits and what it looks at, fixed for the whole replay.
+     *
+     * Computed once from the frame of the kill rather than per frame, and that
+     * is not an optimisation. Early frames of a tape may predate the killer
+     * arriving on this screen at all — the first cut placed the camera per
+     * frame and spent the first second of every replay in the board camera,
+     * because the killer was not in the sample it was drawing. A kill cam that
+     * whips around as its subject appears is worse than a steady shot.
+     */
+    anchor: { from: { x: number; y: number }; to: { x: number; y: number } },
+  ): void {
+    const dt = Math.min(0.05, this.clock.getDelta())
+    const now = performance.now()
+    this.syncPeers(game)
+    this.reconLit = false
+    this.viewerTeam = game.team
+    const maxHp = game.maxHp
+    const me = game.identity.sessionPubkey
+    const seen = new Set<string>()
+
+    for (const t of frame.tanks) {
+      seen.add(t.s)
+      const peer = game.peers.get(t.s)
+      const rig = t.s === me ? this.you : this.rigs.get(t.s)
+      if (!rig) continue
+      rig.root.visible = true
+      this.applyTank(rig, dt, now, {
+        x: t.x,
+        y: t.y,
+        hull: t.hull,
+        gun: t.gun,
+        // Hull points are not on the tape: a kill cam is about position and
+        // timing, and a pip count rewound to a number the round has moved past
+        // is a detail nobody is reading that can only be wrong.
+        hp: t.dead ? 0 : maxHp,
+        maxHp,
+        ammo: 4,
+        held: 0,
+        shield: false,
+        suited: false,
+        suitAt: null,
+        dead: t.dead,
+        hue: t.s === me ? game.displayColor : (peer?.displayColor ?? 0),
+        name: t.s === me ? game.name : (peer?.name ?? ''),
+        picture: this.pictures(t.s === me ? game.identity.pubkey : (peer?.pubkey ?? null)),
+        verified: true,
+        streak: 0,
+        skin: t.s === me ? game.skin : (peer?.skin ?? DEFAULT_SKIN),
+        mine: t.s === me,
+        team: t.s === me ? game.team : (peer?.view.team ?? 0),
+        ourTeam: game.team,
+      })
+    }
+    // Anybody who was not on the board then is not on the board now. A tank
+    // left standing from the live frame would be a player who was somewhere
+    // else two seconds ago, drawn as if they had been there all along.
+    if (!seen.has(me)) this.you.root.visible = false
+    for (const [session, rig] of this.rigs) if (!seen.has(session)) rig.root.visible = false
+
+    // The plates come off. A name sprite is drawn at a fixed screen size over
+    // everything, and from a camera this low the killer's own plate is a
+    // billboard across the middle of the shot — which is doubly wasteful,
+    // because the death card in front of it is already saying the name. The
+    // replay is the one view in the game where the tanks are close enough to
+    // read without labels.
+    for (const rig of [this.you, ...this.rigs.values()]) {
+      rig.label.visible = false
+      for (const pip of rig.pips) pip.visible = false
+    }
+
+    // No shells and no pickups: neither is on the tape, and drawing the live
+    // ones over a replayed board is the one thing here that would actually
+    // mislead — a shell in flight *now*, hanging in a scene from two seconds
+    // ago, reads as the shot that killed you.
+    for (const mesh of this.shells.values()) mesh.visible = false
+    this.lobShadow.visible = false
+    this.reloadBar.visible = false
+
+    void killer
+    const dx = anchor.to.x - anchor.from.x
+    const dz = anchor.to.y - anchor.from.y
+    const d = Math.max(1, Math.hypot(dx, dz))
+    // Over their shoulder: far enough back and high enough that the killer is
+    // in the lower third of the frame rather than under it. The first cut sat
+    // 210 units back at head height and put them off the bottom of the screen
+    // entirely — a shot of the board from nobody's point of view.
+    this.camera.fov = COCKPIT_FOV
+    this.camera.near = 3
+    this.camera.updateProjectionMatrix()
+    this.camera.position.set(anchor.from.x - (dx / d) * 320, 210, anchor.from.y - (dz / d) * 320)
+    this.camera.lookAt(anchor.to.x, 30, anchor.to.y)
+    this.confetti.update(dt)
+    this.renderer.render(this.scene, this.camera)
+    // The camera is put back by the next ordinary frame: `restoreView` resets
+    // the projection the replay borrowed, and the board or cockpit rig takes
+    // the position from there. Left to `draw` rather than done here, because a
+    // replay that restored on every frame would fight itself.
+    this.borrowedCamera = true
+  }
+
+  /** True while the kill cam has the camera. See `replay`. */
+  private borrowedCamera = false
+
   draw(game: Game, localSessions?: ReadonlySet<string>): void {
     const dt = Math.min(0.05, this.clock.getDelta())
     const now = performance.now()
+
+    // Give the camera back after a replay. The fov and near plane belong to the
+    // view mode, and a board frame drawn through the cockpit's projection is a
+    // board seen through a keyhole — which is what the first frame after a kill
+    // cam looked like.
+    if (this.borrowedCamera) {
+      this.borrowedCamera = false
+      const cockpit = this.view === 'cockpit'
+      this.camera.fov = cockpit ? COCKPIT_FOV : BOARD_FOV
+      this.camera.near = cockpit ? 3 : 60
+      this.camera.updateProjectionMatrix()
+      for (const mesh of this.shells.values()) mesh.visible = true
+    }
 
     this.syncPeers(game)
     // Left here for `toWorld`, which runs from a mousemove handler with no game
