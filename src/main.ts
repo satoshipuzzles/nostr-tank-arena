@@ -432,12 +432,12 @@ function autoPublishRound(result: import('./game').RoundResult): void {
 /**
  * Which side you are on. None, or one of five.
  *
- * A button rather than a lobby setting, because a side is something you change
- * mid-round when somebody asks you to — and because there is nobody here to
- * agree a room's mode with in advance. Two players on the same side stop
- * shooting each other and their scores add up; one player on a side is still a
- * deathmatch, which is exactly what should happen when you pick a team and
- * nobody joins you.
+ * Picked in the lobby, locked the moment a match starts. It used to be a
+ * mid-round toggle — "a side is something you change when somebody asks you
+ * to" — but a side you can change under fire is also a side you change *to
+ * dodge*: claim the shooter's team and their shells pass through you. Puzz
+ * called it: team and mode are settled before you roll out, and the HUD
+ * button becomes a badge that says which side that was.
  *
  * Remembered, because "we're red" survives a reload and re-picking it every
  * time you rejoin is the thing that makes people not bother.
@@ -445,23 +445,30 @@ function autoPublishRound(result: import('./game').RoundResult): void {
 const TEAM_NAMES = ['none', 'Red', 'Blue', 'Green', 'Gold', 'Violet']
 const TEAM_HUES = [0, 356, 210, 132, 44, 285]
 let teamPick = Math.max(0, Math.min(5, Number(stored('tank.team') ?? 0) || 0))
+// Flips at match start and never back — there is no way out of a match except
+// a reload. Its own flag rather than a read of `running`, which is declared
+// further down and would be a dead-zone read from the initial paint here.
+let sideLocked = false
 
 function paintTeamButton(): void {
   const btn = $('team-toggle')
   btn.textContent = `Team: ${TEAM_NAMES[teamPick]}`
   btn.style.borderColor = teamPick ? `hsl(${TEAM_HUES[teamPick]} 72% 58%)` : ''
   btn.style.color = teamPick ? `hsl(${TEAM_HUES[teamPick]} 78% 72%)` : ''
+  btn.classList.toggle('locked', sideLocked)
+  btn.title = sideLocked
+    ? 'Sides are locked once the match starts'
+    : 'Pick a side, or none for a free-for-all (T)'
 }
 
 function setTeam(next: number): void {
+  if (sideLocked) {
+    running?.players[0].game.pushFeed('sides are locked — pick a team in the lobby')
+    return
+  }
   teamPick = ((next % 6) + 6) % 6
   store('tank.team', String(teamPick))
   paintTeamButton()
-  if (!running) return
-  for (const p of running.players) p.game.team = teamPick
-  running.players[0].game.pushFeed(
-    teamPick ? `you are on ${TEAM_NAMES[teamPick]}` : 'free-for-all — no side',
-  )
 }
 
 paintTeamButton()
@@ -528,18 +535,15 @@ function paintModes(): void {
 }
 
 function setMode(next: Mode): void {
+  // The lobby is hidden while a match runs, so this cannot fire mid-game —
+  // but the mode lock is a rule, not a layout accident, so it holds here too.
+  if (sideLocked) return
   mode = next
   store('tank.mode', mode)
   // The mode is not a third piece of state — it *is* the side, expressed the
   // way somebody picking a game thinks about it. Deathmatch means no side;
   // team deathmatch means a side, and Red if you have never picked one.
   setTeam(mode === 'dm' ? 0 : teamPick || 1)
-  if (running) {
-    for (const p of running.players) {
-      p.game.flagsOn = mode === 'ctf'
-      p.game.pointsOn = mode === 'dom'
-    }
-  }
   paintModes()
 }
 
@@ -1713,6 +1717,9 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     preview?.dispose()
     preview = null
     running = { players, renderer, clock, profiles }
+    // The side is settled now: the HUD button flips from control to badge.
+    sideLocked = true
+    paintTeamButton()
     // The ladder, once, in the feed. The strip on the HUD says what is next;
     // this says what exists, which is a question you ask on the way in and
     // never again.

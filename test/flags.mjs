@@ -68,6 +68,10 @@ try {
   await page.goto(URL_, { waitUntil: 'domcontentloaded', timeout: 30_000 })
   await page.type('#name', 'flag')
   await page.type('#room', 'ctf' + Math.floor(Math.random() * 1e6))
+  // Through the lobby card, before joining — the mode locks when the match
+  // starts (issue 069f14a6), and a suite that set `flagsOn` by hand would
+  // pass against a build where the card does nothing.
+  await page.click('#mode-ctf')
   await page.click('#play-guest')
   const started = await page
     .waitForFunction(() => !!window.__game && !!window.__renderer, { timeout: 25_000 })
@@ -83,12 +87,6 @@ try {
     g.beginRound = () => {}
     g.botsEnabled = false
     document.getElementById('podium').hidden = true
-    // Through the lobby card, not by setting `team` — the mode is what turns
-    // flags on now, and a suite that set the side by hand would pass against a
-    // build where the card does nothing.
-    document.getElementById('mode-ctf').click()
-    g.team = 1
-    g.flagsOn = true
   }, HASH)
   await wait(800)
 

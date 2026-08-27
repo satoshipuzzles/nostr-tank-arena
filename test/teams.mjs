@@ -84,24 +84,37 @@ try {
   await wait(700)
 
   // ------------------------------------------------------------- the button
+  // The side is picked in the lobby and locked the moment the match starts
+  // (issue 069f14a6): mid-game the HUD button is a badge. A side you could
+  // change under fire was also a dodge — claim the shooter's team and their
+  // shells pass through you.
 
-  const cycled = await page.evaluate(() => {
+  const locked = await page.evaluate(() => {
     const btn = document.getElementById('team-toggle')
-    const seen = []
-    for (let i = 0; i < 7; i++) {
-      seen.push({ label: btn.textContent.trim(), team: window.__game.team })
-      btn.click()
+    const before = { label: btn.textContent.trim(), team: window.__game.team }
+    for (let i = 0; i < 3; i++) btn.click()
+    return {
+      before,
+      after: { label: btn.textContent.trim(), team: window.__game.team },
+      badge: btn.classList.contains('locked'),
+      feed: window.__game.feed.map((f) => f.text).join(' | '),
     }
-    return seen
   })
   check('the button starts on nobody\'s side',
-    cycled[0].team === 0 && /none/i.test(cycled[0].label), JSON.stringify(cycled[0]))
-  check('and cycles through five sides and back',
-    cycled.map((c) => c.team).join(',') === '0,1,2,3,4,5,0',
-    cycled.map((c) => `${c.team}:${c.label.replace('Team: ', '')}`).join(' '))
-  check('the control: and every side has a name, not a number',
-    cycled.slice(1, 6).every((c) => /Team: [A-Z]/.test(c.label)),
-    cycled.slice(1, 6).map((c) => c.label).join(' '))
+    locked.before.team === 0 && /none/i.test(locked.before.label), JSON.stringify(locked.before))
+  check('and mid-match it is a badge: clicking moves nobody',
+    locked.after.team === 0 && locked.after.label === locked.before.label && locked.badge,
+    JSON.stringify(locked.after))
+  check('the lock is said out loud in the feed',
+    /locked/i.test(locked.feed), locked.feed.slice(-120))
+  await page.keyboard.press('KeyT')
+  await wait(200)
+  const afterKey = await page.evaluate(() => window.__game.team)
+  check('the T key is locked out too', afterKey === 0, String(afterKey))
+  const sides = await page.evaluate(() =>
+    [...document.querySelectorAll('#side button')].map((b) => b.textContent.trim()))
+  check('the control: the lobby still offers five named sides',
+    sides.length === 5 && sides.every((s) => /^[A-Z]/.test(s)), sides.join(' '))
 
   /** One tick from somebody, on a side, at a position. */
   const tick = (who, team, x, y, extra = {}) => page.evaluate(({ who, team, x, y, extra }) => {
