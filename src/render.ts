@@ -42,7 +42,7 @@ import { LOB_APEX, LOB_BLAST, MAX_HP, RELOAD, TANK_RADIUS, shellHeight } from '.
 import { ICON_POLYS, PICKUPS, hasBuff } from './pickups'
 import type { PickupKind } from './pickups'
 import { Avatar } from './avatars'
-import { DEFAULT_SKIN, SKINS, type Skin, type SkinId } from './skins'
+import { DEFAULT_SKIN, SKINS, type CamoId, type Skin, type SkinId } from './skins'
 
 // Board furniture, in arena units so it stays in scale with the simulation.
 const WALL_H = 58
@@ -1306,14 +1306,121 @@ interface TankView {
  * lightness of 0.4 the trim takes the hue instead, at full saturation, so the
  * colour moves rather than disappearing.
  */
+/**
+ * A deterministic PRNG, so every client paints the same blotches. Seeded from
+ * the camo id alone — a pattern that differed per screen would be two tanks
+ * wearing different coats and calling it netcode.
+ */
+function mulberry32(seed: number): () => number {
+  let a = seed
+  return () => {
+    a |= 0
+    a = (a + 0x6d2b79f5) | 0
+    let t = Math.imul(a ^ (a >>> 15), 1 | a)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+/**
+ * The camouflage painter. Tones are shades of the tank's own hue — "every
+ * colour camo" without ever taking the player's colour away — and the shapes
+ * are the pattern. Cached per (camo, hue): eight players in every pattern is
+ * still under a hundred small canvases a session.
+ */
+const camoCache = new Map<string, THREE.CanvasTexture>()
+
+function camoTexture(camo: CamoId, hue: number): THREE.CanvasTexture {
+  const key = `${camo}|${hue}`
+  const held = camoCache.get(key)
+  if (held) return held
+
+  const size = 128
+  const canvas = document.createElement('canvas')
+  canvas.width = size
+  canvas.height = size
+  const ctx = canvas.getContext('2d')!
+  const tone = (sat: number, l: number) => `hsl(${hue}, ${sat}%, ${l}%)`
+  // Per-pattern recipe: [base, ...blotch tones], plus a shape style.
+  const recipes: Record<CamoId, { tones: string[]; style: 'blob' | 'pixel' | 'stripe' }> = {
+    woodland: { tones: [tone(45, 32), tone(50, 18), tone(38, 44), 'hsl(0, 0%, 12%)'], style: 'blob' },
+    desert: { tones: [tone(38, 62), tone(30, 48), tone(45, 74), tone(20, 55)], style: 'blob' },
+    digital: { tones: [tone(40, 40), tone(45, 22), tone(35, 58), 'hsl(0, 0%, 25%)'], style: 'pixel' },
+    tiger: { tones: [tone(55, 45), 'hsl(0, 0%, 10%)'], style: 'stripe' },
+    navy: { tones: [tone(55, 24), tone(60, 13), tone(45, 34)], style: 'blob' },
+    urban: { tones: ['hsl(0, 0%, 42%)', 'hsl(0, 0%, 25%)', 'hsl(0, 0%, 60%)', tone(65, 45)], style: 'blob' },
+  }
+  const { tones, style } = recipes[camo]
+  const rand = mulberry32([...camo].reduce((a, c) => a * 31 + c.charCodeAt(0), 7))
+
+  ctx.fillStyle = tones[0]
+  ctx.fillRect(0, 0, size, size)
+  if (style === 'pixel') {
+    const cell = 8
+    for (let y = 0; y < size; y += cell) {
+      for (let x = 0; x < size; x += cell) {
+        ctx.fillStyle = tones[Math.floor(rand() * tones.length)]
+        ctx.fillRect(x, y, cell, cell)
+      }
+    }
+  } else if (style === 'stripe') {
+    ctx.strokeStyle = tones[1]
+    ctx.lineCap = 'round'
+    for (let i = 0; i < 14; i++) {
+      ctx.lineWidth = 5 + rand() * 9
+      ctx.beginPath()
+      const x = rand() * size * 1.4 - size * 0.2
+      ctx.moveTo(x, -8)
+      ctx.bezierCurveTo(
+        x - 18 + rand() * 36, size * 0.33,
+        x - 18 + rand() * 36, size * 0.66,
+        x + rand() * 30 - 15, size + 8,
+      )
+      ctx.stroke()
+    }
+  } else {
+    for (let i = 0; i < 46; i++) {
+      ctx.fillStyle = tones[1 + Math.floor(rand() * (tones.length - 1))]
+      const x = rand() * size
+      const y = rand() * size
+      const r = 6 + rand() * 15
+      ctx.beginPath()
+      ctx.ellipse(x, y, r, r * (0.5 + rand() * 0.6), rand() * Math.PI, 0, Math.PI * 2)
+      ctx.fill()
+    }
+  }
+
+  const texture = new THREE.CanvasTexture(canvas)
+  texture.colorSpace = THREE.SRGBColorSpace
+  texture.wrapS = THREE.RepeatWrapping
+  texture.wrapT = THREE.RepeatWrapping
+  camoCache.set(key, texture)
+  return texture
+}
+
 function applySkin(rig: TankRig, skin: Skin, hue: number): void {
   const h = hue / 360
   const light = Math.max(0.08, Math.min(0.95, 0.58 * skin.light))
-  rig.body.color.setHSL(h, 0.78, light)
+  if (skin.camo) {
+    // The tones live in the texture; `color` becomes the light/soot dial the
+    // rest of the pipeline (wear's multiply, the skin's own `light`) turns.
+    const tex = camoTexture(skin.camo, hue)
+    if (rig.body.map !== tex) {
+      rig.body.map = tex
+      rig.body.needsUpdate = true
+    }
+    rig.body.color.setHSL(0, 0, Math.min(0.95, 0.95 * skin.light))
+  } else {
+    if (rig.body.map) {
+      rig.body.map = null
+      rig.body.needsUpdate = true
+    }
+    rig.body.color.setHSL(h, 0.78, light)
+  }
   rig.body.metalness = skin.metalness
   rig.body.roughness = skin.roughness
   rig.body.emissive.setHSL(h, 0.9, skin.emissive * 0.45)
-  if (light < 0.4) {
+  if (!skin.camo && light < 0.4) {
     rig.trim.color.setHSL(h, 0.85, 0.55)
   } else if (skin.trim !== null) {
     rig.trim.color.setHex(skin.trim)

@@ -71,18 +71,21 @@ try {
   await page.goto(URL, { waitUntil: 'domcontentloaded', timeout: 30_000 })
 
   // --- skins: the lobby half ------------------------------------------------
+  // The picker is a grouped dropdown now — the catalog outgrew buttons when
+  // the camo rack landed.
   const picker = await page.evaluate(() => ({
-    options: [...document.querySelectorAll('#skin button[data-value]')].map((b) => b.dataset.value),
+    options: [...document.querySelectorAll('#skin-select option')].map((o) => o.value),
+    groups: [...document.querySelectorAll('#skin-select optgroup')].map((g) => g.label),
     blurb: document.getElementById('skin-blurb').textContent,
   }))
   check(
-    'the lobby offers every skin in the table',
-    picker.options.length >= 6 && picker.options[0] === 'plastic',
-    picker.options.join(','),
+    'the lobby offers every skin in the table, finishes and camo both',
+    picker.options.length >= 12 && picker.options[0] === 'plastic' && picker.groups.length === 2,
+    `${picker.options.join(',')} [${picker.groups.join('/')}]`,
   )
   check('and says what the selected one looks like', (picker.blurb ?? '').length > 8, picker.blurb)
 
-  await page.click('#skin button[data-value="carbon"]')
+  await page.select('#skin-select', 'carbon')
   const afterPick = await page.evaluate(() =>
     document.getElementById('skin-blurb').textContent)
   check('picking one updates the blurb', /trim/i.test(afterPick), afterPick)
