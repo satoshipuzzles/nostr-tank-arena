@@ -40,6 +40,7 @@ import {
   type StrikePayload,
   type LanePayload,
   type EmpPayload,
+  type NukePayload,
   type StatePayload,
   parsePayload,
   roomTag,
@@ -52,6 +53,7 @@ import type { Claim } from './flags'
 import {
   WALLS,
   applyCoverBits,
+  BREAKABLE,
   applyCoverDamageBits,
   coverBits,
   coverDamageBits,
@@ -255,6 +257,7 @@ export type RewardId =
   | 'blackout'
   | 'ironclad'
   | 'firestorm'
+  | 'nuke'
 
 export interface RewardDef {
   id: RewardId
@@ -291,6 +294,7 @@ export const REWARDS: readonly RewardDef[] = [
   { id: 'blackout', name: 'blackout', detail: 'every other screen dark, and you can see them', hue: 300, tier: 25 },
   { id: 'ironclad', name: 'ironclad', detail: 'thirty seconds of everything at once', hue: 200, tier: 25 },
   { id: 'firestorm', name: 'firestorm', detail: 'two runs, crossing in the middle', hue: 10, tier: 25 },
+  { id: 'nuke', name: 'THE NUKE', detail: 'the whole board goes up', hue: 55, tier: 25 },
 ]
 
 /** The five a given tier offers. Pools are disjoint, so this partitions REWARDS. */
@@ -428,6 +432,22 @@ const IRONCLAD_MS = 30_000
 const BLACKOUT_RECON_MS = 20_000
 /** Armageddon: the gap between one run and the next. */
 const ARMAGEDDON_GAP_MS = 1_400
+
+/**
+ * How long the siren runs before the nuke goes off.
+ *
+ * Five seconds, and every one of them is doing work. This is the only reward in
+ * the game that kills a full board at once, so the thing that keeps it from
+ * being a random death is that everybody hears it coming and knows exactly how
+ * long they have. Nobody can outrun it — there is nowhere to go — but they can
+ * see it land, which is the difference between a spectacle and a disconnection.
+ *
+ * Longer than the strike's two seconds because the strike can be walked out of
+ * and this cannot: the two seconds are a dodge window, the five are a moment.
+ */
+const NUKE_LEAD_MS = 5_000
+/** How long the white-out and the cloud stay on screen after it lands. */
+export const NUKE_FLASH_MS = 2_600
 
 /**
  * How far apart the bombs in a run are, in arena units — not how many there are.
@@ -1644,6 +1664,9 @@ export class Game {
         this.callStrike(now, CARPET_GAP)
         this.callStrike(now, STRIKE_GAP, { axis: 'v', damage: STRIKE_DAMAGE + 1 })
         break
+      case 'nuke':
+        this.callNuke(now)
+        break
     }
     this.announce(rung.name.toUpperCase(), rung.detail, rungHue(rung.id))
     return true
@@ -1823,6 +1846,140 @@ export class Game {
     this.pushFeed('EMP away — their screens go dark')
   }
 
+  /**
+   * The nuke: five seconds of siren, and then there is no board left.
+   *
+   * Puzz: *"25 kills without dying should be a nuke and atomic bomb drops and
+   * the whole board blows up like an atomic bomb."*
+   *
+   * One publish for the whole thing, and the payload is a single timestamp —
+   * where it lands is not a question, because it lands on everything. Every
+   * client counts down to the same moment and then applies the result to
+   * itself: its own death if it is not the caller or on the caller's side, and
+   * every piece of cover flattened. Nobody is told they died; everybody works
+   * out that they did, which is the same authority split as a shell.
+   *
+   * The caller's own copy runs locally from the same `t0` rather than waiting
+   * for the relay to echo it back, exactly like a strike — otherwise the person
+   * who earned twenty-five kills watches their own nuke land a round trip late,
+   * and on a bad relay not at all.
+   */
+  private callNuke(now: number): void {
+    const t0 = now + NUKE_LEAD_MS
+    const payload: NukePayload = { k: 'nuke', t0 }
+    this.publishAsSession(KIND_STRIKE, payload)
+    this.armNuke(this.identity.sessionPubkey, t0)
+    this.pushFeed('NUKE away — five seconds')
+  }
+
+  /** An inbound nuke: who called it and when it goes off, in our clock. */
+  nuke: { owner: string; at: number } | null = null
+  /** When the last one went off, for the white-out. 0 if none has. */
+  nukeFlashAt = 0
+  /** Nuke event ids already armed, so a relay echo cannot double the siren. */
+  private readonly nukeSeen = new Set<string>()
+
+  /**
+   * Book a detonation.
+   *
+   * The *earliest* wins when two are in the air. Two nukes in one round is
+   * vanishingly rare and the alternative — the later one silently replacing a
+   * countdown already on screen — is a clock that jumps backwards in front of
+   * the player, which is worse than the board going up a second early.
+   */
+  private armNuke(owner: string, at: number): void {
+    if (this.nuke && this.nuke.at <= at) return
+    this.nuke = { owner, at }
+    this.sound('siren')
+  }
+
+  private onNuke(e: Event): void {
+    // Ours, echoed back. We armed it locally in `callNuke`; there is nothing
+    // here to learn from the echo, and re-arming it would restart the siren.
+    if (e.pubkey === this.identity.sessionPubkey) return
+    if (this.nukeSeen.has(e.id)) return
+    this.nukeSeen.add(e.id)
+    const p = parsePayload<NukePayload>(e.content)
+    if (!p || typeof p.t0 !== 'number') return
+    const peer = this.ensurePeer(e.pubkey)
+    peer.lastSeen = performance.now()
+    this.updateOffset(peer, p.t0)
+    // Into our clock, like every other timestamp that crosses the wire. A
+    // nuke that arrives with its moment already past goes off on the next
+    // frame rather than being dropped — better a short countdown than a board
+    // where one screen is a crater and another is not.
+    this.armNuke(e.pubkey, p.t0 + peer.offset)
+    this.pushFeed(`${peer.name} launched a NUKE — five seconds`)
+  }
+
+  /** How long until the nuke lands, in seconds, or null. For the HUD. */
+  get nukeIn(): number | null {
+    return this.nuke ? Math.max(0, (this.nuke.at - performance.now()) / 1000) : null
+  }
+
+  /**
+   * The board goes up.
+   *
+   * Three things happen and all three are derived from the event rather than
+   * announced by it, so a client that never received the nuke still converges:
+   * the deaths are applied by their own victims, the flattened cover rides out
+   * on the next state tick in the `b` union like any other destroyed barrel,
+   * and the flash is local.
+   *
+   * A shield does not save you. The bulwark, the juggernaut and the ironclad
+   * are all timers that make you hard to kill, and the apex reward being
+   * *unanswerable* is the point of a tier above them — twenty-five kills
+   * without dying is the price, and it is a price almost nobody pays.
+   */
+  private levelBoard(now: number): void {
+    const owner = this.nuke?.owner ?? ''
+    this.nuke = null
+    this.nukeFlashAt = now
+    this.sound('blast')
+
+    // Every piece of cover, through the same union the barrels already use.
+    // Not a new "the board was flattened" flag: a mask that can only remove
+    // cover is order-independent, idempotent and self-healing for a late
+    // joiner, and it is already on the wire in every tick.
+    const all = BREAKABLE.length >= 31 ? 0x7fffffff : (1 << BREAKABLE.length) - 1
+    for (const rect of applyCoverBits(all)) this.blewUp(rect, false)
+
+    // Bots are ours, so we apply their deaths. The caller's side is spared for
+    // the same reason a teammate is spared by a strike.
+    for (const bot of this.bots) {
+      if (bot.tank.dead) continue
+      if (this.teamOf(bot.session) && this.teamOf(bot.session) === this.teamOf(owner)) continue
+      killBot(bot, now, this.modifier.respawn)
+      if (owner === this.identity.sessionPubkey) {
+        this.botKills++
+        this.onOwnKill()
+      }
+    }
+
+    if (this.watching) return
+    if (owner === this.identity.sessionPubkey) {
+      this.announce('NUKE', 'the board is gone', 55)
+      return
+    }
+    if (this.friendly(owner)) {
+      this.announce('NUKE', "your side's — and everything else is gone", 55)
+      return
+    }
+    // Flying does not save you either: the chopper comes down with everything
+    // else. `landChopper` respawns the tank, so the death has to come after it
+    // or the respawn undoes it.
+    if (this.chopperUntil) this.landChopper()
+    if (this.tank.dead) return
+    this.tank.hp = 0
+    this.die(owner)
+    this.announce('NUKE', 'there was nowhere to be', 55)
+  }
+
+  /** Run the countdown. Called every frame from `update`. */
+  private stepNuke(now: number): void {
+    if (this.nuke && now >= this.nuke.at) this.levelBoard(now)
+  }
+
   private onEmp(e: Event): void {
     // Ours, echoed back. The caller is exempt by design, not by luck.
     if (e.pubkey === this.identity.sessionPubkey) return
@@ -1844,12 +2001,15 @@ export class Game {
   }
 
   private onStrike(e: Event): void {
-    const p = parsePayload<StrikePayload & Partial<EmpPayload> & Partial<LanePayload>>(e.content)
+    const p = parsePayload<
+      StrikePayload & Partial<EmpPayload> & Partial<LanePayload> & Partial<NukePayload>
+    >(e.content)
     if (!p) return
     // An EMP rides this kind with no `y` on purpose: a client too old to know
     // the branch below falls through to the shape check and drops it, rather
     // than clamping it into a one-bomb strike along the top wall.
     if (p.k === 'emp') return this.onEmp(e)
+    if (p.k === 'nuke') return this.onNuke(e)
     // A lane run says where it is in `x`, and deliberately carries no `y`.
     const vertical = p.k === 'lane'
     const lane = vertical ? p.x : p.y
@@ -3018,6 +3178,7 @@ export class Game {
     // and report two deaths.
     this.takeChopperFire(now)
     this.stepRewards(now)
+    this.stepNuke(now)
     this.stepFlags(now)
     this.stepTerritory(dt)
     this.refreshPickups()
@@ -3542,6 +3703,13 @@ export class Game {
     this.shieldRearmAt = 0
     // A strike called under the old block does not keep bombing the new one.
     this.strikes.clear()
+    // A countdown does not survive the round it was called in. The cover it
+    // would have flattened has already been put back by `resetCover`, and a
+    // nuke landing on the new board would be a kill nobody in that round
+    // earned.
+    this.nuke = null
+    this.nukeFlashAt = 0
+    this.nukeSeen.clear()
     // Nor does a gunship. Ten seconds is a rung on a streak, and the streak is
     // reset three lines above this — carrying the reward across the boundary
     // would be a tank nobody can shoot on a board it did not earn.

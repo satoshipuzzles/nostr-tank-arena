@@ -6,7 +6,7 @@ import { layoutForBlock, layoutName, setLayout } from './arena'
 import { Sfx } from './audio'
 import { BlockClock } from './blocks'
 import { BOT_COUNT, MAX_BOTS } from './bots'
-import { Game, LOADOUT_TIERS, TIER_LABELS, DEFAULT_LOADOUT, parseLoadout, rewardsForTier } from './game'
+import { Game, NUKE_FLASH_MS, LOADOUT_TIERS, TIER_LABELS, DEFAULT_LOADOUT, parseLoadout, rewardsForTier } from './game'
 import type { Loadout } from './game'
 import { Input, PLAYER_TWO, SOLO, type Scheme } from './input'
 import { TouchSticks } from './touch'
@@ -757,6 +757,13 @@ const REWARD_PATHS: Record<string, string> = {
     '<path d="M12 2 3 6v6c0 5 3.8 9.2 9 10 5.2-.8 9-5 9-10V6Z"/>' +
     '<path d="M4.4 9.4h15.2v3.4H4.4Z" fill="#0b0e13"/>' +
     '<circle cx="7.4" cy="11.1" r="1.1"/><circle cx="16.6" cy="11.1" r="1.1"/>',
+  nuke:
+    // A mushroom. Cap, stem, and the ring of debris at the base — the one
+    // silhouette in this table that everybody already knows, which is the
+    // whole reason it can be read at sixteen pixels.
+    '<path d="M12 1c5.2 0 9 2.6 9 4.6S17.2 9 12 9 3 7.2 3 5.6 6.8 1 12 1Z"/>' +
+    '<path d="M9.6 10h4.8l1.2 8H8.4Z"/>' +
+    '<path d="M4 20h16v3H4Z"/>',
   firestorm:
     '<path d="M2 10h20v3H2Z"/>' +
     '<path d="M10.5 2h3v20h-3Z" opacity="0.45"/>' +
@@ -2464,6 +2471,7 @@ function drawHud(game: Game): void {
     .join('')
 
   drawNotice(game, now)
+  drawDoomsday(game, now)
   drawBuffs(game, now)
   drawStreak(game)
   drawTray(game)
@@ -2787,6 +2795,53 @@ const STREAK_BUFFS: { key: 'reconUntil' | 'bulwarkUntil' | 'regenUntil'; label: 
   { key: 'bulwarkUntil', label: 'bulwark', icon: 'bulwark', hue: 200 },
   { key: 'regenUntil', label: 'drone', icon: 'drone', hue: 130 },
 ]
+
+/**
+ * The nuke: five seconds of countdown, then the screen goes white.
+ *
+ * Its own element and not a banner. A banner is something you read; this is
+ * something that has to be impossible not to see, from any camera, while you
+ * are driving — the whole design of the reward is that the last five seconds
+ * of a round belong to it. The white-out is DOM for the same reason it is not
+ * in the scene: it has to cover the HUD as well as the board, and in the
+ * cockpit view a quad in the world would not.
+ *
+ * `nukeIn` counts down in the game's own clock, so a client that received the
+ * event late shows a short countdown rather than a wrong one.
+ */
+function drawDoomsday(game: Game, now: number): void {
+  const node = $('doomsday')
+  const left = game.nukeIn
+  const flash = game.nukeFlashAt ? now - game.nukeFlashAt : Infinity
+  if (left !== null) {
+    node.hidden = false
+    node.className = 'counting'
+    node.innerHTML =
+      `<b>NUKE INBOUND</b><span>${left.toFixed(1)}</span>` +
+      `<i>there is nowhere to go</i>`
+    return
+  }
+  if (flash >= 0 && flash < NUKE_FLASH_MS) {
+    node.hidden = false
+    node.className = 'blast'
+    // The white-out is the element's own background, driven from here rather
+    // than from a CSS animation: an animation restarts on a class change, and
+    // two nukes in one round would leave the second one flashing from
+    // whatever point the first had reached.
+    // Full white for the first fifth, then a fade — rather than a fade from the
+    // first frame. The HUD paints eight times a second and the page can be
+    // running at four, so a flash that starts decaying immediately can be
+    // *entirely* over before the first frame that draws it: the check for it
+    // passed against an alpha of zero, which is a white-out nobody sees.
+    const t = flash / NUKE_FLASH_MS
+    const white = t < 0.2 ? 1 : Math.max(0, 1 - (t - 0.2) / 0.5)
+    node.style.setProperty('--white', String(white))
+    node.innerHTML = t < 0.6 ? `<b>NUKE</b>` : ''
+    return
+  }
+  node.hidden = true
+  node.innerHTML = ''
+}
 
 /**
  * Little timers for whatever is currently running on your tank.
