@@ -271,10 +271,10 @@ try {
   // *turning*. The metric was measuring rotation, not finish. Saturation of the
   // lit pixels is what actually separates them — a metal hull takes the hue out
   // of itself — and the sample spread underneath is the control that says so.
-  await spinPage.click('#skin button[data-value="matte"]')
+  await spinPage.select('#skin-select', 'matte')
   await wait(500)
   const matte = await previewSeries(spinPage)
-  await spinPage.click('#skin button[data-value="chrome"]')
+  await spinPage.select('#skin-select', 'chrome')
   await wait(500)
   const chrome = await previewSeries(spinPage)
   const noise = Math.max(matte.spread, chrome.spread)

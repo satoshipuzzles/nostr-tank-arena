@@ -503,26 +503,28 @@ try {
   await phone.type('#room', 'phn' + Math.floor(Math.random() * 1e6))
 
   // The lobby is the first thing a phone sees, and it had the same fault: the
-  // skin row is six buttons wide and used to drag the whole card off-screen.
+  // skin row used to be six buttons wide and dragged the whole card
+  // off-screen. It is a dropdown now, so the check is that the dropdown (and
+  // the card around it) stays inside the glass — and that it is not empty.
   const lobbyFit = await phone.evaluate(() => {
     const card = document.querySelector('#lobby .card')
     const r = card.getBoundingClientRect()
-    const skins = [...document.querySelectorAll('#skin button')].map((b) => {
-      const br = b.getBoundingClientRect()
-      return { name: b.textContent, right: Math.round(br.right) }
-    })
-    return { left: Math.round(r.left), right: Math.round(r.right), vw: window.innerWidth, skins }
+    const sel = document.getElementById('skin-select')
+    const sr = sel.getBoundingClientRect()
+    return {
+      left: Math.round(r.left), right: Math.round(r.right), vw: window.innerWidth,
+      selRight: Math.round(sr.right), options: sel.querySelectorAll('option').length,
+    }
   })
   check(
     'the lobby card fits the phone it is being read on',
     lobbyFit.right <= lobbyFit.vw && lobbyFit.left >= 0,
     `card ${lobbyFit.left}..${lobbyFit.right} in ${lobbyFit.vw}`,
   )
-  const offSkins = lobbyFit.skins.filter((s) => s.right > lobbyFit.vw)
   check(
-    'and every skin can be reached with a thumb',
-    offSkins.length === 0,
-    offSkins.length ? `off the side: ${offSkins.map((s) => s.name).join(', ')}` : `${lobbyFit.skins.length} skins`,
+    'and the skin picker is on the glass with a full rack behind it',
+    lobbyFit.selRight <= lobbyFit.vw && lobbyFit.options >= 12,
+    `picker ends at ${lobbyFit.selRight} in ${lobbyFit.vw}, ${lobbyFit.options} options`,
   )
 
   await phone.click('#play-guest')
