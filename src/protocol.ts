@@ -142,6 +142,17 @@ export interface StatePayload {
    */
   cd?: number
   /**
+   * The same damage packing for breakables ten to nineteen, when a board has
+   * that many. Absent otherwise, which is most boards and every older client.
+   *
+   * A second bank rather than a wider `cd`, because widening the existing field
+   * would have been *misread* by a deployed client rather than ignored by it —
+   * three bits a slot is a position-dependent code, so one extra slot shifts
+   * every field after it. An unknown field is dropped; a changed one is
+   * believed. See `TIER_BANK` in arena.ts for how the boards outgrew ten.
+   */
+  cd2?: number
+  /**
    * Milliseconds of chopper time this client has left, when it is flying one.
    *
    * The whole gunship rides on this tick rather than on events of its own. A

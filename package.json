@@ -57,7 +57,8 @@
     "test:motion": "node test/motion.mjs",
     "test:tdm": "node test/tdm.mjs",
     "test:cards": "node test/cards.mjs",
-    "test:killcam": "node test/killcam.mjs"
+    "test:killcam": "node test/killcam.mjs",
+    "test:covermask": "node test/covermask.mjs"
   },
   "dependencies": {
     "nostr-tools": "^2.10.4",

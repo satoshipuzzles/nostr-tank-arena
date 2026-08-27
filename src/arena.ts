@@ -226,6 +226,25 @@ const TIER_BITS = 3
 const TIER_SLOTS = Math.floor(31 / TIER_BITS)
 
 /**
+ * How many breakables one mask can carry: ten, and the boards outgrew it.
+ *
+ * Three bits a slot into a 31-bit safe integer is ten slots, and that was
+ * comfortable when the widest board had eight breakables. The vault added six
+ * per board and three layouts now carry fourteen — so the mask silently
+ * stopped at ten and four pieces of cover transmitted no damage tiers at all.
+ * They stayed pristine on every other screen through six shells and then
+ * vanished when the *destroyed* mask carried their death, which reads as a
+ * hit-registration bug and was reported as one.
+ *
+ * The fix is a second bank rather than a wider field: same packing, same
+ * union, slots ten to nineteen, in an optional field beside the first. A
+ * client that has never heard of it behaves exactly as it does today — it sees
+ * the first ten and no more — which is what a widened `cd` could not have
+ * promised, because an old client would have *misread* the wider one.
+ */
+export const TIER_BANK = TIER_SLOTS
+
+/**
  * The tier a rect's own hit count implies.
  *
  * Local, and therefore not authoritative on its own — see `Rect.dmg`.
@@ -831,15 +850,25 @@ export function setLayout(index: number): void {
   WALLS.length = 0
   WALLS.push(
     ...ring(spec.w, spec.h),
-    ...vaults,
-    ...vaults.map((r) => flip(r, spec.w, spec.h)),
     ...half,
     ...half.map((r) => flip(r, spec.w, spec.h)),
+    // **Last, not first.** The vault shipped prepended, and prepending shifted
+    // every pre-existing breakable six places along — which broke two things
+    // at once. The `cd` damage mask holds ten slots, so on the three boards
+    // with eight breakables of their own, four pieces of cover fell off the end
+    // and never showed intermediate damage on anybody else's screen. And a
+    // client still running a pre-vault bundle maps bit *i* to a different rect
+    // than we do, so an old client destroying its crate 0 would open a vault on
+    // every current screen. Appending keeps every index that existed before the
+    // vault exactly where it was; only the vault's own walls take new ones.
+    // Found by rainmaker, measured against real geometry.
+    ...vaults,
+    ...vaults.map((r) => flip(r, spec.w, spec.h)),
   )
 
-  // Stamp identity and hulls. Order is `ring`, then the authored half, then its
-  // mirror — the same on every client, because the layout came from the block
-  // hash and nothing here is random.
+  // Stamp identity and hulls. Order is `ring`, the authored half, its mirror,
+  // then the vaults — the same on every client, because the layout came from
+  // the block hash and nothing here is random.
   BREAKABLE.length = 0
   for (let i = 0; i < WALLS.length; i++) {
     const w = WALLS[i]
@@ -1132,20 +1161,22 @@ export function resetCover(): void {
  * have made an old client read "this crate is damaged" as "these three crates
  * are destroyed" and blank cover that is still standing.
  */
-export function coverDamageBits(): number {
+export function coverDamageBits(bank = 0): number {
   let bits = 0
-  for (let i = 0; i < BREAKABLE.length && i < TIER_SLOTS; i++) {
+  const from = bank * TIER_BANK
+  for (let i = from; i < BREAKABLE.length && i < from + TIER_SLOTS; i++) {
     const tier = damageTier(BREAKABLE[i])
-    if (tier > 0) bits |= ((1 << tier) - 1) << (i * TIER_BITS)
+    if (tier > 0) bits |= ((1 << tier) - 1) << ((i - from) * TIER_BITS)
   }
   return bits
 }
 
 /** Union somebody else's damage into ours. Returns true if anything changed. */
-export function applyCoverDamageBits(bits: number): boolean {
+export function applyCoverDamageBits(bits: number, bank = 0): boolean {
   let changed = false
-  for (let i = 0; i < BREAKABLE.length && i < TIER_SLOTS; i++) {
-    const field = (bits >> (i * TIER_BITS)) & ((1 << TIER_BITS) - 1)
+  const from = bank * TIER_BANK
+  for (let i = from; i < BREAKABLE.length && i < from + TIER_SLOTS; i++) {
+    const field = (bits >> ((i - from) * TIER_BITS)) & ((1 << TIER_BITS) - 1)
     // Popcount of a thermometer field is the tier it encodes. A field with a
     // gap in it — 0b101 — is not something this encoder can produce, and
     // counting bits rather than matching patterns means a garbled one lands on

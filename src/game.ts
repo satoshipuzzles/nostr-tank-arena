@@ -1437,6 +1437,7 @@ export class Game {
     // no side effect beyond the paint — a tier cannot destroy anything, so
     // this one has nothing to announce.
     if (sameRound && typeof p.cd === 'number' && p.cd > 0) applyCoverDamageBits(p.cd)
+    if (sameRound && typeof p.cd2 === 'number' && p.cd2 > 0) applyCoverDamageBits(p.cd2, 1)
 
     // Relays deliver out of order often enough to matter; keep the buffer sorted.
     const b = peer.buffer
@@ -4166,6 +4167,10 @@ export class Game {
       // crate that has taken six hits looks different to the player who put
       // them in and to everybody else only if it travels.
       ...(coverDamageBits() ? { cd: coverDamageBits() } : {}),
+      // Slots ten and up, on the boards that have them. Absent on most, which
+      // is the point: this costs nothing on a board that never outgrew one
+      // bank, and an older client simply does not see the field.
+      ...(coverDamageBits(1) ? { cd2: coverDamageBits(1) } : {}),
       // Absent in a free-for-all, which is most rounds, so the common tick is
       // the size it was before teams existed.
       ...(this.team ? { tm: this.team } : {}),
