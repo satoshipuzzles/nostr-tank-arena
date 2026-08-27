@@ -25,11 +25,14 @@ import { type Profile, Profiles, shortNpub } from './profiles'
 import {
   type LiveRoom,
   type Role,
+  type RoomMode,
   BEACON_EVERY_MS,
   SEATS,
+  asRoomMode,
   fetchLiveRooms,
   publishPresence,
   seatFor,
+  withStanding,
 } from './rooms'
 import {
   type BlockWall,
@@ -483,23 +486,19 @@ window.addEventListener('keydown', (e) => {
 /* -------------------------------------------------------------- the hub */
 
 /**
- * Mode select, on the way in.
+ * Mode select, on the way in — and the mode is the ROOM's, not yours.
  *
- * Puzz: "Players should be able to start different types of game modes CTF,
- * team death match, etc." The modes already existed — a team is a self-declared
- * number and `T` cycles it — but they existed as a button on the HUD, which
- * means you found out this game had teams after you were already in a
- * deathmatch. A mode you can only discover mid-match is a mode most people
- * never play.
- *
- * There is deliberately no new wire format here and no room-level agreement. A
- * room is still just a name two people said out loud; picking Team Deathmatch
- * picks *your* side before you spawn, exactly as pressing `T` would, and one
- * player on a side is still a deathmatch — which is the right thing to happen
- * when you pick a side and nobody joins you. Whatever a real mode negotiation
- * looks like, it is a protocol change and it is not this.
+ * Puzz: "deathmatch the default should always be ongoing... the other modes
+ * need to be specifically spun up." The mode used to be a per-client lobby
+ * preference that never left this file: two players in one room could be
+ * running CTF and DOM at once, each seeing rules the other did not. Now the
+ * room's rules ride the presence beacon (`RoomMode` in rooms.ts, absent = dm),
+ * the live board says what each table is playing, and a joiner adopts the
+ * rules of the room they walk into. The picker below still exists for the
+ * player who *starts* a room — the first one in is the creator, and their
+ * pick becomes the room's.
  */
-type Mode = 'dm' | 'tdm' | 'ctf' | 'dom'
+type Mode = RoomMode
 
 /** Remembered, and consistent with the side that was remembered next to it. */
 let mode: Mode = ((): Mode => {
@@ -509,6 +508,18 @@ let mode: Mode = ((): Mode => {
   // `T` is plainly playing a team game, so do not throw that away.
   return teamPick ? 'tdm' : 'dm'
 })()
+
+// An invite link can carry the rules: `?room=den&mode=ctf` lands a friend in
+// the right game even before the creator's first beacon is queryable. Not
+// persisted — the link speaks for this visit, the stored pick is still yours.
+{
+  const fromUrl = asRoomMode(params.get('mode'))
+  if (fromUrl) {
+    mode = fromUrl
+    teamPick = mode === 'dm' ? 0 : teamPick || 1
+    paintTeamButton()
+  }
+}
 
 for (let i = 1; i < TEAM_NAMES.length; i++) {
   const b = document.createElement('button')
@@ -1245,7 +1256,9 @@ function lobbyPool(): Net {
 async function loadLiveRooms(): Promise<void> {
   const rows = $('live-rows')
   try {
-    liveRooms = await fetchLiveRooms(lobbyPool())
+    // The standing deathmatch is appended here, not in the fetch: it is a
+    // promise the lobby screen makes, not a beacon anybody signed.
+    liveRooms = withStanding(await fetchLiveRooms(lobbyPool()))
   } catch {
     rows.textContent = 'Could not reach the relays to look for games.'
     return
@@ -1410,6 +1423,15 @@ async function saveProfile(): Promise<void> {
 $('profile-connect').addEventListener('click', () => void connectProfile())
 $('profile-save').addEventListener('click', () => void saveProfile())
 
+/** Chip text for a room card, and the words behind it. `pit — CTF 3/8`. */
+const MODE_CHIPS: Record<Mode, string> = { dm: 'DM', tdm: 'TDM', ctf: 'CTF', dom: 'DOM' }
+const MODE_TITLES: Record<Mode, string> = {
+  dm: 'Deathmatch — every tank for itself',
+  tdm: 'Team deathmatch',
+  ctf: 'Capture the flag',
+  dom: 'Domination — hold the points',
+}
+
 function paintLiveRooms(): void {
   const rows = $('live-rows')
   if (!liveRooms.length) {
@@ -1437,10 +1459,13 @@ function paintLiveRooms(): void {
       if (room.block) bits.push(`block ${room.block}`)
       if (room.queue.length) bits.push(`${room.queue.length} waiting`)
       if (room.watchers.length) bits.push(`${room.watchers.length} watching`)
+      // A placeholder has no beacons to describe it, so it says what it is.
+      if (room.standing) bits.push('the standing game — always open')
       const full = room.open === 0
       return (
         `<div class="live-room">` +
         `<div class="lr-top"><b class="lr-name">${escapeHtml(room.room)}</b>` +
+        `<span class="lr-mode ${room.mode}" title="${MODE_TITLES[room.mode]}">${MODE_CHIPS[room.mode]}</span>` +
         `<span class="lr-seats ${full ? 'full' : 'open'}">${SEATS - room.open}/${SEATS}</span></div>` +
         `<div class="lr-faces">${seats}</div>` +
         `<div class="lr-fine">${bits.join(' · ') || 'warming up'}</div>` +
@@ -1463,6 +1488,11 @@ $('live-rows').addEventListener('click', (e) => {
   if (!join && !watch) return
   roomInput.value = join ?? watch ?? ''
   watchMode = Boolean(watch)
+  // The card said what this table is playing; clicking it means playing that.
+  // Without this, a joiner carried their own remembered mode into someone
+  // else's game — the exact per-client drift this rework removes.
+  const info = liveRooms.find((r) => r.room === roomInput.value)
+  if (info) setMode(info.mode)
   // Guest, because a click on a room in the lobby should put you in it. Anyone
   // who wants their npub on the board uses the button above; a spectator has
   // nothing to sign anyway.
@@ -1601,6 +1631,9 @@ function startBeacon(game: Game, clock: BlockClock, role: Role): void {
       current,
       clock.tip?.height,
       layoutName,
+      // The room's rules, restated every beacon: this is how the live board
+      // labels the table and how the next joiner knows what game this is.
+      mode,
     ).catch(() => {
       // A refused beacon costs this room a line in somebody's lobby for thirty
       // seconds. It is not worth a message on top of a game.
@@ -1647,14 +1680,19 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     // Read once and cleared, so a Watch click does not stick to the next join.
     const wantWatch = watchMode
     watchMode = false
+    const live = liveRooms.find((r) => r.room === room)
+    // The room's rules beat the remembered preference: mode is a property of
+    // the room, declared by whoever is already in it. An empty room has no
+    // rules yet — the first player through the door is the creator, and their
+    // pick stands and goes out on their beacon.
+    if (live && live.players.length + live.queue.length + live.watchers.length > 0) {
+      setMode(live.mode)
+    }
     // The seat decision has to happen *before* the game is built, because a
     // queued player is constructed as a spectator and promoted later. Deciding
     // it afterwards would put a fifth tank on a four-seat board and then try to
     // take it away again.
-    const role = seatFor(
-      liveRooms.find((r) => r.room === room),
-      wantWatch,
-    )
+    const role = seatFor(live, wantWatch)
     const watching = role !== 'seat'
     // Nobody watches on two screens at once, and a spectator has no tank for a
     // second player to share a keyboard with.
@@ -1880,6 +1918,12 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
 
     const url = new URL(location.href)
     url.searchParams.set('room', room)
+    // The invite link carries the rules. Copy-link copies `location.href`
+    // verbatim, so a friend handed a CTF room lands in CTF even before the
+    // first beacon reaches their relay. Deathmatch is the absent value, same
+    // as on the beacon.
+    if (mode !== 'dm') url.searchParams.set('mode', mode)
+    else url.searchParams.delete('mode')
     history.replaceState(null, '', url)
 
     // The lobby's own relay pool and its poll are for the lobby. Leaving them
