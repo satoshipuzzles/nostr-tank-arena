@@ -51,7 +51,8 @@
     "test:creategame": "node test/creategame.mjs",
     "test:suit": "node test/suit.mjs",
     "test:spitfire": "node test/spitfire.mjs",
-    "test:spitfire-browser": "node test/spitfire-browser.mjs"
+    "test:spitfire-browser": "node test/spitfire-browser.mjs",
+    "test:death": "node test/death.mjs"
   },
   "dependencies": {
     "nostr-tools": "^2.10.4",

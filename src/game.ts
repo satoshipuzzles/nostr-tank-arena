@@ -3678,6 +3678,44 @@ export class Game {
     this.sound('fire')
   }
 
+  /**
+   * The last death, for the card the HUD shows over the respawn.
+   *
+   * Puzz: *"When a player dies, show a replay recording from the view of the
+   * player who killed you. It should display the killer's profile picture and
+   * calling card."*
+   *
+   * A card and not a replay, and the reason is worth keeping next to the code
+   * rather than only in the issue. There is no server here. A killer's true
+   * movement exists only on their own machine; what this client has is whatever
+   * position ticks happened to arrive, which is lossy by design — so a
+   * "replay" assembled from them is a plausible animation of something that did
+   * not happen, presented as evidence. The two honest alternatives are to
+   * publish a few seconds of state on every death, which is new traffic at the
+   * busiest moment of a round on a game that has been asked to budget it, or to
+   * show what is actually known. This shows what is known.
+   *
+   * Captured at the moment of death rather than read live off the peer while
+   * the card is up: the killer keeps playing, and a card that quietly updated
+   * their streak while the victim read it would be describing the wrong moment.
+   */
+  lastDeath: {
+    at: number
+    /** Session key of whoever did it, or null for a self-destruct. */
+    killer: string | null
+    name: string
+    /** Their npub, when they have one, for the picture. Null for a guest. */
+    pubkey: string | null
+    /** Their colour, so the card is theirs rather than generic. */
+    hue: number
+    /** What they were on when they did it. 0 when we do not know. */
+    streak: number
+    kills: number
+    deaths: number
+    /** True when a practice tank did it, which costs no death on the board. */
+    bot: boolean
+  } | null = null
+
   private die(killer: string | null): void {
     this.tank.dead = true
     this.tank.hp = 0
@@ -3716,7 +3754,25 @@ export class Game {
       this.publishAsSession(KIND_DEATH, payload)
     }
     this.sound('death')
-    const killerName = killer ? (this.peers.get(killer)?.name ?? 'someone') : null
+    const peer = killer ? this.peers.get(killer) : undefined
+    const killerName = killer ? (peer?.name ?? 'someone') : null
+    this.lastDeath = {
+      at: performance.now(),
+      killer,
+      name: killerName ?? 'nobody',
+      pubkey: peer?.pubkey ?? null,
+      hue: peer?.displayColor ?? 0,
+      // Their own reported streak off the tick, which is the same number their
+      // name plate has been showing everybody all round.
+      streak: peer?.streak ?? 0,
+      // Their own claim first, the locally counted pair as the fallback — the
+      // same order the scoreboard uses. What we counted ourselves can only
+      // undercount: it is built from ephemeral death events, so it is missing
+      // everything that happened before we joined.
+      kills: peer?.claimed?.kills ?? peer?.kills ?? 0,
+      deaths: peer?.claimed?.deaths ?? peer?.deaths ?? 0,
+      bot: fromBot,
+    }
     this.pushFeed(killerName ? `${killerName} killed you` : 'you self-destructed')
   }
 

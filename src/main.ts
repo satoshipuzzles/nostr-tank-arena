@@ -2132,6 +2132,7 @@ function loop(now = performance.now()): void {
   syncFlyingView(players[0].game, renderer)
   paintCrosshair(players[0].game, renderer.viewMode)
   paintChopper(players[0].game)
+  paintDeath(players[0].game)
   paintSuit(players[0].game)
   paintEmp(players[0].game)
   paintDamage(players[0].game, renderer.viewMode)
@@ -2321,6 +2322,63 @@ function paintSuit(game: Game): void {
     `<b>JUGGERNAUT</b> <span class="chopper-clock">${left.toFixed(1)}s</span>` +
     `<span class="chopper-hint">walk it forward · hold fire to hose them down</span>`
   el.style.setProperty('--left', String(Math.max(0, Math.min(1, left / (SUIT_MS / 1000)))))
+}
+
+/**
+ * The death card: who killed you, and what they were on when they did.
+ *
+ * Puzz asked for a kill cam — *"show a replay recording from the view of the
+ * player who killed you. It should display the killer's profile picture and
+ * calling card."* This is the card half, and the reason it is not the replay
+ * half is written next to `Game.lastDeath`: a replay assembled from the
+ * position ticks that happened to arrive is a plausible animation of something
+ * that did not happen. What is on this card is all known for certain.
+ *
+ * Everything comes off `game.lastDeath`, which is captured at the instant of
+ * death rather than read live — the killer is still playing, and a card that
+ * updated their streak while the victim read it would be describing a different
+ * moment than the one it is about.
+ *
+ * The calling card is a slot rather than a stub: when the calling-cards issue
+ * lands, it goes under the name and nothing else here moves.
+ */
+function paintDeath(game: Game): void {
+  const node = $('death')
+  const d = game.lastDeath
+  // Only while dead. A card that outlived the respawn would be a screen you
+  // have to dismiss in the middle of a firefight.
+  if (!d || !game.tank.dead || game.watching) {
+    node.hidden = true
+    return
+  }
+  const left = Math.max(0, (game.tank.respawnAt - performance.now()) / 1000)
+  const profile = d.pubkey ? (running?.profiles.get(d.pubkey) ?? null) : null
+  const self = d.killer === null
+  const title = self ? 'YOU BLEW YOURSELF UP' : 'KILLED BY'
+  // A bot kill costs nothing on the board and the card says so, because the
+  // scoreboard not moving is otherwise the kind of thing that reads as a bug.
+  const note = self
+    ? 'nobody else takes the credit'
+    : d.bot
+      ? 'a practice tank — costs you nothing on the board'
+      : d.streak > 2
+        // "on a 11 streak" reads as a typo to everybody who sees it. Eight,
+        // eleven, eighteen and anything starting with those take "an".
+        ? `on ${/^(8|11|18)/.test(String(d.streak)) ? 'an' : 'a'} ${d.streak} streak`
+        : `${d.kills} kills this round`
+  node.hidden = false
+  node.style.setProperty('--killer', String(d.hue))
+  node.innerHTML =
+    `<span class="death-title">${title}</span>` +
+    (self
+      ? ''
+      : `<span class="death-who">${avatar(profile, d.name, d.hue, 56)}` +
+        `<span class="death-name">${escapeHtml(d.name)}${nip05Badge(profile)}` +
+        // The slot. Empty until calling cards exist, and deliberately still
+        // here so the layout it lands into is the layout that shipped.
+        `<span class="death-card-slot"></span></span></span>`) +
+    `<span class="death-note">${escapeHtml(note)}</span>` +
+    `<span class="death-clock">back in <b>${left.toFixed(1)}s</b></span>`
 }
 
 function paintChopper(game: Game): void {
