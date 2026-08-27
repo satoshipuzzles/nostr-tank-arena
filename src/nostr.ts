@@ -1654,6 +1654,24 @@ export class Net {
       )
       return `${[...symptoms].join(' and ')} at ${[...hosts].join(', ')} — it will not store them`
     }
+    // Pacing was the one failure with no sentence at all: state ticks are the
+    // only disposable events, so a paced relay silently sheds exactly the
+    // traffic that carries hull updates — "kills register, damage crawls" —
+    // and the ledger knew while the player was left guessing at the netcode.
+    // Named by that symptom, with the numbers, because "rate-limited" is not
+    // a sentence about a tank. (rainmaker's gap, found while diagnosing the
+    // phantom-bot report.)
+    const paced = [...this.ledger.entries()].filter(([, l]) => l.pacedTo > 0)
+    if (paced.length) {
+      const hosts = paced.map(([u, l]) => {
+        try {
+          return `${new URL(u).host} (${l.pacedTo}/min)`
+        } catch {
+          return u
+        }
+      })
+      return `paced by ${hosts.join(', ')} — position and damage updates will lag`
+    }
     const recent = [...this.trouble.values()].filter((t) => Date.now() - t.at < 20_000)
     if (!recent.length) return ''
     const worst = recent.sort((a, b) => b.count - a.count)[0]

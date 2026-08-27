@@ -608,6 +608,17 @@ try {
       b && b.pacedTo > 0 && b.pacedTo <= 60,
       b ? `pacedTo ${b.pacedTo}/min` : 'no ledger entry',
     )
+    // The ledger knowing is not the player knowing. Pacing sheds exactly the
+    // disposable state ticks that carry position and hull, so the HUD line
+    // has to say it — by symptom and by number, while the pace is live. This
+    // was the gap in the phantom-bot night: the client was tracking pacing
+    // the whole time and nothing on screen ever said so.
+    const pacedLine = await page.evaluate(() => window.__game.net.troubleSummary())
+    check(
+      'and the HUD line names the pacing, its number, and the symptom',
+      /paced by /.test(pacedLine) && /\/min\)/.test(pacedLine) && /damage updates will lag/.test(pacedLine),
+      JSON.stringify(pacedLine),
+    )
     check(
       'and the lowest cap the relay ever reported',
       b && b.lowestLimit === 60,
