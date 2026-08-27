@@ -975,6 +975,18 @@ body.emp #hud::before {
 .garage-pick .seg-label { width: auto; }
 .garage-pick .fine { margin: 0; }
 
+/* The skin rack: a dropdown, because the catalog outgrew buttons. */
+#skin-select {
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: #0d1119;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  width: 100%;
+}
+
 /* The driver's card, under the skin picker. */
 #profile { display: grid; gap: 7px; margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--line); }
 .profile-row { display: flex; align-items: center; gap: 9px; }

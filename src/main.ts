@@ -18,7 +18,8 @@ import type { ClockDirection } from './nostr'
 import type { Event as NostrEvent } from 'nostr-tools'
 import { modifierForBlock } from './modifiers'
 import { MAG_SIZE, RELOAD } from './sim'
-import { SKINS, SKIN_IDS, asSkin } from './skins'
+import { SKINS, SKIN_IDS, SKIN_GROUPS, asSkin } from './skins'
+import type { SkinId } from './skins'
 import { type Buffs, PICKUPS, type PickupKind, iconSvg } from './pickups'
 import { type Profile, Profiles, shortNpub } from './profiles'
 import {
@@ -99,18 +100,38 @@ const soundInput = segmented('sound')
 // Built from `SKINS` before `segmented()` reads the DOM: the picker's options
 // *are* the skin table, so adding a finish is one edit rather than two that can
 // disagree.
-for (const id of SKIN_IDS) {
-  const b = document.createElement('button')
-  b.type = 'button'
-  b.dataset.value = id
-  b.textContent = SKINS[id].label
-  $('skin').appendChild(b)
+// A dropdown, not a button row: the catalog outgrew buttons the moment camo
+// landed (issue 5446f565 asked for "a picker that scales", and Puzz suggested
+// the dropdown himself). Grouped so the plain finishes and the camo rack read
+// as the two ideas they are. Still built from the skin table — adding an
+// entry is one edit, not two that can disagree.
+const skinSelect = document.createElement('select')
+skinSelect.id = 'skin-select'
+skinSelect.setAttribute('aria-label', 'Tank skin')
+for (const group of SKIN_GROUPS) {
+  const og = document.createElement('optgroup')
+  og.label = group.label
+  for (const id of group.ids) {
+    const o = document.createElement('option')
+    o.value = id
+    o.textContent = SKINS[id].label
+    og.appendChild(o)
+  }
+  skinSelect.appendChild(og)
 }
-const skinInput = segmented('skin')
+$('skin').appendChild(skinSelect)
+const skinInput = {
+  get value() {
+    return skinSelect.value
+  },
+  set value(v: string) {
+    if (SKIN_IDS.includes(v as SkinId)) skinSelect.value = v
+  },
+}
 const paintSkinBlurb = () => {
   $('skin-blurb').textContent = SKINS[asSkin(skinInput.value)].blurb
 }
-$('skin').addEventListener('click', paintSkinBlurb)
+skinSelect.addEventListener('change', paintSkinBlurb)
 
 const playersInput = segmented('players')
 
@@ -563,7 +584,7 @@ function paintPreview(): void {
   preview.setSkin(asSkin(skinInput.value), PREVIEW_HUE)
   preview.setDriver(nameInput.value.trim() || 'tank', null, PREVIEW_HUE)
 }
-$('skin').addEventListener('click', paintPreview)
+skinSelect.addEventListener('change', paintPreview)
 nameInput.addEventListener('input', paintPreview)
 window.addEventListener('resize', () => preview?.resize())
 paintPreview()
