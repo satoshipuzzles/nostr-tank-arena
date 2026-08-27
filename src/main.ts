@@ -674,6 +674,53 @@ $('bots').addEventListener('click', (e) => {
   if (b) setBots(Number(b.dataset.value))
 })
 
+// -------------------------------------------------- the rest of create-a-game
+
+/**
+ * `The Bluff` → `the-bluff`. The slug is the wire name of a pinned board — the
+ * index would be shorter, but a board inserted mid-list would silently repoint
+ * every old invite link at a different arena.
+ */
+const boardSlug = (name: string): string =>
+  name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+
+function boardIndexOf(slug: string | null | undefined): number | null {
+  if (!slug) return null
+  const i = arena.LAYOUTS.findIndex((l) => boardSlug(l.name) === slug)
+  return i >= 0 ? i : null
+}
+
+/**
+ * The board picker, built from `LAYOUTS` so it cannot drift from the boards
+ * the build actually ships. Following the chain is the first entry and the
+ * default: a pinned board is the created-game exception, not the norm.
+ */
+const boardSelect = $<HTMLSelectElement>('board-pick')
+{
+  const chain = document.createElement('option')
+  chain.value = ''
+  chain.textContent = 'Follow the chain — a new board every block'
+  boardSelect.appendChild(chain)
+  for (const l of arena.LAYOUTS) {
+    const o = document.createElement('option')
+    o.value = boardSlug(l.name)
+    o.textContent = l.name
+    boardSelect.appendChild(o)
+  }
+}
+
+/** Listed on the live board, or reachable only by the invite link. */
+const visibilityInput = segmented('visibility')
+
+// The invite link can pin a board and demand privacy, the same way it carries
+// the mode: a friend handed `?room=den&mode=ctf&board=the-bluff&private=1`
+// lands in exactly the game that was made, with nothing to configure.
+{
+  const pinned = boardIndexOf(params.get('board'))
+  if (pinned !== null) boardSelect.value = boardSlug(arena.LAYOUTS[pinned].name)
+  if (params.get('private') === '1') visibilityInput.value = 'private'
+}
+
 // ----------------------------------------------------------- reward icons
 
 /**
@@ -1614,7 +1661,13 @@ function nip05Badge(profile: Profile | null): string {
  * being advisory — two queued players can both see the same seat open and both
  * take it, which makes a five-tank room for one round rather than a crash.
  */
-function startBeacon(game: Game, clock: BlockClock, role: Role): void {
+function startBeacon(
+  game: Game,
+  clock: BlockClock,
+  role: Role,
+  board?: string,
+  listed = true,
+): void {
   let current = role
   const send = () => {
     // A queued player takes the seat the moment the room has room for it.
@@ -1641,6 +1694,8 @@ function startBeacon(game: Game, clock: BlockClock, role: Role): void {
       // The room's rules, restated every beacon: this is how the live board
       // labels the table and how the next joiner knows what game this is.
       mode,
+      board,
+      listed,
     ).catch(() => {
       // A refused beacon costs this room a line in somebody's lobby for thirty
       // seconds. It is not worth a message on top of a game.
@@ -1688,13 +1743,24 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     const wantWatch = watchMode
     watchMode = false
     const live = liveRooms.find((r) => r.room === room)
+    const occupied = !!live && live.players.length + live.queue.length + live.watchers.length > 0
     // The room's rules beat the remembered preference: mode is a property of
     // the room, declared by whoever is already in it. An empty room has no
     // rules yet — the first player through the door is the creator, and their
     // pick stands and goes out on their beacon.
-    if (live && live.players.length + live.queue.length + live.watchers.length > 0) {
+    if (occupied) {
       setMode(live.mode)
+      // The pin travels the same way. An occupied room that follows the chain
+      // must also *clear* a leftover pick, or the joiner plays a different
+      // board from everyone in it.
+      boardSelect.value = live.board && boardIndexOf(live.board) !== null ? live.board : ''
     }
+    // Settled for the whole match: the block callbacks below close over it.
+    const pin = boardIndexOf(boardSelect.value || null)
+    // A room that reached us through the lobby list is listed by definition —
+    // one joiner's leftover Private pick must not make them the only player
+    // whose beacon goes quiet.
+    const listed = occupied || visibilityInput.value !== 'private'
     // The seat decision has to happen *before* the game is built, because a
     // queued player is constructed as a spectator and promoted later. Deciding
     // it afterwards would put a fifth tank on a four-seat board and then try to
@@ -1789,7 +1855,10 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
      * ever produces one.
      */
     const closeBlock = (height: number, hash: string): void => {
-      setLayout(layoutForBlock(hash))
+      // A pinned room plays its board every round; `setLayout` early-returns
+      // on the repeat and `resetCover` in `beginRound` still restores the
+      // barrels — the same path two chain rounds landing on one board take.
+      setLayout(pin ?? layoutForBlock(hash))
       // Every local player banks their own round; only player one's podium is
       // shown, because there is one screen.
       let shown: ReturnType<Game['endRound']> | null = null
@@ -1810,7 +1879,7 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     clock.onBlock((tip, previous) => {
       if (!previous) {
         // First tip of the session — this is the round we joined, not a new one.
-        setLayout(layoutForBlock(tip.hash))
+        setLayout(pin ?? layoutForBlock(tip.hash))
         for (const p of players) p.game.beginRound(tip.height, tip.hash)
         return
       }
@@ -1925,12 +1994,18 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
 
     const url = new URL(location.href)
     url.searchParams.set('room', room)
-    // The invite link carries the rules. Copy-link copies `location.href`
-    // verbatim, so a friend handed a CTF room lands in CTF even before the
-    // first beacon reaches their relay. Deathmatch is the absent value, same
-    // as on the beacon.
+    // The invite link carries the whole game. Copy-link copies `location.href`
+    // verbatim, so a friend handed a CTF room lands in CTF on the right board
+    // even before the first beacon reaches their relay — and a private room's
+    // link keeps saying private, or the friend's own beacon would list it.
+    // The defaults (dm, chain, public) are the absent values, same as on the
+    // beacon.
     if (mode !== 'dm') url.searchParams.set('mode', mode)
     else url.searchParams.delete('mode')
+    if (pin !== null) url.searchParams.set('board', boardSlug(arena.LAYOUTS[pin].name))
+    else url.searchParams.delete('board')
+    if (!listed) url.searchParams.set('private', '1')
+    else url.searchParams.delete('private')
     history.replaceState(null, '', url)
 
     // The lobby's own relay pool and its poll are for the lobby. Leaving them
@@ -1940,7 +2015,7 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     watchLobby(false)
     lobbyNet?.close()
     lobbyNet = null
-    startBeacon(game, clock, role)
+    startBeacon(game, clock, role, pin !== null ? boardSlug(arena.LAYOUTS[pin].name) : undefined, listed)
 
     lobby.hidden = true
     hud.hidden = false

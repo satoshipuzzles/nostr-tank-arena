@@ -158,6 +158,16 @@
           netcode, every round is a Bitcoin block.
         </p>
 
+        <!-- Creating a game, as one declared act. Deathmatch is the ambient
+             game — the standing rooms under Live games are always a click away
+             — so everything that *shapes* a room lives here: the mode, the
+             board, the practice tanks, and whether the room is listed at all.
+             Open by default: a collapsed panel is where settings go to be
+             forgotten, and the first player in a room is setting rules for
+             everyone who follows. -->
+        <details class="create-game" id="create" open>
+          <summary>Create a game</summary>
+
         <!-- Mode first, because the mode is the game. The old lobby asked for a
              room name and hid everything this thing had grown behind a Play
              button; a hub says what you can play before it asks who you are.
@@ -189,9 +199,18 @@
           <div class="seg" id="side" role="group" aria-label="Side"></div>
         </div>
 
-        <div class="fields">
-          <label>Callsign<input id="name" maxlength="16" placeholder="tank" autocomplete="off" /></label>
-          <label>Room<input id="room" maxlength="24" placeholder="lobby" autocomplete="off" /></label>
+        <!-- The board this room plays on. The chain is the default and the
+             norm — a new board every block, every client agreeing without
+             being told — but a created game can pin one. The pin rides the
+             beacon and the invite link, exactly like the mode. Options are
+             built from LAYOUTS in src/arena.ts so this list cannot drift from
+             the boards the game actually ships. -->
+        <div class="seg-row" id="row-board">
+          <span class="seg-label">Board</span>
+          <!-- `board-pick`, not `board`: that id is the leaderboard modal, and
+               a second element wearing it inherits the modal's fullscreen
+               fixed positioning and eats every click on the page. -->
+          <select id="board-pick" aria-label="Board"></select>
         </div>
 
         <!-- How many practice tanks to open with. They only appear while the
@@ -202,6 +221,24 @@
         <div class="seg-row" id="row-bots">
           <span class="seg-label">Bots</span>
           <div class="seg" id="bots" role="group" aria-label="Practice tanks"></div>
+        </div>
+
+        <!-- Listed or invite-only. There is no server to hide a room behind:
+             "private" simply means the room never announces itself to the
+             lobby, and the invite link — the room name is already the secret —
+             is the only door. Solo practice is a private game nobody was sent. -->
+        <div class="seg-row" id="row-visibility">
+          <span class="seg-label">Listing</span>
+          <div class="seg" id="visibility" role="group" aria-label="Listing">
+            <button type="button" data-value="public">Public — on the live board</button>
+            <button type="button" data-value="private">Private — invite link only</button>
+          </div>
+        </div>
+        </details>
+
+        <div class="fields">
+          <label>Callsign<input id="name" maxlength="16" placeholder="tank" autocomplete="off" /></label>
+          <label>Room<input id="room" maxlength="24" placeholder="lobby" autocomplete="off" /></label>
         </div>
 
         <div class="seg-row" id="row-players">

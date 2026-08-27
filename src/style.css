@@ -1115,6 +1115,30 @@ body.emp #hud::before {
   color: #16120a;
   border-color: var(--accent);
 }
+/* Create-a-game: everything that shapes a room, as one declared act. Open by
+   default — the first player in a room is setting rules for everyone after. */
+.create-game {
+  margin: 0 0 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+.create-game > summary { font-size: 13px; margin-bottom: 12px; }
+.create-game .modes { margin-bottom: 12px; }
+/* The board picker, dressed like the skin rack: same catalog-outgrew-buttons
+   shape, same clothes. */
+#board-pick {
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: #0d1119;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  flex: 1;
+  min-width: 0;
+}
+
 .advanced { margin: 18px 0 0; }
 .advanced #pads { margin: 10px 0 0; font-size: 13px; color: var(--dim); }
 .advanced textarea { margin-top: 14px; }
@@ -1299,10 +1323,8 @@ body.emp #hud::before {
     grid-template-areas:
       "brand    brand"
       "tag      tag"
-      "modes    modes"
-      "side     side"
+      "create   create"
       "fields   garage"
-      "bots     garage"
       "players  garage"
       "loadout  loadout"
       "steering sound"
@@ -1314,10 +1336,8 @@ body.emp #hud::before {
   }
   .lobby-card > .brand { grid-area: brand; }
   .lobby-card > .tag { grid-area: tag; }
-  .lobby-card > #modes { grid-area: modes; }
-  .lobby-card > #row-side { grid-area: side; }
+  .lobby-card > #create { grid-area: create; }
   .lobby-card > .fields { grid-area: fields; }
-  .lobby-card > #row-bots { grid-area: bots; }
   .lobby-card > #row-players { grid-area: players; }
   .lobby-card > #loadout { grid-area: loadout; }
   /*

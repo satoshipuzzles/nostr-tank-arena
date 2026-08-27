@@ -111,6 +111,11 @@ export interface PresencePayload {
   layout?: string
   /** The room's rules. Omitted for deathmatch, so old beacons parse the same. */
   mode?: RoomMode
+  /**
+   * A pinned board, as a name slug (`the-bluff`). Omitted for a room that
+   * follows the chain, which is every room that existed before this field.
+   */
+  board?: string
   /** Unix seconds, by the publisher's clock. Only used to age out ghosts. */
   at: number
 }
@@ -135,6 +140,8 @@ export interface LiveRoom {
   layout?: string
   /** What the room is playing, per its own occupants. Absent beacons mean dm. */
   mode: RoomMode
+  /** The board the room is pinned to, when it is not following the chain. */
+  board?: string
   /** Newest beacon in the room, so the list can sort by liveliness. */
   freshest: number
   /**
@@ -155,6 +162,8 @@ export async function publishPresence(
   block?: number,
   layout?: string,
   mode?: RoomMode,
+  board?: string,
+  listed = true,
 ): Promise<void> {
   const at = Math.floor(Date.now() / 1000)
   const payload: PresencePayload = {
@@ -168,13 +177,20 @@ export async function publishPresence(
     // Deathmatch is the absent value, deliberately: a beacon written before
     // modes were on the wire must mean the same thing as one written after.
     ...(mode && mode !== 'dm' ? { mode } : {}),
+    // Same shape for the board: following the chain is the absent value.
+    ...(board ? { board } : {}),
   }
   const signed = await identity.signAsSelf({
     kind: KIND_PRESENCE,
     created_at: at,
     tags: [
       ['d', PRESENCE_D],
-      ['t', PRESENCE_TAG],
+      // A private room keeps its beacon off the lobby index. The room tag
+      // stays: presence still replaces per-player and expires per NIP-40, the
+      // room just never volunteers itself to `fetchLiveRooms`. There is no
+      // server to hide behind — the room name is the secret, and this is the
+      // one place it would otherwise be said out loud.
+      ...(listed ? [['t', PRESENCE_TAG]] : []),
       ['t', roomTag(room)],
       // A fixed offset from our own `created_at`, never a wall-clock deadline:
       // the relay judges this against its clock and ours may be wrong.
@@ -213,7 +229,7 @@ export function groupRooms(events: Event[], nowSeconds = Math.floor(Date.now() /
   /** room -> pubkey -> their newest beacon. */
   const rooms = new Map<
     string,
-    Map<string, Occupant & { block?: number; layout?: string; mode?: RoomMode }>
+    Map<string, Occupant & { block?: number; layout?: string; mode?: RoomMode; board?: string }>
   >()
   const cutoff = nowSeconds - PRESENCE_TTL_S * 3
   for (const e of events) {
@@ -239,6 +255,7 @@ export function groupRooms(events: Event[], nowSeconds = Math.floor(Date.now() /
       block: typeof p.block === 'number' ? Math.floor(p.block) : undefined,
       layout: typeof p.layout === 'string' ? p.layout.slice(0, 32) : undefined,
       mode: asRoomMode(p.mode) ?? undefined,
+      board: typeof p.board === 'string' ? p.board.slice(0, 32) : undefined,
     })
   }
 
@@ -252,13 +269,17 @@ export function groupRooms(events: Event[], nowSeconds = Math.floor(Date.now() /
     // player who joined thirty seconds ago knows the current round and one who
     // has been sitting in a stale tab does not.
     const newest = all.reduce((best, o) => (o.at > best.at ? o : best), all[0])
-    // The mode comes from the newest beacon that *declares* one, not the newest
-    // outright: a pre-mode client sitting in a CTF room says nothing about the
-    // rules, and its silence must not flicker the room back to deathmatch.
-    const spoke = all.filter((o) => o.mode).reduce<typeof newest | null>(
-      (best, o) => (!best || o.at > best.at ? o : best),
-      null,
-    )
+    // The mode and the pin come from the newest beacon that *declares* one,
+    // not the newest outright: a pre-mode client sitting in a CTF room says
+    // nothing about the rules, and its silence must not flicker the room back
+    // to deathmatch or unpin its board.
+    const declared = <K extends 'mode' | 'board'>(k: K) =>
+      all.filter((o) => o[k]).reduce<typeof newest | null>(
+        (best, o) => (!best || o.at > best.at ? o : best),
+        null,
+      )
+    const spoke = declared('mode')
+    const pinned = declared('board')
     out.push({
       room,
       players,
@@ -268,6 +289,7 @@ export function groupRooms(events: Event[], nowSeconds = Math.floor(Date.now() /
       block: newest?.block,
       layout: newest?.layout,
       mode: spoke?.mode ?? 'dm',
+      board: pinned?.board,
       freshest: newest?.at ?? 0,
     })
   }
