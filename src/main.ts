@@ -7,7 +7,7 @@ import { layoutForBlock, layoutName, setLayout } from './arena'
 import { Sfx } from './audio'
 import { BlockClock } from './blocks'
 import { BOT_COUNT, MAX_BOTS } from './bots'
-import { Game, NUKE_FLASH_MS, STRIKE_GAP, STRIKE_RADIUS, bombsFor, LOADOUT_TIERS, TIER_LABELS, DEFAULT_LOADOUT, parseLoadout, rewardsForTier } from './game'
+import { Game, KILLCAM_MS, NUKE_FLASH_MS, STRIKE_GAP, STRIKE_RADIUS, bombsFor, LOADOUT_TIERS, TIER_LABELS, DEFAULT_LOADOUT, parseLoadout, rewardsForTier } from './game'
 import type { Loadout } from './game'
 import { Input, PLAYER_TWO, SOLO, type Scheme } from './input'
 import { TouchSticks } from './touch'
@@ -2267,7 +2267,13 @@ function loop(now = performance.now()): void {
   // couch latency actually zero rather than one frame.
   for (const p of players) p.game.update(dt, p.input.read(p.game.tank))
   const local = new Set(players.map((p) => p.game.identity.sessionPubkey))
-  renderer.draw(players[0].game, local)
+  // The kill cam, if one is running. The game keeps stepping and keeps
+  // publishing underneath it — a client that stopped ticking for two and a half
+  // seconds would go silent on everybody else's board at the exact moment it is
+  // most interesting to them — and only the *drawing* comes from the tape.
+  const cam = killcamFrame(players[0].game)
+  if (cam) renderer.replay(players[0].game, cam.frame, cam.killer, cam.anchor)
+  else renderer.draw(players[0].game, local)
   // The cockpit is a tank's eye. While the chopper is up there is no tank to
   // sit in, and the view a gunship needs is the one that shows the whole board
   // anyway — so it switches, and switches back on landing. The player's choice
@@ -2510,6 +2516,10 @@ function paintDeath(game: Game): void {
         ? `on ${/^(8|11|18)/.test(String(d.streak)) ? 'an' : 'a'} ${d.streak} streak`
         : `${d.kills} kills this round`
   node.hidden = false
+  // Out of the middle while the replay is running: the centre of the screen is
+  // where the kill cam's subject is, and a card parked over it is a card that
+  // hides the thing it is describing.
+  node.classList.toggle('replaying', !!game.killcam)
   node.style.setProperty('--killer', String(d.hue))
   node.innerHTML =
     `<span class="death-title">${title}</span>` +
@@ -3067,6 +3077,58 @@ function drawCtf(game: Game): void {
 
   node.hidden = false
   node.innerHTML = `<span class="ctf-race">${race || '<span class="ctf-side">no sides yet</span>'}</span>${runs}`
+}
+
+/**
+ * Which recorded frame the kill cam should be showing, or null.
+ *
+ * Played back in real time from the tape's own timestamps rather than by frame
+ * index: the tape was sampled at twenty a second and this loop runs at whatever
+ * the device manages, so stepping an index per frame would play the replay at
+ * the *renderer's* speed — fast on a desktop, slow motion on a phone, and never
+ * the two and a half seconds it says it is.
+ *
+ * Ends by clearing the booking, so the next frame is the live board again.
+ */
+function killcamFrame(game: Game): {
+  frame: { tanks: { s: string; x: number; y: number; hull: number; gun: number; dead: boolean }[] }
+  killer: string
+  anchor: { from: { x: number; y: number }; to: { x: number; y: number } }
+} | null {
+  const cam = game.killcam
+  if (!cam || !cam.frames.length) return null
+  const elapsed = performance.now() - cam.from
+  if (elapsed > KILLCAM_MS || game.watching) {
+    game.killcam = null
+    return null
+  }
+  // The tape ends at the death, so the window is the last KILLCAM_MS of it and
+  // the playhead walks forward through that.
+  const frames = cam.frames
+  const last = frames[frames.length - 1]
+  const want = last.t - KILLCAM_MS + elapsed
+  let frame = frames[0]
+  for (const f of frames) if (f.t <= want) frame = f
+  // The camera comes from the frame of the *kill*, not from the frame being
+  // drawn: early frames may predate the killer appearing on this screen, and a
+  // camera placed per frame spends the first second of the replay looking at
+  // the board because its subject is not in the sample yet.
+  const killerAt = last.tanks.find((t) => t.s === cam.killer)
+  const victimAt = last.tanks.find((t) => t.s === game.identity.sessionPubkey)
+  if (!killerAt) {
+    // Nothing to sit behind. Better no replay than a camera pointed at the
+    // middle of the board pretending to be one.
+    game.killcam = null
+    return null
+  }
+  return {
+    frame,
+    killer: cam.killer,
+    anchor: {
+      from: { x: killerAt.x, y: killerAt.y },
+      to: victimAt ? { x: victimAt.x, y: victimAt.y } : { x: killerAt.x + 1, y: killerAt.y },
+    },
+  }
 }
 
 /**

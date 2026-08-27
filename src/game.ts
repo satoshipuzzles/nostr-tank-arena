@@ -469,6 +469,18 @@ const ARMAGEDDON_GAP_MS = 1_400
  * and this cannot: the two seconds are a dodge window, the five are a moment.
  */
 const NUKE_LEAD_MS = 5_000
+/**
+ * The kill cam's tape: how much board it keeps, and how often it samples.
+ *
+ * Three seconds at twenty a second is sixty frames of a handful of numbers
+ * each — small enough to keep for every round and long enough that the replay
+ * starts before the shot that killed you was fired.
+ */
+const RECORD_MS = 3_000
+const RECORD_STEP_MS = 50
+/** How long the replay runs for, which is the tape minus the lead-in. */
+export const KILLCAM_MS = 2_500
+
 /** How long the white-out and the cloud stay on screen after it lands. */
 export const NUKE_FLASH_MS = 2_600
 
@@ -3561,6 +3573,7 @@ export class Game {
     // And everybody else's juggernauts, for the same reason and in the same
     // place: continuous fire that lands before the shells do.
     this.takeSuitFire(now)
+    this.record(now)
     this.stepRewards(now)
     this.stepNuke(now)
     this.stepFlags(now)
@@ -3743,6 +3756,71 @@ export class Game {
   }
 
   /**
+   * The last few seconds of the board, for the kill cam.
+   *
+   * A **local recorder**, and that choice is the whole design. There is no
+   * server here: the killer's true movement exists only on their machine, and
+   * a replay assembled from the position ticks that happened to arrive is a
+   * plausible animation of something that did not happen, presented as
+   * evidence. Publishing a few seconds of state on every death is accurate and
+   * costs new traffic at the busiest moment of a round, on a game that has been
+   * asked to budget its relay use.
+   *
+   * So this replays *what this screen showed*. It is honest by construction —
+   * it makes no claim about the killer's view — it needs no wire at all, and it
+   * degrades exactly the way the rest of the client does: if their ticks were
+   * lossy, the replay is as lossy as the last three seconds looked.
+   *
+   * Twenty samples a second rather than one per frame: a kill cam is a camera
+   * move over a short window, and the interpolation between recorded frames is
+   * smoother than a phone's real frame times were.
+   */
+  private readonly tape: {
+    t: number
+    tanks: { s: string; x: number; y: number; hull: number; gun: number; dead: boolean }[]
+    shells: { x: number; y: number; elev: number }[]
+  }[] = []
+  private tapeAt = 0
+
+  /** The replay booked by the last death, or null. Read by main.ts. */
+  killcam: { from: number; killer: string; frames: typeof Game.prototype.tape } | null = null
+
+  private record(now: number): void {
+    if (now < this.tapeAt) return
+    this.tapeAt = now + RECORD_STEP_MS
+    const tanks = [
+      ...(this.watching
+        ? []
+        : [
+            {
+              s: this.identity.sessionPubkey,
+              x: this.tank.x,
+              y: this.tank.y,
+              hull: this.tank.hull,
+              gun: this.tank.gun,
+              dead: this.tank.dead,
+            },
+          ]),
+      ...[...this.peers.values()].map((p) => ({
+        s: p.session,
+        x: p.view.x,
+        y: p.view.y,
+        hull: p.view.hull,
+        gun: p.view.gun,
+        dead: p.view.dead,
+      })),
+    ]
+    this.tape.push({
+      t: now,
+      tanks,
+      shells: [...this.shells.values()].map((sh) => ({ x: sh.x, y: sh.y, elev: sh.elev ?? 0 })),
+    })
+    // The window, trimmed from the front. A tape that grew all round would be
+    // a memory leak with a camera attached.
+    while (this.tape.length && now - this.tape[0].t > RECORD_MS) this.tape.shift()
+  }
+
+  /**
    * The last death, for the card the HUD shows over the respawn.
    *
    * Puzz: *"When a player dies, show a replay recording from the view of the
@@ -3840,6 +3918,13 @@ export class Game {
       bot: fromBot,
       card: peer?.card ?? DEFAULT_CARD,
     }
+    // The kill cam. Only for a death somebody else caused — a self-destruct
+    // has no camera to sit behind, and watching your own mistake from your own
+    // seat is what the last three seconds already were.
+    this.killcam =
+      killer && !fromBot && this.tape.length > 4
+        ? { from: performance.now(), killer, frames: this.tape.slice() }
+        : null
     this.pushFeed(killerName ? `${killerName} killed you` : 'you self-destructed')
   }
 
@@ -3863,7 +3948,13 @@ export class Game {
     void this.broadcastSession()
   }
 
+  /** The replay is over: the tank is back and the board is live again. */
+  private endKillcam(): void {
+    this.killcam = null
+  }
+
   private respawn(): void {
+    this.endKillcam()
     const live = [...this.peers.values()].filter((p) => !p.view.dead)
     let best = SPAWNS[0]
     let bestScore = -Infinity
@@ -4174,6 +4265,10 @@ export class Game {
     this.nuke = null
     this.nukeFlashAt = 0
     this.nukeSeen.clear()
+    // A replay of the previous round's board, playing over this one's, would be
+    // a ghost nobody can shoot.
+    this.killcam = null
+    this.tape.length = 0
     // Nor does the suit. Fourteen seconds is a rung on a streak, and the
     // streak is reset above.
     this.suitUntil = 0
