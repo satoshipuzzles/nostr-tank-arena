@@ -172,14 +172,29 @@ try {
     g.tank.reloadAt = 0
     const held = { throttle: 0, steer: 0, aim: null, fire: true, reload: false }
     for (let i = 0; i < 40; i++) g.update(0.016, held)
-    const out = { shells: g.shells.size, ammo: g.tank.ammo }
+    // *Our* shells, not every shell on the board. This check used to count
+    // `g.shells.size`, and the practice tanks put their shots in the same map:
+    // a bot whose reload deadline elapsed inside the window — a few
+    // milliseconds normally, longer on a busy machine, which is why this
+    // correlated with load — read as "the reloading tank fired". Caught by
+    // asking who owned the shell: `{total: 1, mine: 0, bots: 1}`, with our own
+    // gun silent and the reload still live.
+    const shells = [...g.shells.values()].filter((s) => s.owner === g.identity.sessionPubkey)
+    const out = {
+      shells: shells.length,
+      ammo: g.tank.ammo,
+      // The premise, so this cannot pass by the reload quietly finishing and
+      // the tank legitimately having nothing to be gated on.
+      reloading: g.tank.reloadingUntil > performance.now(),
+      bots: g.shells.size - shells.length,
+    }
     g.tank.reloadingUntil = 0
     g.tank.ammo = 4
     return out
   })
   check(
     'a reloading tank cannot fire, and the count never goes negative',
-    gated.shells === 0 && gated.ammo === 0,
+    gated.reloading && gated.shells === 0 && gated.ammo >= 0,
     JSON.stringify(gated),
   )
 
@@ -424,6 +439,16 @@ try {
       g.strikes.clear()
       g.blasts.length = 0
       g.peers.clear()
+      // And the practice tanks, for both halves of this pair. They shoot at a
+      // parked tank, so on the positive control they can supply the damage the
+      // strike was supposed to — the check passes for the wrong reason — and on
+      // the caller's case below they take a hull point off a tank that its own
+      // bombs correctly spared, which is the "does not hurt the caller" failure
+      // that turned up about one run in three. The claim is about a strike, so
+      // nothing else on the board may be able to do the damage.
+      g.botsWanted = 0
+      g.bots = []
+      g.shells.clear()
       g.tank.dead = false
       g.tank.hp = 3
       g.buffs.shieldUntil = 0
@@ -462,6 +487,11 @@ try {
     const g = window.__game
     g.strikes.clear()
     g.blasts.length = 0
+    // Same reason as the control above: this window is six seconds long and a
+    // practice tank can put a shell into a parked target in that time.
+    g.botsWanted = 0
+    g.bots = []
+    g.shells.clear()
     g.tank.dead = false
     g.tank.hp = 3
     g.buffs.shieldUntil = 0
