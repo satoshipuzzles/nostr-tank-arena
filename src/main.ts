@@ -865,6 +865,19 @@ function rewardIcon(id: string, cls = 'ricon'): string {
   return `<svg class="${cls}" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">${paths}</svg>`
 }
 
+/**
+ * An icon for whatever id the game handed the HUD — a reward, the repair, or
+ * a pickup kind. The banner and the feed carry ids from both tables, and the
+ * caller should not have to know which table an id came out of. Unknown ids
+ * draw nothing, which is the right failure for decoration.
+ */
+function anyIcon(id: string, cls = 'ricon'): string {
+  const reward = rewardIcon(id, cls)
+  if (reward) return reward
+  if (id in PICKUPS) return iconSvg(id as PickupKind, cls)
+  return ''
+}
+
 // ---------------------------------------------------------------- loadout
 
 /**
@@ -2670,8 +2683,11 @@ function drawHud(game: Game): void {
     : `${others} opp${others === 1 ? '' : 's'}`
   statusChip.classList.toggle('bad', Boolean(trouble) || Boolean(ghosted))
 
+  // The icon is resolved here from the entry's *id* — the feed model stays
+  // text-plus-id and `escapeHtml` keeps guarding the text, which carries
+  // player names off the wire.
   $('feed').innerHTML = game.feed
-    .map((f) => `<div>${escapeHtml(f.text)}</div>`)
+    .map((f) => `<div>${f.icon ? anyIcon(f.icon, 'ricon feed-ico') : ''}${escapeHtml(f.text)}</div>`)
     .join('')
 
   drawNotice(game, now)
@@ -2944,7 +2960,10 @@ function drawNotice(game: Game, now: number): void {
   // consecutive "TRIPLE KILL"s are two different punches.
   if (node.dataset.at !== String(notice.at)) {
     node.dataset.at = String(notice.at)
-    node.innerHTML = `<b>${escapeHtml(notice.text)}</b><span>${escapeHtml(notice.sub)}</span>`
+    // The icon sits above the headline, medal-style. Same rebuild-once rule
+    // as the text: an SVG replaced at HUD rate would restart its pop.
+    const icon = notice.icon ? anyIcon(notice.icon, 'notice-ico') : ''
+    node.innerHTML = `${icon}<b>${escapeHtml(notice.text)}</b><span>${escapeHtml(notice.sub)}</span>`
   }
 }
 
@@ -3179,6 +3198,35 @@ function drawStreak(game: Game): void {
  */
 let trayKey = ''
 
+/**
+ * What the tray held at the last rebuild, so a spend can flash the pill out.
+ *
+ * The rebuild replaces the spent button wholesale, and a node that is gone
+ * cannot animate its own exit — so the button is cloned where it stood and
+ * the clone burns off. Only a single disappearance gets the flash: a spend
+ * removes exactly one pill, while the round boundary sweeps the tray inside
+ * the podium and owes no fireworks. The spitfire's corner pad is the other
+ * excluded case — its spend already turns the whole tray into a question.
+ */
+let trayShown: number[] = []
+let trayRound = -1
+
+function flashSpent(node: HTMLElement, gone: number): void {
+  const btn = node.querySelector<HTMLButtonElement>(`button[data-at="${gone}"]`)
+  if (!btn) return
+  const r = btn.getBoundingClientRect()
+  const ghost = btn.cloneNode(true) as HTMLButtonElement
+  ghost.className = 'reward reward-ghost'
+  ghost.disabled = true
+  ghost.style.left = `${r.left}px`
+  ghost.style.top = `${r.top}px`
+  document.body.appendChild(ghost)
+  // animationend never fires under prefers-reduced-motion (the ghost is
+  // display:none there), so the timer is the cleanup that always runs.
+  ghost.addEventListener('animationend', () => ghost.remove())
+  setTimeout(() => ghost.remove(), 600)
+}
+
 function drawTray(game: Game): void {
   const node = $('tray')
   const held = game.earned
@@ -3186,6 +3234,15 @@ function drawTray(game: Game): void {
   const key = `${held.join(',')}|${usable}|${game.pendingStrafe}`
   if (key === trayKey) return
   trayKey = key
+  const gone = trayShown.filter((at) => !held.includes(at))
+  // The round check is what keeps the block boundary quiet: `beginRound`
+  // sweeps the tray, and a player holding exactly one reward at the buzzer
+  // should not see it "spent" by the clock. A spend never changes the round;
+  // the sweep always does.
+  const swept = game.round !== trayRound
+  trayRound = game.round
+  if (!swept && gone.length === 1 && !game.pendingStrafe) flashSpent(node, gone[0])
+  trayShown = [...held]
   // A spitfire waiting for its corner takes over the tray: the spend already
   // happened, and the only question left on screen is *which corner*. Four
   // buttons, one per corner, keys 1-4.
@@ -3218,14 +3275,18 @@ function drawTray(game: Game): void {
   // Dead or flying, the rewards are still yours and still shown — greyed,
   // because "where did my air strike go" is a worse question than "why is it
   // dim". `Game.spend` refuses in both states; this says so before the click.
+  // Icon and number, no word — the pill reads like a COD medal row. The name
+  // still travels with the button (tooltip and accessible name), it just
+  // stops taking HUD width: the strip taught the icon on the climb up, and
+  // the banner named it the moment it landed.
   node.innerHTML = held
     .map((at, i) => {
       const rung = game.ladder.find((r) => r.at === at)
       return (
         `<button type="button" class="reward" data-at="${at}"${usable ? '' : ' disabled'} ` +
+        `aria-label="${escapeHtml(rung?.name ?? String(at))}" ` +
         `title="${escapeHtml(rung?.detail ?? '')} — press ${i + 1}">` +
         `${rewardIcon(rung?.id ?? '')}` +
-        `<span class="reward-name">${escapeHtml(rung?.name ?? String(at))}</span>` +
         `<span class="reward-key">${i + 1}</span>` +
         `</button>`
       )
