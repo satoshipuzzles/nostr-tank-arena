@@ -38,6 +38,7 @@ import {
 } from './arena'
 import { CHOPPER_ALT, CHOPPER_SPREAD } from './chopper'
 import { SUIT_MUZZLE, SUIT_SPREAD } from './suit'
+import { SPITFIRE_ALT, SPITFIRE_SPREAD, spitfirePos } from './spitfire'
 import { FLAG_REACH, FLAG_TEAMS, baseFor } from './flags'
 import { CAPTURE_S, POINT_RADIUS } from './domination'
 
@@ -465,6 +466,97 @@ function makeChopper(hue: number): ChopperRig {
 
 /** Only the per-rig materials; the geometry above is shared and stays. */
 function disposeChopper(rig: ChopperRig): void {
+  rig.root.traverse((o) => {
+    const mesh = o as THREE.Mesh
+    if (!mesh.isMesh) return
+    const m = mesh.material
+    if (Array.isArray(m)) m.forEach((x) => x.dispose())
+    else m.dispose()
+  })
+}
+
+interface SpitfireRig {
+  root: THREE.Group
+  prop: THREE.Mesh
+  beam: THREE.Mesh
+  splash: THREE.Mesh
+  shadow: THREE.Mesh
+}
+
+// Sized against the tanks, like the chopper — the lesson about the flat
+// purple X applies twice over to a plane, which is mostly wing.
+const SPITFIRE_GEO = {
+  fuselage: new THREE.CapsuleGeometry(9, 40, 5, 10),
+  wing: new THREE.BoxGeometry(96, 4, 20),
+  tailplane: new THREE.BoxGeometry(36, 3, 12),
+  fin: new THREE.BoxGeometry(3, 16, 14),
+  prop: new THREE.CircleGeometry(16, 18),
+  beam: new THREE.CylinderGeometry(3, 9, 1, 8, 1, true),
+  splash: new THREE.RingGeometry(SPITFIRE_SPREAD - 9, SPITFIRE_SPREAD, 30),
+  shadow: new THREE.CircleGeometry(26, 20),
+}
+
+function makeSpitfire(hue: number): SpitfireRig {
+  const root = new THREE.Group()
+  const body = new THREE.Group()
+  const paint = new THREE.MeshStandardMaterial({
+    color: new THREE.Color().setHSL(hue / 360, 0.62, 0.54),
+    roughness: 0.55,
+    metalness: 0.05,
+  })
+  const dark = new THREE.MeshStandardMaterial({ color: 0x2b3242, roughness: 0.7 })
+
+  // The nose points down local -z, same convention as the chopper's cabin.
+  const fuselage = new THREE.Mesh(SPITFIRE_GEO.fuselage, paint)
+  fuselage.rotation.x = Math.PI / 2
+  fuselage.castShadow = true
+  const wing = new THREE.Mesh(SPITFIRE_GEO.wing, paint)
+  wing.position.set(0, -2, -6)
+  const tailplane = new THREE.Mesh(SPITFIRE_GEO.tailplane, paint)
+  tailplane.position.set(0, 2, 26)
+  const fin = new THREE.Mesh(SPITFIRE_GEO.fin, dark)
+  fin.position.set(0, 10, 27)
+  // The prop, as a translucent disc for the same frame-rate reason as the
+  // rotor: a spinning cross at four frames a second is a cross.
+  const prop = new THREE.Mesh(
+    SPITFIRE_GEO.prop,
+    new THREE.MeshBasicMaterial({
+      color: 0xcfd8e6, transparent: true, opacity: 0.22, depthWrite: false, side: THREE.DoubleSide,
+    }),
+  )
+  prop.position.set(0, 0, -32)
+  body.add(fuselage, wing, tailplane, fin, prop)
+  root.add(body)
+
+  const shadow = new THREE.Mesh(
+    SPITFIRE_GEO.shadow,
+    new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.22, depthWrite: false }),
+  )
+  shadow.rotation.x = -Math.PI / 2
+  root.add(shadow)
+
+  const beam = new THREE.Mesh(
+    SPITFIRE_GEO.beam,
+    new THREE.MeshBasicMaterial({
+      color: 0xffd68a, transparent: true, opacity: 0.7, depthWrite: false, side: THREE.DoubleSide,
+    }),
+  )
+  root.add(beam)
+
+  const splash = new THREE.Mesh(
+    SPITFIRE_GEO.splash,
+    new THREE.MeshBasicMaterial({
+      color: 0xff9d4d, transparent: true, opacity: 0.85, depthWrite: false, side: THREE.DoubleSide,
+    }),
+  )
+  splash.rotation.x = -Math.PI / 2
+  root.add(splash)
+
+  return { root, prop, beam, splash, shadow }
+}
+
+/** Same rule as `disposeChopper`: per-rig materials only, shared geometry stays. */
+function disposeSpitfire(rig: SpitfireRig): void {
   rig.root.traverse((o) => {
     const mesh = o as THREE.Mesh
     if (!mesh.isMesh) return
@@ -2907,6 +2999,7 @@ export class Renderer {
 
     this.syncCover(game, now)
     this.syncChoppers(game, now)
+    this.syncSpitfires(game, now)
     this.syncFlags(game, now)
     this.syncTerritory(game, now)
 
@@ -3500,6 +3593,67 @@ export class Renderer {
     }
   }
 
+  private spitfires = new Map<string, SpitfireRig>()
+
+  /**
+   * The strafing passes. Same shape as `syncChoppers` — per-pass rig, built
+   * on demand, disposed the frame the pass is over — but the position is not
+   * read off anybody's tick: `spitfirePos(corner, t)` is the same pure
+   * function the sim damages with, so the plane on screen *is* the gun.
+   */
+  private syncSpitfires(game: Game, now: number): void {
+    const live = new Map<string, { x: number; y: number; angle: number; hue: number }>()
+    for (const [id, s] of game.strafes) {
+      const t = now - s.t0
+      if (t < 0) continue
+      const pos = spitfirePos(s.corner, t)
+      if (pos.done) continue
+      const mine = s.owner === game.identity.sessionPubkey
+      const hue = mine ? game.displayColor : game.peers.get(s.owner)?.displayColor ?? 20
+      live.set(id, { x: pos.x, y: pos.y, angle: pos.angle, hue })
+    }
+
+    for (const [key, rig] of this.spitfires) {
+      if (live.has(key)) continue
+      this.scene.remove(rig.root)
+      disposeSpitfire(rig)
+      this.spitfires.delete(key)
+    }
+
+    for (const [key, p] of live) {
+      let rig = this.spitfires.get(key)
+      if (!rig) {
+        rig = makeSpitfire(p.hue)
+        this.scene.add(rig.root)
+        this.spitfires.set(key, rig)
+      }
+      rig.root.position.set(p.x, SPITFIRE_ALT, p.y)
+      // Local -z is the nose; point it along the flight line.
+      rig.root.rotation.y = -p.angle - Math.PI / 2
+      rig.prop.rotation.z = (now / 18) % (Math.PI * 2)
+
+      // Altitude cues, straight down: the footprint ring is the half a tank
+      // underneath actually needs to read.
+      rig.shadow.position.set(0, GROUND_Y + DECAL_LIFT - SPITFIRE_ALT, 0)
+      rig.splash.position.set(0, GROUND_Y + DECAL_LIFT - SPITFIRE_ALT, 0)
+      rig.splash.scale.setScalar(1 + Math.sin(now / 70) * 0.06)
+
+      // The guns, as one cone from the nose to the ground beneath — the
+      // chopper's beam trick, angled with the dive.
+      const dir = new THREE.Vector3(0, -SPITFIRE_ALT + GROUND_Y, 0)
+      const len = dir.length()
+      rig.beam.position.set(0, (-SPITFIRE_ALT + GROUND_Y) / 2, 0)
+      rig.beam.quaternion.setFromUnitVectors(UP, dir.normalize())
+      rig.beam.scale.set(1, len, 1)
+      const mat = rig.beam.material as THREE.MeshBasicMaterial
+      mat.opacity = 0.3 + Math.abs(Math.sin(now / 34)) * 0.38
+
+      if (Math.random() < 0.6) {
+        this.confetti.burst(p.x, p.y, 2, 30, { speed: 110, up: 60, y: 8, size: 0.5, life: 0.26 })
+      }
+    }
+  }
+
   /**
    * Paint one piece of cover at a damage tier.
    *
@@ -3597,6 +3751,15 @@ export class Renderer {
    */
   chopperRigAt(owner: string): { root: THREE.Object3D } | null {
     return this.choppers.get(owner) ?? null
+  }
+
+  /** The in-flight spitfire rigs, for the suites — id → world position. */
+  spitfireRigs(): { id: string; x: number; y: number }[] {
+    return [...this.spitfires].map(([id, rig]) => ({
+      id,
+      x: rig.root.position.x,
+      y: rig.root.position.z,
+    }))
   }
 
   /** Whether our own tank is being drawn at all. Also for the suites. */

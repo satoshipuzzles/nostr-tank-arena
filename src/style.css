@@ -756,6 +756,10 @@ body.emp #hud::before {
    player with than "why is that dim". */
 .reward:disabled { opacity: 0.45; cursor: default; }
 .reward svg { width: 15px; height: 15px; fill: currentColor; flex: none; }
+/* The spitfire's second decision: the tray becomes a four-corner pad. Green
+   rather than the reward gold, so it reads as a question, not another pill. */
+.reward.corner { background: #8ce8a6; border-color: #8ce8a6; }
+.reward.corner .corner-arrow { font-size: 15px; line-height: 1; }
 /* Pills pop on arrival. The tray only rebuilds on a state change (see
    `trayKey`), so the animation plays on earn/spend rather than every frame. */
 #tray .reward { animation: reward-pop 0.22s cubic-bezier(0.2, 1.6, 0.4, 1); }
