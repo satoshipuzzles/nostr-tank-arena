@@ -531,6 +531,29 @@ for (let i = 1; i < TEAM_NAMES.length; i++) {
   $('side').appendChild(b)
 }
 
+/**
+ * One icon per mode, in the house icon style — flat single-colour silhouettes
+ * on a 24×24 grid, chunky enough to read at 20px, two-tone only through
+ * `fill-opacity`. Same style as `REWARD_PATHS`; anything new (seats, relays,
+ * pickup chips) should match these two tables rather than invent a third look.
+ */
+const MODE_PATHS: Record<Mode, string> = {
+  // A kill burst: deathmatch is everyone shooting everyone.
+  dm: '<path d="M12 1l2.3 6.4 6.7-1.9-4.5 5.5 4.5 5.5-6.7-1.9L12 21l-2.3-6.4-6.7 1.9 4.5-5.5-4.5-5.5 6.7 1.9Z"/>',
+  // Two banners, one faded: two sides of the same fight.
+  tdm: '<path d="M3 3h8v12l-4 3-4-3Z"/><path d="M13 6h8v12l-4 3-4-3Z" fill-opacity="0.5"/>',
+  // The flag itself.
+  ctf: '<path d="M6 2h2.5v20H6Z"/><path d="M8.5 4h11l-3.6 4 3.6 4h-11Z"/>',
+  // Three points, one contested.
+  dom: '<circle cx="12" cy="6" r="3.6"/><circle cx="5.5" cy="17.5" r="3.6" fill-opacity="0.5"/><circle cx="18.5" cy="17.5" r="3.6"/>',
+}
+for (const [id, path] of Object.entries(MODE_PATHS)) {
+  $(`mode-${id}`).insertAdjacentHTML(
+    'afterbegin',
+    `<svg class="mode-ico" viewBox="0 0 24 24" aria-hidden="true">${path}</svg>`,
+  )
+}
+
 function paintModes(): void {
   for (const id of ['dm', 'tdm', 'ctf', 'dom'] as const) {
     const on = id === mode
