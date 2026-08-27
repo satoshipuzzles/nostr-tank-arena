@@ -5,14 +5,9 @@
 // The behaviour is pure arithmetic against the arena, so most of this runs in
 // Node against the built module. What it has to establish is not "a bot exists"
 // — that is a `length` — but that a bot is an *opponent*: it moves, it closes
-// the distance, it leads a moving target, it misses sometimes, and it stops
-// existing the moment a real player is in the room.
-//
-// The last one is the load-bearing check and it is the one with teeth. Bots are
-// local: nobody else on the relay can see them. Two clients in the same room
-// each spawn their own, so a bot that outlives the arrival of a real player is
-// a permanent divergence between two screens — the local player is shooting at
-// something the other client will never render and will never agree died.
+// the distance, it leads a moving target, it misses sometimes, and it gives up
+// its seat one for one as real players arrive (that half lives in
+// test/bots-browser.mjs, where a running Game exists to count them).
 //
 // Every check here has a control. A bot that drives is only interesting against
 // one that was asked to drive nowhere; a lead is only a lead if it differs from

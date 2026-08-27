@@ -2487,16 +2487,23 @@ export class Game {
   /**
    * Spawn, step and retire the practice opponents.
    *
-   * The retire branch is the load-bearing one. Bots are local: nobody else can
-   * see them, so the instant a real player's tick arrives the two clients are
-   * looking at different arenas, and the only honest fix is for the bots to
-   * leave. Checked against peers that are *not* bots, because the bots are
-   * themselves in `peers` by the time this runs a second time.
+   * The retire branch is the load-bearing one, and the rule is Puzz's: "players
+   * can take a seat and replace the bots 1 for 1". A human's tick used to stand
+   * every bot down at once; now each human displaces exactly one, so a five-bot
+   * room with two people in it runs four bots and never empties out.
+   *
+   * The honest cost, chosen deliberately: bots are local and publish nothing,
+   * so with two humans in a room each is fighting bots the other cannot see.
+   * That was already true of a spectator watching a solo player shell "nobody",
+   * and the trade — a room that always feels populated, for a divergence that
+   * only shows from someone else's screen — is the one the issue asked for.
+   * Checked against peers that are *not* bots, because the bots are themselves
+   * in `peers` by the time this runs a second time.
    */
   private syncBots(dt: number, now: number): void {
     const humans = [...this.peers.keys()].filter((k) => !this.isBot(k))
     const asked = Math.max(0, Math.min(MAX_BOTS, Math.floor(this.botsWanted)))
-    const wanted = humans.length === 0 && !this.watching ? asked : 0
+    const wanted = this.watching ? 0 : Math.max(0, asked - humans.length)
 
     if (this.bots.length > wanted) {
       // Retire from the end rather than clearing the lot. Dropping one bot used
@@ -2504,8 +2511,17 @@ export class Game {
       // — and it threw away the state of tanks the player was mid-fight with.
       const going = this.bots.splice(wanted)
       for (const bot of going) this.peers.delete(bot.session)
-      if (wanted === 0 && humans.length > 0) this.pushFeed('a real player joined — bots stood down')
+      // Announced only when an *arrival* caused it — turning the stepper down
+      // also lands here, and narrating that as a seat change would be a lie.
+      if (humans.length > this.lastHumans) {
+        this.pushFeed(
+          going.length === 1
+            ? `${going[0].name} stood down — a real player has the seat`
+            : 'bots stood down — real players have the seats',
+        )
+      }
     }
+    this.lastHumans = humans.length
     while (this.bots.length < wanted) this.bots.push(makeBot(this.bots.length, now))
     if (!this.bots.length) return
 
@@ -2574,6 +2590,8 @@ export class Game {
   }
 
   private lastTankAt = { x: 0, y: 0 }
+  /** Humans seen last frame, so a retire can tell an arrival from the stepper. */
+  private lastHumans = 0
 
   /** A bot pulls its trigger. Same shell everybody else fires, different owner. */
   private fireBot(bot: Bot, angle: number): void {
