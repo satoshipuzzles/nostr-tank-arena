@@ -208,17 +208,19 @@
           </div>
         </div>
 
-        <!-- The streak loadout. Repair at 3, juggernaut at 20 and carpet at 25
-             are house rules; the four rungs between are yours to arrange.
-             Rows are built from `REWARDS` x `LOADOUT_TIERS` in src/game.ts so
-             this list and the ladder `onOwnKill` awards from cannot drift
-             apart — same reason the skin picker is built from `SKINS`. -->
+        <!-- The streak loadout. Repair at 3 is the one house rule; the four
+             tiers above it are yours, and each has its own pool of five that
+             gets bigger as you climb. Rows are built from `rewardsForTier` and
+             `LOADOUT_TIERS` in src/game.ts so this list and the ladder
+             `onOwnKill` awards from cannot drift apart — same reason the skin
+             picker is built from `SKINS`. -->
         <div class="loadout" id="loadout">
           <span class="seg-label">Streaks</span>
           <div class="loadout-rows" id="loadout-rows"></div>
           <p class="fine">
-            Repair at 3, juggernaut at 20, carpet at 25 — house rules. The four
-            rungs between are yours. Saved on this device.
+            Hull repair at 3 is on the house. Every tier above it has its own
+            five, and they get bigger the higher you climb — pick one each.
+            Saved on this device.
           </p>
         </div>
 

@@ -485,31 +485,78 @@ body.hud-compact #ctf {
 }
 
 /*
- * The streak loadout: four rungs, five rewards, arranged in the lobby.
+ * The streak loadout: four tiers, five rewards each, arranged in the lobby.
  *
- * Reads as a compact table — tier number on the left, one segmented row of
- * rewards beside it — because five names four times is where a control stops
- * being a row of chips and starts being a menu. The buttons stay `.seg`
- * buttons so aria-pressed styling and touch targets come for free.
+ * Reads as a rack of tiers — a coloured tier chip on the left, five reward
+ * cards beside it — because Puzz's note was "look like a video game not a
+ * boring text file" and a 4x5 grid of bare words is the text file. Each row
+ * carries its tier's hue in `--tier`, set inline from `TIER_LABELS`, so the
+ * skirmish row is warm and the apex row is red without four copies of this
+ * block. The buttons stay `.seg` buttons: aria-pressed styling and touch
+ * targets come for free, and the icon sits above the name so a row can be read
+ * at a glance rather than word by word.
  */
 .loadout { display: grid; gap: 6px; margin: 6px 0 2px; }
-.loadout-rows { display: grid; gap: 4px; }
-.loadout-row { display: grid; grid-template-columns: 44px 1fr; align-items: center; gap: 8px; }
+.loadout-rows { display: grid; gap: 6px; }
+.loadout-row {
+  display: grid;
+  grid-template-columns: 62px 1fr;
+  align-items: stretch;
+  gap: 8px;
+}
 .loadout-tier {
-  font-size: 11px;
-  color: var(--dim);
-  text-align: right;
-  font-variant-numeric: tabular-nums;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 1px;
+  padding: 4px 2px;
+  border-radius: 8px;
+  font-size: 9px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: hsl(var(--tier) 80% 78%);
+  background: hsl(var(--tier) 70% 50% / 0.14);
+  border: 1px solid hsl(var(--tier) 70% 55% / 0.35);
   white-space: nowrap;
 }
+.loadout-tier b {
+  font-size: 17px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  color: hsl(var(--tier) 85% 72%);
+}
 .loadout-row .seg { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; }
-.loadout-row .seg button { padding: 7px 4px; font-size: 11px; white-space: nowrap; }
+.loadout-row .seg button {
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: 3px;
+  padding: 6px 3px;
+  font-size: 10px;
+  line-height: 1.15;
+  white-space: normal;
+  text-align: center;
+  min-height: 46px;
+}
+.loadout-row .seg button .ricon { width: 16px; height: 16px; opacity: 0.85; }
+.loadout-row .seg button[aria-pressed='true'] {
+  background: hsl(var(--tier) 70% 50% / 0.28);
+  border-color: hsl(var(--tier) 75% 60% / 0.7);
+  box-shadow: 0 0 10px hsl(var(--tier) 80% 55% / 0.35);
+}
+.loadout-row .seg button[aria-pressed='true'] .ricon { opacity: 1; }
 .loadout > .fine { margin: 2px 0 0; }
-/* Five names in one row needs ~460px; under that the tier moves on top and
-   the rewards wrap to a 3-2 grid instead of clipping "EMP" off the edge. */
+/* Five reward cards in one row needs ~460px; under that the tier chip goes on
+   top as a full-width bar and the rewards wrap to a 3-2 grid instead of
+   clipping "carpet bombing" off the edge. */
 @media (max-width: 560px) {
-  .loadout-row { grid-template-columns: 1fr; gap: 3px; }
-  .loadout-tier { text-align: left; }
+  .loadout-row { grid-template-columns: 1fr; gap: 4px; }
+  .loadout-tier {
+    grid-auto-flow: column;
+    justify-content: start;
+    gap: 6px;
+    padding: 3px 8px;
+  }
   .loadout-row .seg { grid-template-columns: repeat(3, 1fr); }
 }
 

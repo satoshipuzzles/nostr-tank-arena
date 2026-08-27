@@ -310,6 +310,32 @@ export interface StrikePayload {
 }
 
 /**
+ * A bomb run *down* the board, riding the strike kind like the EMP does.
+ *
+ * Thermite and the firestorm walk a column instead of a row, and the obvious
+ * way to say so — an `axis` field next to `y` — is the wrong one. A client that
+ * predates the field would read the column coordinate as a row, clamp it into
+ * the board, and drop bombs on a lane nobody else can see: self-consistent on
+ * that screen, different from every other screen, which is the worst shape a
+ * divergence can take.
+ *
+ * So the lane coordinate is `x` and there is **no `y` at all**. `onStrike` on
+ * an older client validates `y` before anything else and drops the payload as
+ * malformed, which is the honest outcome — a reward that does nothing on one
+ * screen beats a reward that kills the wrong people on it.
+ */
+export interface LanePayload {
+  k: 'lane'
+  t0: number
+  /** The column the bombs walk down, in arena pixels. */
+  x: number
+  /** 1 for top-to-bottom, -1 for bottom-to-top. */
+  dir: 1 | -1
+  n: number
+  d: number
+}
+
+/**
  * An EMP, riding the strike kind rather than earning a kind of its own.
  *
  * One publish, no position, no damage: every receiver that is not on the

@@ -341,33 +341,36 @@ try {
   })
   const rung = ladder.rungs
   const fullHull = ladder.maxHp
+  // The default loadout, which is now one reward from each tier's pool of five
+  // — strike at 5, chopper at 10, juggernaut at 15, carpet at 25. Seven and
+  // twenty stopped being rungs when the tiers were rebuilt around the pools;
+  // they are checked below as rungs that hand out nothing.
   check('3 in a row repairs the hull', rung[3].hp === fullHull, JSON.stringify(rung[3]))
   check('5 calls an air strike', rung[5].strikes === 1, JSON.stringify(rung[5]))
-  check('7 is recon: the sweep is running', rung[7].recon, JSON.stringify(rung[7]))
   check('10 boards the chopper', rung[10].chopper, JSON.stringify(rung[10]))
-  check('15 publishes an EMP, and hands its earner nothing', rung[15].emps === 1 && !rung[15].siege && !rung[15].rapid, JSON.stringify(rung[15]))
-  check('20 is the juggernaut: shielded and repaired', rung[20].shield && rung[20].hp === fullHull,
-    JSON.stringify(rung[20]))
+  check('15 is the juggernaut: shielded and repaired', rung[15].shield && rung[15].hp === fullHull,
+    JSON.stringify(rung[15]))
   check('25 calls a second, bigger strike', rung[25].strikes === 2, JSON.stringify(rung[25]))
   // The rungs between are not rungs. A ladder that fired a reward on every kill
   // would pass every check above and be a completely different game.
   check(
     'and nothing in between hands out a reward',
-    [4, 6, 9, 11, 14, 16, 19, 21, 24].every(
+    [4, 6, 7, 9, 11, 14, 16, 19, 20, 21, 24].every(
       (n) => rung[n].hp === 1 && rung[n].strikes === rung[n - 1].strikes,
     ),
-    [4, 6, 9].map((n) => `${n}:${rung[n].hp}`).join(' '),
+    [4, 6, 7, 20].map((n) => `${n}:${rung[n].hp}`).join(' '),
   )
 
   // --- the loadout ----------------------------------------------------------
   //
   // The ladder above was the *default* loadout, which is why every check
   // passed without arranging anything. Now rearrange it and prove the rungs
-  // follow: siege first, strike last — the two rewards the default leaves at
-  // home or at the front, deliberately crossed over.
+  // follow: recon, siege, hunter and armageddon, none of them in the default,
+  // one from each tier's pool. A cross-tier arrangement is not a rearrangement
+  // any more — it is refused, and test/tiers.mjs is where that is checked.
   const kitted = await page.evaluate(() => {
     const g = window.__game
-    g.setLoadout(['siege', 'emp', 'recon', 'strike'])
+    g.setLoadout(['recon', 'siege', 'hunter', 'armageddon'])
     const real = g.publishAsSession.bind(g)
     const sent = []
     g.publishAsSession = (kind, payload) => {
@@ -394,18 +397,22 @@ try {
       }
     }
     out.at5 = rungAt(5)
-    out.at7 = rungAt(7)
     out.at10 = rungAt(10)
     out.at15 = rungAt(15)
+    out.at25 = rungAt(25)
     out.ladder = g.ladder.map((r) => `${r.at}:${r.id}`).join(' ')
     g.publishAsSession = real
-    g.setLoadout(['strike', 'recon', 'chopper', 'emp'])
+    g.setLoadout(['strike', 'chopper', 'jugger', 'carpet'])
     g.streak = 0
     return out
   })
   check(
     'a rearranged loadout moves the rungs, not just the menu',
-    kitted.at5.siege && kitted.at7.emps === 1 && kitted.at10.recon && kitted.at15.strikes === 1,
+    kitted.at5.recon &&
+      kitted.at10.siege &&
+      kitted.at15.recon &&
+      kitted.at15.siege &&
+      kitted.at25.strikes === 3,
     kitted.ladder,
   )
 

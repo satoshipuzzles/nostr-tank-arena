@@ -6,7 +6,7 @@ import { layoutForBlock, layoutName, setLayout } from './arena'
 import { Sfx } from './audio'
 import { BlockClock } from './blocks'
 import { BOT_COUNT, MAX_BOTS } from './bots'
-import { Game, REWARDS, LOADOUT_TIERS, DEFAULT_LOADOUT, parseLoadout } from './game'
+import { Game, LOADOUT_TIERS, TIER_LABELS, DEFAULT_LOADOUT, parseLoadout, rewardsForTier } from './game'
 import type { Loadout } from './game'
 import { Input, PLAYER_TWO, SOLO, type Scheme } from './input'
 import { TouchSticks } from './touch'
@@ -689,8 +689,63 @@ const REWARD_PATHS: Record<string, string> = {
     '<path d="M13.5 2 6 13.5h4L8 22l9.5-12h-4Z"/>' +
     '<path d="M12 0a12 12 0 0 0 0 24" fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="3 5"/>' +
     '<path d="M12 0a12 12 0 0 1 0 24" fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="3 5"/>',
-  juggernaut:
+  jugger:
     '<path d="M12 2 3 6v6c0 5 3.8 9.2 9 10 5.2-.8 9-5 9-10V6Z"/>',
+  // --- tier 5 -------------------------------------------------------------
+  patch:
+    '<path d="M12 2 3 6v6c0 5 3.8 9.2 9 10 5.2-.8 9-5 9-10V6Z"/>' +
+    '<path d="M10.4 5.6h3.2v3.2h3.2v3.2h-3.2v3.2h-3.2v-3.2H7.2V8.8h3.2Z" fill="#0b0e13"/>',
+  cache:
+    '<path d="M3 8h18v12H3Z"/><path d="M6 4h12l2 3H4Z"/>' +
+    '<path d="M9 11h2v6H9Zm4 0h2v6h-2Z" fill="#0b0e13"/>',
+  buck:
+    '<circle cx="12" cy="20" r="2.4"/>' +
+    '<path d="M11 2h2l1.6 7h-5.2Z"/><path d="M3.5 6.5 5 5l4 5.6-2.2 1.6Z"/>' +
+    '<path d="M20.5 6.5 19 5l-4 5.6 2.2 1.6Z"/>',
+  // --- tier 10 ------------------------------------------------------------
+  blitz:
+    '<path d="M13.5 2 6 13.5h4L8 22l9.5-12h-4Z"/>' +
+    '<path d="M2 4h3l4 8-4 8H2l4-8Z" opacity="0.55"/>',
+  drone:
+    '<path d="M4 5h5v2H4Zm11 0h5v2h-5Z"/><path d="M6 7h1.5v3H6Zm10.5 0H18v3h-1.5Z"/>' +
+    '<path d="M8 10h8v8H8Z"/>' +
+    '<path d="M11.2 11.6h1.6v1.8h1.8v1.6h-1.8v1.8h-1.6v-1.8H9.4v-1.6h1.8Z" fill="#0b0e13"/>',
+  // --- tier 15 ------------------------------------------------------------
+  salvo:
+    '<path d="M2 4h4v4H2Zm6 0h4v4H8Zm6 0h4v4h-4Z"/>' +
+    '<path d="M2 13h4v4H2Zm6 0h4v4H8Zm6 0h4v4h-4Z"/>' +
+    '<path d="M20 3v6l3-3Zm0 9v6l3-3Z"/>',
+  hunter:
+    '<circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2.2"/>' +
+    '<path d="M12 0v5M12 19v5M0 12h5M19 12h5" stroke="currentColor" stroke-width="2.2"/>' +
+    '<path d="M12 8.5 14 12l-2 3.5L10 12Z"/>',
+  thermite:
+    '<path d="M9 1h2v5H9Zm4 0h2v5h-2Z"/>' +
+    '<path d="M12 7c3 2.4 4.5 4.6 4.5 7A4.5 4.5 0 0 1 12 18.5 4.5 4.5 0 0 1 7.5 14c0-2.4 1.5-4.6 4.5-7Z"/>' +
+    '<path d="M9 20h6v3H9Z" opacity="0.6"/>',
+  bulwark:
+    '<path d="M12 2 3 6v6c0 5 3.8 9.2 9 10 5.2-.8 9-5 9-10V6Z"/>' +
+    '<path d="M5.5 8h13v1.6h-13Zm0 3.4h13V13h-13Z" fill="#0b0e13"/>' +
+    '<path d="M11.2 6.4h1.6V8h-1.6Zm-3.6 3.4h1.6v1.6H7.6Zm7.2 0h1.6v1.6h-1.6Z" fill="#0b0e13"/>',
+  // --- tier 25 ------------------------------------------------------------
+  armageddon:
+    '<path d="M4 1h2v5H4Zm7 0h2v5h-2Zm7 0h2v5h-2Z"/>' +
+    '<path d="M2 8h20l-3 5H5Z"/>' +
+    '<path d="M12 15c2 1.8 3 3.4 3 5H9c0-1.6 1-3.2 3-5Z"/>' +
+    '<path d="M3 21h18v2H3Z" opacity="0.6"/>',
+  blackout:
+    '<path d="M2 4h20v13H2Z"/><path d="M9 19h6v2H9Z"/>' +
+    '<path d="M13.6 6 8 12.6h3.2L10 15.8 15.6 9.2h-3.2Z" fill="#0b0e13"/>',
+  ironclad:
+    '<path d="M12 2 3 6v6c0 5 3.8 9.2 9 10 5.2-.8 9-5 9-10V6Z"/>' +
+    '<path d="M12 4.6 5 7.6v4.4c0 3.7 2.9 7 7 7.7 4.1-.7 7-4 7-7.7V7.6Z" fill="#0b0e13"/>' +
+    '<path d="M12 6.4 6.6 8.6v3.4c0 2.9 2.3 5.5 5.4 6.1 3.1-.6 5.4-3.2 5.4-6.1V8.6Z"/>' +
+    '<circle cx="8.4" cy="9.6" r="0.9" fill="#0b0e13"/><circle cx="15.6" cy="9.6" r="0.9" fill="#0b0e13"/>' +
+    '<circle cx="8.4" cy="14.4" r="0.9" fill="#0b0e13"/><circle cx="15.6" cy="14.4" r="0.9" fill="#0b0e13"/>',
+  firestorm:
+    '<path d="M2 10h20v3H2Z"/>' +
+    '<path d="M10.5 2h3v20h-3Z" opacity="0.45"/>' +
+    '<path d="M12 6c2.6 2.2 4 4.2 4 6.4A4 4 0 0 1 12 16.4a4 4 0 0 1-4-4c0-2.2 1.4-4.2 4-6.4Z"/>',
   carpet:
     '<path d="M5 2h3v7H5Zm5.5 0h3v7h-3ZM16 2h3v7h-3ZM4 12h16l-8 10Z"/>',
 }
@@ -725,37 +780,57 @@ let loadout: Loadout = (() => {
 })()
 
 function paintLoadout(): void {
-  $('loadout-rows').innerHTML = LOADOUT_TIERS.map(
-    (tier, i) =>
-      `<div class="loadout-row"><span class="loadout-tier">at ${tier}</span>` +
+  $('loadout-rows').innerHTML = LOADOUT_TIERS.map((tier, i) => {
+    const label = TIER_LABELS[tier]
+    return (
+      `<div class="loadout-row" style="--tier: ${label.hue}">` +
+      `<span class="loadout-tier"><b>${tier}</b>${label.name}</span>` +
       `<div class="seg">` +
-      REWARDS.map(
-        (r) =>
-          `<button type="button" data-slot="${i}" data-reward="${r.id}" ` +
-          // The names are this repo's own constants, not input — and
-          // `escapeHtml` lives far below this line, where calling it during
-          // module init is a temporal-dead-zone crash that takes the whole
-          // lobby with it. Same trap `paintBotsButton` documents.
-          `aria-pressed="${loadout[i] === r.id}">${rewardIcon(r.id)}${r.name}</button>`,
-      ).join('') +
-      `</div></div>`,
-  ).join('')
+      rewardsForTier(tier)
+        .map(
+          (r) =>
+            `<button type="button" data-slot="${i}" data-reward="${r.id}" ` +
+            // The names, details and hues are this repo's own constants, not
+            // input — and `escapeHtml` lives far below this line, where calling
+            // it during module init is a temporal-dead-zone crash that takes
+            // the whole lobby with it. Same trap `paintBotsButton` documents.
+            `title="${r.detail}" aria-pressed="${loadout[i] === r.id}">` +
+            `${rewardIcon(r.id)}<span>${r.name}</span></button>`,
+        )
+        .join('') +
+      `</div></div>`
+    )
+  }).join('')
 }
 
 function setLoadoutSlot(slot: number, reward: string): void {
-  if (!REWARDS.some((r) => r.id === reward)) return
-  const id = reward as Loadout[number]
-  const had = loadout.indexOf(id)
-  // Taken by another rung: swap rather than refuse. Every click succeeds and
-  // the no-duplicates rule holds without a single error state.
-  if (had !== -1 && had !== slot) loadout[had] = loadout[slot]
-  loadout[slot] = id
+  const tier = LOADOUT_TIERS[slot]
+  // Per tier now, not one menu shared by four rungs: a reward belongs to
+  // exactly one tier, so a click can only ever set the slot it came from and
+  // the old swap-on-duplicate dance has nothing left to resolve. Pools being
+  // disjoint is what buys that — the check is here so a stale DOM node (a
+  // click landing on the previous paint) cannot write an id this rung does
+  // not offer.
+  if (tier === undefined) return
+  const def = rewardsForTier(tier).find((r) => r.id === reward)
+  if (!def) return
+  loadout[slot] = def.id
   store('tank.loadout', JSON.stringify(loadout))
   paintLoadout()
   if (running) for (const p of running.players) p.game.setLoadout(loadout)
 }
 
 paintLoadout()
+// The loadout table, exposed before a game exists. The picker is a *lobby*
+// control, so the suite that checks it — test/tiers.mjs — runs before anything
+// is on `window.__game`, and a stale loadout in storage is refused here rather
+// than in the game. A suite has to be able to ask the build it is looking at
+// rather than the table it was written against.
+;(window as unknown as { __loadout: unknown }).__loadout = {
+  parseLoadout,
+  LOADOUT_TIERS,
+  rewardsForTier,
+}
 $('loadout-rows').addEventListener('click', (e) => {
   const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-slot]')
   if (b) setLoadoutSlot(Number(b.dataset.slot), b.dataset.reward ?? '')
@@ -2652,6 +2727,20 @@ function drawSecondPlayer(p2: Player | null, now: number): void {
 }
 
 /**
+ * The buffs a kill streak grants, which no pickup does. See `drawBuffs`.
+ *
+ * `icon` is a reward id, so the chip on the HUD is the same picture as the
+ * card in the loadout picker and the pill in the tray — a player who spent
+ * "bulwark" should not have to work out which of the three timers on screen it
+ * turned into.
+ */
+const STREAK_BUFFS: { key: 'reconUntil' | 'bulwarkUntil' | 'regenUntil'; label: string; icon: string; hue: number }[] = [
+  { key: 'reconUntil', label: 'recon', icon: 'recon', hue: 155 },
+  { key: 'bulwarkUntil', label: 'bulwark', icon: 'bulwark', hue: 200 },
+  { key: 'regenUntil', label: 'drone', icon: 'drone', hue: 130 },
+]
+
+/**
  * Little timers for whatever is currently running on your tank.
  *
  * Driven off the pickup table rather than a hand-written list, so adding a
@@ -2671,12 +2760,17 @@ function drawBuffs(game: Game, now: number): void {
         `${escapeHtml(spec.label)} <b>${left.toFixed(1)}s</b></span>`,
     )
   }
-  // Recon is a streak reward rather than a pickup, so the loop above never
-  // sees it — but it is a running buff like any other and earns the same chip.
-  const reconLeft = (game.buffs.reconUntil - now) / 1000
-  if (reconLeft > 0) {
+  // Some buffs are streak rewards rather than pickups, so the loop above never
+  // sees them — but they are running buffs like any other and earn the same
+  // chip. A table rather than three copies of this block: the tier pools added
+  // two more of these in one change, and the reason recon needed its own case
+  // for so long is that there was nowhere to put the second one.
+  for (const spec of STREAK_BUFFS) {
+    const left = (game.buffs[spec.key] - now) / 1000
+    if (left <= 0) continue
     live.push(
-      `<span class="buff" style="--buff-hue:155">recon <b>${reconLeft.toFixed(1)}s</b></span>`,
+      `<span class="buff" style="--buff-hue:${spec.hue}">${rewardIcon(spec.icon, 'ricon pico')}` +
+        `${spec.label} <b>${left.toFixed(1)}s</b></span>`,
     )
   }
   // And the other side of that coin: an enemy's sweep has you lit through

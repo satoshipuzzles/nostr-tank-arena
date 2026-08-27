@@ -359,6 +359,18 @@ export interface Buffs {
   siegeUntil: number
   /** Recon sweep: enemies marked through cover. A streak reward, not a pad. */
   reconUntil: number
+  /**
+   * Bulwark: a shield that comes back.
+   *
+   * Not a shield of its own — `shieldUntil` stays the one thing the rest of the
+   * game asks about, so nothing that reads a shield needs to learn a second
+   * word for it. This is the *warranty* on that shield: while it runs, a shield
+   * knocked out by a hit re-arms a couple of seconds later instead of being
+   * gone for good. Every existing shield check keeps working unchanged.
+   */
+  bulwarkUntil: number
+  /** Repair drone: a hull point back every couple of seconds while it runs. */
+  regenUntil: number
 }
 
 export const noBuffs = (): Buffs => ({
@@ -368,6 +380,8 @@ export const noBuffs = (): Buffs => ({
   scatterUntil: 0,
   siegeUntil: 0,
   reconUntil: 0,
+  bulwarkUntil: 0,
+  regenUntil: 0,
 })
 
 /** Which timer each pickup runs. `repair` has none — it is instant. */

@@ -39,6 +39,18 @@ import {
 import { CHOPPER_ALT, CHOPPER_SPREAD } from './chopper'
 import { FLAG_REACH, FLAG_TEAMS, baseFor } from './flags'
 import { CAPTURE_S, POINT_RADIUS } from './domination'
+
+/**
+ * How many bomb-run warning stripes can be on the board at once.
+ *
+ * Four: armageddon is three runs and the firestorm is two, and a fourth leaves
+ * room for somebody else's strike arriving in the middle of yours. Past that
+ * the board is more stripe than felt anyway and a missing warning is the least
+ * of the player's problems.
+ */
+const MAX_LANES = 4
+/** How wide a warning stripe is, in arena units. The blast radius is 64. */
+const LANE_WIDTH = 128
 import type { CoverKind, Rect } from './arena'
 import type { Game, Peer } from './game'
 import { LOB_APEX, LOB_BLAST, MAX_HP, RELOAD, TANK_RADIUS, shellHeight } from './sim'
@@ -2051,8 +2063,16 @@ export class Renderer {
   private shellSiege = new THREE.MeshBasicMaterial({ color: 0xff5470 })
 
   private reloadBar: THREE.Mesh
-  /** The ground stripe warning that an air strike is walking down this row. */
-  private strikeLane: THREE.Mesh
+  /**
+   * The ground stripes warning that bomb runs are walking down these lanes.
+   *
+   * A pool rather than the single stripe this used to be. Salvo puts two runs
+   * on the board at once and armageddon three, and one shared stripe would
+   * warn about exactly one of them — the others would arrive with no tell at
+   * all, which turns the reward from "survivable if you move" into a random
+   * death, the precise thing the stripe exists to prevent.
+   */
+  private strikeLanes: THREE.Mesh[] = []
   private lastShellSeen = new Map<string, { x: number; y: number }>()
   private wasDead = new Map<string, boolean>()
   private lastHp = MAX_HP
@@ -2172,23 +2192,27 @@ export class Renderer {
     // like every other decal. The lift is not decoration: the felt is at
     // GROUND_Y and a decal placed at the same height z-fights, or worse, ends
     // up *under* it and is drawn every frame for nobody.
-    this.strikeLane = new THREE.Mesh(
-      // Exactly the board's width. The first version was ARENA_W + 200 so the
-      // ends would not stop short, and the overhang painted an orange smear on
-      // the sky either side of the fence — the stripe is a mark on the felt and
-      // it has no business outside it.
-      new THREE.PlaneGeometry(ARENA_W, 128),
-      new THREE.MeshBasicMaterial({
-        color: 0xff6a3d,
-        transparent: true,
-        opacity: 0,
-        depthWrite: false,
-        side: THREE.DoubleSide,
-      }),
-    )
-    this.strikeLane.rotation.x = -Math.PI / 2
-    this.strikeLane.visible = false
-    this.scene.add(this.strikeLane)
+    // A unit plane, scaled per frame: a run across the board is ARENA_W long, a
+    // run down it is ARENA_H, and one geometry stretched to fit costs nothing
+    // and cannot disagree with itself. The lift is not decoration: the felt is
+    // at GROUND_Y and a decal placed at the same height z-fights, or worse,
+    // ends up *under* it and is drawn every frame for nobody.
+    for (let i = 0; i < MAX_LANES; i++) {
+      const lane = new THREE.Mesh(
+        new THREE.PlaneGeometry(1, 1),
+        new THREE.MeshBasicMaterial({
+          color: 0xff6a3d,
+          transparent: true,
+          opacity: 0,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+        }),
+      )
+      lane.rotation.set(-Math.PI / 2, 0, 0)
+      lane.visible = false
+      this.strikeLanes.push(lane)
+      this.scene.add(lane)
+    }
     this.scene.add(this.lobRing)
     this.scene.add(this.lobShadow)
 
@@ -3683,27 +3707,31 @@ export class Renderer {
    * draw one explosion for both.
    */
   private strikes(game: Game, now: number): void {
-    let lane: { y: number; warn: number } | null = null
+    let n = 0
     for (const strike of game.strikes.values()) {
       // Fade the lane in over the run so it is loudest before the first bomb
       // and gone by the last, rather than sitting on the board afterwards.
       const done = strike.fired.size / strike.n
       if (done >= 1) continue
-      lane = { y: strike.y, warn: 1 - done * 0.8 }
-    }
-    if (lane) {
-      this.strikeLane.visible = true
-      this.strikeLane.position.set(ARENA_W / 2, GROUND_Y + DECAL_LIFT * 1.2, lane.y)
-      const mat = this.strikeLane.material as THREE.MeshBasicMaterial
+      const mesh = this.strikeLanes[n]
+      if (!mesh) break
+      n++
+      const vertical = strike.axis === 'v'
+      mesh.visible = true
+      mesh.rotation.z = vertical ? Math.PI / 2 : 0
+      mesh.scale.set(vertical ? ARENA_H : ARENA_W, LANE_WIDTH, 1)
+      const y = GROUND_Y + DECAL_LIFT * 1.2
+      if (vertical) mesh.position.set(strike.y, y, ARENA_H / 2)
+      else mesh.position.set(ARENA_W / 2, y, strike.y)
+      const mat = mesh.material as THREE.MeshBasicMaterial
       // Floor of 0.30 rather than 0.22, and a shallower pulse. The first
       // version bottomed out at 0.05 opacity, which on a bright green board is
       // nothing at all — a warning stripe that is invisible for half of every
       // pulse is not a warning, and the whole design of this reward is that it
       // is survivable if you can see it coming.
-      mat.opacity = lane.warn * (0.30 + 0.14 * Math.sin(now / 110))
-    } else {
-      this.strikeLane.visible = false
+      mat.opacity = (1 - done * 0.8) * (0.3 + 0.14 * Math.sin(now / 110))
     }
+    for (let i = n; i < this.strikeLanes.length; i++) this.strikeLanes[i].visible = false
 
     for (const blast of game.blasts) {
       this.confetti.burst(blast.x, blast.y, 26, 24, { speed: 300, up: 300, y: 14, size: 1.5, life: 0.9 })
