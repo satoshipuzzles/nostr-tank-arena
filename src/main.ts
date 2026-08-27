@@ -2625,6 +2625,7 @@ function drawHud(game: Game): void {
 
   drawRules(game)
   drawCtf(game)
+  drawTdm(game)
   drawClockAlarm()
 
   const others = game.peers.size
@@ -2933,6 +2934,68 @@ function drawCtf(game: Game): void {
 
   node.hidden = false
   node.innerHTML = `<span class="ctf-race">${race || '<span class="ctf-side">no sides yet</span>'}</span>${runs}`
+}
+
+/**
+ * The team score, where your eyes already are.
+ *
+ * Puzz reported team deathmatch as "not really working", and half of that is
+ * that it had no score you could see. The flag race has a strip, domination has
+ * one, and the mode whose entire content is *which side is ahead* had its tally
+ * hidden inside a panel you open between rounds. A scoreboard you have to go
+ * and look at is not a score, it is a receipt.
+ *
+ * So: every side with a person on it, your own lit, and the lead called out
+ * when it changes hands — that last part is the "score moment" the issue asks
+ * for, and it is the only thing on this strip that moves.
+ *
+ * Practice tanks are named but not scored (see `teamStandings`): they are local
+ * to whoever spawned them, so counting them puts a different number on every
+ * screen in the room.
+ */
+let lastLeader = 0
+function drawTdm(game: Game): void {
+  const node = $('tdm')
+  // Flags and points have their own strips and their own scores; two team
+  // scorelines stacked on one screen is a HUD arguing with itself.
+  const teams = game.flagsOn || game.pointsOn ? null : game.teamStandings()
+  if (!teams) {
+    node.hidden = true
+    lastLeader = 0
+    return
+  }
+  const top = teams[0]
+  const tied = teams.length > 1 && teams[1].kills === top.kills
+  const leader = tied ? 0 : top.team
+  if (leader !== lastLeader) {
+    // Only once the round has actually started scoring: "Red leads 0-0" at the
+    // whistle is noise, and it would fire on the first tick of every match.
+    if (top.kills > 0) {
+      const name = TEAM_NAMES[leader] ?? String(leader)
+      const behind = teams.find((t) => t.team !== leader)
+      game.pushFeed(
+        leader === game.team
+          ? `your side leads ${top.kills}-${behind?.kills ?? 0}`
+          : `${name} leads ${top.kills}-${behind?.kills ?? 0}`,
+      )
+    }
+    lastLeader = leader
+  }
+  const bots = teams.reduce((n, t) => n + t.bots, 0)
+  node.hidden = false
+  node.innerHTML =
+    `<span class="tdm-race">${teams
+      .map(
+        (t) =>
+          `<span class="tdm-side${t.team === game.team ? ' ours' : ''}` +
+          `${t.team === leader ? ' ahead' : ''}" style="--side:${TEAM_HUES[t.team]}">` +
+          `<i class="tdm-dot"></i>${escapeHtml(TEAM_NAMES[t.team] ?? String(t.team))} ` +
+          `<b>${t.kills}</b></span>`,
+      )
+      .join('<i class="tdm-dash">—</i>')}</span>` +
+    // Said out loud rather than left as a discrepancy for the player to notice:
+    // the bots are on the board and they are not in the score.
+    (bots ? `<span class="tdm-bots">+${bots} practice ${bots === 1 ? 'tank' : 'tanks'}, unscored</span>` : '')
 }
 
 /**
