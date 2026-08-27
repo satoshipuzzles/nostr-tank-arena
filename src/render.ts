@@ -37,6 +37,7 @@ import {
   pointInTallWall,
 } from './arena'
 import { CHOPPER_ALT, CHOPPER_SPREAD } from './chopper'
+import { SUIT_MUZZLE, SUIT_SPREAD } from './suit'
 import { FLAG_REACH, FLAG_TEAMS, baseFor } from './flags'
 import { CAPTURE_S, POINT_RADIUS } from './domination'
 
@@ -51,6 +52,14 @@ import { CAPTURE_S, POINT_RADIUS } from './domination'
 const MAX_LANES = 4
 /** How wide a warning stripe is, in arena units. The blast radius is 64. */
 const LANE_WIDTH = 128
+/**
+ * How many juggernaut tracer streams can be drawn at once.
+ *
+ * Three. A room is eight seats and a suit is fifteen kills in a row, so two at
+ * a time is already a story; the third is headroom, and past it the missing
+ * tracer is the least of anybody's problems.
+ */
+const MAX_SUITS = 3
 import type { CoverKind, Rect } from './arena'
 import { NUKE_FLASH_MS } from './game'
 import type { Game, Peer } from './game'
@@ -1244,6 +1253,16 @@ interface TankRig {
    * allocated for nothing.
    */
   flag?: THREE.Group
+  /**
+   * The juggernaut suit, built the first time this tank wears one.
+   *
+   * Lazy for the same reason the flag is: most tanks in most rounds never
+   * reach fifteen in a row, and eight suits nobody will see is a lot of
+   * geometry allocated to be invisible.
+   */
+  suit?: THREE.Group
+  /** Legs, held for the walk cycle. */
+  suitLegs?: THREE.Group[]
   /** Bounces and squashes. Purely cosmetic, sits between root and the body. */
   bob: THREE.Group
   hull: THREE.Group
@@ -1304,6 +1323,14 @@ const BARREL_GEO = new RoundedBoxGeometry(36, 7, 7, 2, 3)
 const PIP_GEO = new RoundedBoxGeometry(13, 13, 13, 2, 4)
 const FLASH_GEO = new THREE.SphereGeometry(11, 10, 8)
 const TORSO_GEO = new RoundedBoxGeometry(15, 15, 17, 3, 4)
+// The juggernaut suit. Deliberately blocky and a head taller than the tank it
+// climbed out of: the whole point of the reward is that everybody on the board
+// can see what walked into the room. See `makeSuit`.
+const SUIT_TORSO_GEO = new RoundedBoxGeometry(40, 38, 46, 5, 4)
+const SUIT_PAULDRON_GEO = new RoundedBoxGeometry(24, 18, 20, 4, 4)
+const SUIT_LEG_GEO = new RoundedBoxGeometry(20, 26, 22, 4, 4)
+const SUIT_GUN_GEO = new RoundedBoxGeometry(40, 12, 12, 3, 3)
+const SUIT_HEAD_GEO = new RoundedBoxGeometry(20, 14, 22, 4, 4)
 /** What a burning hull's emissive is pulled toward. */
 const FIRE_GLOW = new THREE.Color(0xff7a1f)
 const BUBBLE_GEO = new THREE.SphereGeometry(TANK_RADIUS + 16, 20, 14)
@@ -1364,6 +1391,10 @@ interface TankView {
   held: number
   /** True while a shield is up, for them as well as for you. */
   shield: boolean
+  /** True while they are wearing the juggernaut suit. */
+  suited: boolean
+  /** Where their suit's guns are landing, or null. Drawn as tracers. */
+  suitAt: { x: number; y: number } | null
   dead: boolean
   hue: number
   name: string
@@ -1527,6 +1558,53 @@ function applySkin(rig: TankRig, skin: Skin, hue: number): void {
   } else {
     rig.trim.color.setHSL(h, 0.4, 0.26)
   }
+}
+
+/**
+ * Build the juggernaut suit for one rig.
+ *
+ * A torso, a visor, two pauldrons, two gun arms and two legs — read from
+ * directly overhead, which is the only angle this board is ever seen from, and
+ * that is what the proportions are for. It is a head taller and half again as
+ * wide as the tank, because "huge" is the first word in the ask and the reward
+ * has to be legible from the far corner of a 2000-unit board.
+ *
+ * It hangs off the *turret* group, not the hull: the suit faces wherever the
+ * guns are pointing, which is what makes hosing a lane read as aiming rather
+ * than as a statue that happens to be shooting sideways.
+ */
+function makeSuit(body: THREE.Material, trim: THREE.Material): { group: THREE.Group; legs: THREE.Group[] } {
+  const group = new THREE.Group()
+  const plate = (geo: THREE.BufferGeometry, mat: THREE.Material, y: number, x = 0, z = 0) => {
+    const g = new THREE.Group()
+    const mesh = new THREE.Mesh(geo, mat)
+    mesh.castShadow = true
+    const ink = new THREE.Mesh(geo, INK)
+    ink.scale.setScalar(1.08)
+    g.add(mesh, ink)
+    g.position.set(x, y, z)
+    return g
+  }
+
+  // Sized against the tank it replaces, which is 44 long and 30 wide across
+  // its treads. This is 40 across the chest and 76 across the shoulders, and
+  // the shoulders are what does the work: the board camera looks almost
+  // straight down, so *height* is nearly invisible and footprint is the whole
+  // silhouette. The first cut was 30 wide and taller than this, and from the
+  // board it read as a slightly odd tank.
+  group.add(plate(SUIT_TORSO_GEO, body, 46))
+  // The visor sits proud of the chest so the thing has a front. Without it the
+  // suit reads as a crate with legs from the board camera.
+  group.add(plate(SUIT_HEAD_GEO, trim, 74, 6, 0))
+  for (const side of [-1, 1]) {
+    group.add(plate(SUIT_PAULDRON_GEO, body, 58, -2, side * 32))
+    // The guns point along +x, which is the same axis the tank's barrel uses,
+    // so whatever aims one aims the other.
+    group.add(plate(SUIT_GUN_GEO, trim, 48, 34, side * 28))
+  }
+  const legs = [plate(SUIT_LEG_GEO, trim, 15, 0, -13), plate(SUIT_LEG_GEO, trim, 15, 0, 13)]
+  for (const leg of legs) group.add(leg)
+  return { group, legs }
 }
 
 function makeTank(): TankRig {
@@ -2086,6 +2164,15 @@ export class Renderer {
   private nukeCap: THREE.Mesh
   /** The shockwave: a ring on the felt, running out to the fence. */
   private nukeRing: THREE.Mesh
+  /**
+   * Juggernaut tracer streams: one beam and one splash per suit on the board.
+   *
+   * A pool rather than per-rig geometry, for the same reason the strike lanes
+   * are one: at most a couple of these exist at once, and the alternative is
+   * two meshes on every rig in the room that are hidden for the entire round.
+   */
+  private suitBeams: THREE.Mesh[] = []
+  private suitSplashes: THREE.Mesh[] = []
   private lastShellSeen = new Map<string, { x: number; y: number }>()
   private wasDead = new Map<string, boolean>()
   private lastHp = MAX_HP
@@ -2235,6 +2322,29 @@ export class Renderer {
       }),
     )
     this.nukeRing.rotation.x = -Math.PI / 2
+    for (let i = 0; i < MAX_SUITS; i++) {
+      const beam = new THREE.Mesh(
+        new THREE.BoxGeometry(1, 2.6, 2.6),
+        new THREE.MeshBasicMaterial({ color: 0xffe08a, transparent: true, opacity: 0.85, depthWrite: false }),
+      )
+      beam.visible = false
+      this.suitBeams.push(beam)
+      this.scene.add(beam)
+      const splash = new THREE.Mesh(
+        new THREE.RingGeometry(0.55, 1, 20),
+        new THREE.MeshBasicMaterial({
+          color: 0xffc46a,
+          transparent: true,
+          opacity: 0.7,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        }),
+      )
+      splash.rotation.x = -Math.PI / 2
+      splash.visible = false
+      this.suitSplashes.push(splash)
+      this.scene.add(splash)
+    }
     this.nukeStem.visible = false
     this.nukeCap.visible = false
     this.nukeRing.visible = false
@@ -2659,6 +2769,8 @@ export class Renderer {
       ammo: game.tank.reloadingUntil ? 0 : game.tank.ammo,
       held: game.earned.length,
       shield: hasBuff(game.buffs, 'shieldUntil', now),
+      suited: game.suited,
+      suitAt: game.suitAt,
       dead: game.tank.dead,
       hue: game.displayColor,
       name: game.name,
@@ -2702,6 +2814,8 @@ export class Renderer {
         maxHp,
         ammo: peer.view.ammo,
         shield: peer.view.shield,
+        suited: peer.view.suitUntil > now,
+        suitAt: peer.view.suitAt,
         dead: peer.view.dead,
         hue: peer.displayColor,
         name: peer.name,
@@ -2717,6 +2831,7 @@ export class Renderer {
 
     this.strikes(game, now)
     this.nuke(game, now)
+    this.suits(game, now)
     this.syncShells(game)
     this.syncLobAim(game)
     this.syncPickups(game, now)
@@ -2741,6 +2856,9 @@ export class Renderer {
       this.you.driver.visible = false
       this.you.ring.visible = false
       for (const part of this.you.domeParts) part.visible = false
+      // Including the suit: you are *inside* it, and thirty units of armour
+      // plate at the near plane is a grey screen.
+      if (this.you.suit) this.you.suit.visible = false
       for (const pip of this.you.pips) pip.visible = false
       // The reload bar belongs on this list and was missing from it, which is
       // the "yellow box when I shoot" Puzz reported. It is an unlit `#ffc44d`
@@ -2873,6 +2991,41 @@ export class Renderer {
       this.wear(rig, v, now, dt, eye && this.view === 'cockpit')
     }
 
+    // The suit, on the frame it appears. Built lazily, hung off the turret so
+    // it faces the guns, and it *replaces* the tank rather than sitting on top
+    // of it: the hull, the treads and the dome come off, because a mech with a
+    // tank inside it is two vehicles in one place.
+    if (v.suited && !rig.suit) {
+      const built = makeSuit(rig.body, rig.trim)
+      rig.suit = built.group
+      rig.suitLegs = built.legs
+      // On `bob`, not on the turret. The turret group sits 28 units up and the
+      // suit stands on the felt, so hanging it there floated the whole mech
+      // above its own shadow and its own ring — visible immediately in a
+      // screenshot and invisible to every check that only asked whether it was
+      // drawn. It is turned to face the guns by hand instead.
+      rig.bob.add(rig.suit)
+    }
+    if (rig.suit) {
+      rig.suit.visible = v.suited && !dead
+      if (v.suited) {
+        rig.suit.rotation.y = -gun
+        // A walk cycle from position rather than from a timer: the legs move
+        // because the suit moved, so a juggernaut standing still stands still.
+        // Driven off world position for the same reason remote tanks climb
+        // ramps correctly — it is the one input every client shares.
+        const step = Math.sin((x + y) * 0.06) * 6
+        if (rig.suitLegs) {
+          rig.suitLegs[0].position.y = 15 + Math.max(0, step)
+          rig.suitLegs[1].position.y = 15 + Math.max(0, -step)
+        }
+      }
+    }
+    // Everything the tank is made of comes off while the suit is on. The dome
+    // is set below with the rest of the per-frame visibility, so it is not
+    // touched twice here.
+    rig.hull.visible = !v.suited
+
     if (dead) rig.smokeOwed = 0
 
     // A dead tank tips over and sinks rather than vanishing, so you can see
@@ -2896,8 +3049,8 @@ export class Renderer {
     // Cheap on repeat: `set` compares a key before it touches a canvas.
     rig.avatar.set(name, v.picture, hue)
     // The face is a child of `driver`, so hiding the driver hides it too.
-    rig.driver.visible = !dead
-    for (const part of rig.domeParts) part.visible = true
+    rig.driver.visible = !dead && !v.suited
+    for (const part of rig.domeParts) part.visible = !v.suited
 
     // The empty magazine is part of the key, so the plate is rebuilt when a tank
     // runs dry and again when it reloads. That is two 512x128 canvases per
@@ -3838,6 +3991,53 @@ export class Renderer {
     // impulse can decay to nothing between two drawn frames, and the biggest
     // moment in the game would arrive perfectly still.
     if (t < 0.5) this.shake = Math.max(this.shake, 30 * (1 - t * 2))
+  }
+
+  /**
+   * The juggernauts' guns: a tracer stream and a splash where it lands.
+   *
+   * Drawn per client and never sent: the wire carries only "this suit is
+   * hosing that point", and the dozens of rounds a second between the two are
+   * entirely local — the same trade the chopper makes, and the reason a
+   * continuous-fire weapon is affordable on a 10Hz relay stream at all.
+   *
+   * The stream flickers on a fast sine rather than being a solid bar. A solid
+   * bar reads as a laser; a bar that stutters reads as a gun, and it costs one
+   * multiply.
+   */
+  private suits(game: Game, now: number): void {
+    let n = 0
+    const draw = (from: { x: number; y: number }, at: { x: number; y: number }) => {
+      const beam = this.suitBeams[n]
+      const splash = this.suitSplashes[n]
+      if (!beam || !splash) return
+      n++
+      const dx = at.x - from.x
+      const dz = at.y - from.y
+      const len = Math.max(1, Math.hypot(dx, dz))
+      const y = GROUND_Y + SUIT_MUZZLE
+      beam.visible = true
+      beam.position.set(from.x + dx / 2, y, from.y + dz / 2)
+      beam.rotation.y = -Math.atan2(dz, dx)
+      beam.scale.set(len, 1, 1)
+      ;(beam.material as THREE.MeshBasicMaterial).opacity = 0.55 + 0.4 * Math.abs(Math.sin(now / 26))
+      splash.visible = true
+      splash.position.set(at.x, GROUND_Y + DECAL_LIFT * 1.3, at.y)
+      splash.scale.setScalar(SUIT_SPREAD * (0.72 + 0.16 * Math.sin(now / 60)))
+      ;(splash.material as THREE.MeshBasicMaterial).opacity = 0.5 + 0.3 * Math.abs(Math.sin(now / 40))
+    }
+
+    if (!game.watching && game.suited && game.suitAt && !game.tank.dead) {
+      draw(game.tank, game.suitAt)
+    }
+    for (const peer of game.peers.values()) {
+      if (peer.view.suitUntil <= now || !peer.view.suitAt || peer.view.dead) continue
+      draw(peer.view, peer.view.suitAt)
+    }
+    for (let i = n; i < this.suitBeams.length; i++) {
+      this.suitBeams[i].visible = false
+      this.suitSplashes[i].visible = false
+    }
   }
 
   private deaths(game: Game): void {

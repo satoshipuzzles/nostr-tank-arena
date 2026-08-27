@@ -45,6 +45,14 @@ import {
   parsePayload,
   roomTag,
 } from './protocol'
+import {
+  SUIT_MS,
+  SUIT_SPEED,
+  SUIT_HIT_MS,
+  SUIT_DAMAGE,
+  suitAim,
+  underSuitFire,
+} from './suit'
 import { BOT_COUNT, MAX_BOTS, killBot, makeBot, stepBot } from './bots'
 import { FLAG_TEAMS, canScore, canTake, carriers } from './flags'
 import { freshState, holderOn, points, stepPoint } from './domination'
@@ -388,7 +396,6 @@ const rungHue = (id: StreakRung['id']): number => {
  * somebody onto a team of three.
  */
 const TEAMS = 5
-const STREAK_JUGGER_MS = 12_000
 /** How long the streak reward's siege shells last. */
 const STREAK_SIEGE_MS = 20_000
 /** How long the recon sweep marks enemies. */
@@ -566,8 +573,12 @@ export interface Peer {
      * `StatePayload.c`.
      */
     chopperUntil: number
+    /** Deadline in *our* clock while they are wearing the juggernaut suit. */
+    suitUntil: number
     /** Where their chopper's rounds are landing, or null. */
     chopperAt: { x: number; y: number } | null
+    /** Where their suit's guns are landing, or null while it is not firing. */
+    suitAt: { x: number; y: number } | null
     /** The team they say they are on, 1..5, or 0 for a free-for-all. */
     team: number
   }
@@ -660,6 +671,10 @@ interface StateSample {
   chopperUntil: number
   /** Ground point their rounds are landing on, or null. */
   chopperAt: { x: number; y: number } | null
+  /** Deadline in our clock while they wear the suit, or 0. See `StatePayload.j`. */
+  suitUntil: number
+  /** Ground point their suit's guns are landing on, or null. */
+  suitAt: { x: number; y: number } | null
   /** Declared team, 1..5, or 0. */
   team: number
 }
@@ -1215,6 +1230,8 @@ export class Game {
         held: 0,
         chopperUntil: 0,
         chopperAt: null,
+        suitUntil: 0,
+        suitAt: null,
         team: 0,
       },
         kills: 0,
@@ -1300,6 +1317,15 @@ export class Game {
       chopperAt:
         typeof p.c === 'number' && p.c > 0 && typeof p.cx === 'number' && typeof p.cy === 'number'
           ? chopperAim(p.x, p.y, p.cx, p.cy)
+          : null,
+      // The suit, on the same terms as the gunship above: clamped to the window
+      // everybody else gets, and its reach clamped again here by the same
+      // function the shooter used.
+      suitUntil:
+        typeof p.j === 'number' && p.j > 0 ? performance.now() + Math.min(SUIT_MS + 400, p.j) : 0,
+      suitAt:
+        typeof p.j === 'number' && p.j > 0 && typeof p.jx === 'number' && typeof p.jy === 'number'
+          ? suitAim(p.x, p.y, p.jx, p.jy)
           : null,
       // Clamped to the band a player can actually pick. A team index outside it
       // would put somebody on a side nothing draws and nobody can shoot.
@@ -1613,9 +1639,8 @@ export class Game {
         break
       // --- 15: heavy -----------------------------------------------------
       case 'jugger':
-        this.heal(now)
-        this.extend('shieldUntil', now, STREAK_JUGGER_MS)
-        this.extend('speedUntil', now, STREAK_JUGGER_MS)
+        // Not three numbers going up any more — a vehicle swap. See src/suit.ts.
+        this.wearSuit(now)
         break
       case 'salvo':
         // Both halves at once, running opposite ways. The caller and their
@@ -2571,6 +2596,8 @@ export class Game {
       peer.view.shield = false
       peer.view.chopperUntil = 0
       peer.view.chopperAt = null
+      peer.view.suitUntil = 0
+      peer.view.suitAt = null
       // A side each, in team modes.
       //
       // They used to be hard-coded to nobody's side, on the reasoning that a
@@ -2800,6 +2827,126 @@ export class Game {
    * enough that the ground under the old spot belongs to somebody else now, and
    * `respawn` already knows how to find the corner nobody is looking at.
    */
+  /**
+   * The juggernaut suit: out of the tank, and standing in the open.
+   *
+   * The opposite trade to the chopper on purpose. The gunship takes your tank
+   * off the board and nothing can touch you; the suit leaves you on it, slower
+   * than everything else, with the only continuous-fire weapon in the game.
+   *
+   * The armour is the existing shield with a bulwark warranty behind it rather
+   * than a new damage rule, which is not a shortcut: every client already reads
+   * `sh` off the tick and draws a shield, so a juggernaut looks armoured on
+   * every screen without a single new field, and the plating coming back a
+   * couple of seconds after each hit is exactly what a bulwark already does.
+   */
+  suitUntil = 0
+  /** Where the suit's guns are landing, or null while the trigger is up. */
+  suitAt: { x: number; y: number } | null = null
+  /** Last time each target took a burst from *our* suit. Keyed like the chopper's. */
+  private readonly suitHitAt = new Map<string, number>()
+
+  /** True while we are wearing the suit. The renderer and the HUD ask this. */
+  get suited(): boolean {
+    return this.suitUntil > performance.now()
+  }
+
+  /** Seconds of suit left, for the HUD. Zero when we are in the tank. */
+  get suitLeft(): number {
+    return Math.max(0, (this.suitUntil - performance.now()) / 1000)
+  }
+
+  private wearSuit(now: number): void {
+    this.suitUntil = now + SUIT_MS
+    this.suitAt = null
+    this.heal(now)
+    // The plating: a shield for the whole window, and a warranty behind it so
+    // a hit knocks it out for two seconds rather than ending it. Written
+    // through the same two fields every other armoured reward uses.
+    this.extend('bulwarkUntil', now, SUIT_MS)
+    this.buffs.shieldUntil = Math.max(this.buffs.shieldUntil, this.buffs.bulwarkUntil)
+    this.pushFeed('juggernaut — out of the tank')
+  }
+
+  /**
+   * Walk, hose, and climb back into the tank when the clock runs out.
+   *
+   * Called from the same place the tank's own movement is, and it *is* the
+   * tank's movement — slower, and with the gun replaced. The suit does not get
+   * its own position: it stands where the tank stands, which is what keeps it
+   * shootable and what keeps every other client's picture of it honest.
+   */
+  private stepSuitGun(now: number, controls: Controls): void {
+    if (now >= this.suitUntil) {
+      this.suitUntil = 0
+      this.suitAt = null
+      this.suitHitAt.clear()
+      this.pushFeed('back in the tank')
+      return
+    }
+    if (controls.fire && controls.aimAt) {
+      this.suitAt = suitAim(this.tank.x, this.tank.y, controls.aimAt.x, controls.aimAt.y)
+      this.rakeSuitBots(now)
+    } else {
+      this.suitAt = null
+    }
+  }
+
+  /** Bots standing in our own suit's fire. They are ours, so we apply it. */
+  private rakeSuitBots(now: number): void {
+    if (!this.suitAt) return
+    for (const bot of this.bots) {
+      if (bot.tank.dead) continue
+      if (this.friendly(bot.session)) continue
+      if (!underSuitFire(this.suitAt.x, this.suitAt.y, bot.tank.x, bot.tank.y)) continue
+      const key = 'self:' + bot.session
+      if (now < (this.suitHitAt.get(key) ?? 0)) continue
+      this.suitHitAt.set(key, now + SUIT_HIT_MS)
+      bot.tank.hp -= SUIT_DAMAGE
+      if (bot.tank.hp > 0) {
+        this.sound('hit', { at: { x: bot.tank.x, y: bot.tank.y } })
+        continue
+      }
+      killBot(bot, now, this.modifier.respawn)
+      this.botKills++
+      this.sound('kill')
+      this.onOwnKill()
+      this.pushFeed(`you killed ${bot.name}`)
+    }
+  }
+
+  /**
+   * Are we standing in somebody else's suit fire?
+   *
+   * Asked rather than told, like the gunship above it and like every shell:
+   * nobody sends "I hit you". Per-suit cooldown keyed by owner, so two
+   * juggernauts on one target are twice as dangerous rather than one being
+   * ignored, and so a single one cannot be made to hit faster by publishing
+   * its tick more often.
+   */
+  private takeSuitFire(now: number): void {
+    if (this.tank.dead || this.watching || this.flying) return
+    for (const peer of this.peers.values()) {
+      const at = peer.view.suitAt
+      if (!at || peer.view.suitUntil <= now) continue
+      if (this.team && peer.view.team === this.team) continue
+      if (!underSuitFire(at.x, at.y, this.tank.x, this.tank.y)) continue
+      const key = 'suit:' + peer.session
+      if (now < (this.suitHitAt.get(key) ?? 0)) continue
+      this.suitHitAt.set(key, now + SUIT_HIT_MS)
+      if (hasBuff(this.buffs, 'shieldUntil', now)) {
+        this.popShield()
+        continue
+      }
+      this.tank.hp -= SUIT_DAMAGE
+      if (this.tank.hp > 0) this.sound('hit')
+      if (this.tank.hp <= 0) {
+        this.die(peer.session)
+        return
+      }
+    }
+  }
+
   private landChopper(): void {
     if (!this.chopperUntil) return
     this.chopperUntil = 0
@@ -3167,16 +3314,22 @@ export class Game {
       // whether or not you are running overdrive, which is what keeps rubble a
       // decision rather than something a pickup deletes.
       const boost =
+        // The suit walks. Slower than the tank it climbed out of, which is the
+        // cost that balances a gun that never stops — see src/suit.ts.
+        (this.suited ? SUIT_SPEED : 1) *
         (hasBuff(this.buffs, 'speedUntil', now) ? 1.45 : 1) *
         this.modifier.speed *
         groundSpeed(this.tank.x, this.tank.y)
       stepTank(this.tank, controls.throttle, controls.steer, controls.aim, dt, boost)
       this.stepMagazine(now, controls.reload)
       const armed = this.tank.ammo > 0 && !this.tank.reloadingUntil && now >= this.tank.reloadAt
-      // The lob is checked before the trigger and takes precedence, so holding
-      // Q with a finger still on the mouse charges rather than machine-gunning
-      // flat shells past the wall you were trying to go over.
-      if (controls.lob) {
+      // In the suit the gun is not a shell gun: no magazine, no reload, no lob,
+      // and the trigger hoses a point for as long as it is held. The magazine
+      // is still stepped above so the tank you climb back into is the one you
+      // left, rather than one that spent fourteen seconds mid-reload.
+      if (this.suitUntil) {
+        this.stepSuitGun(now, controls)
+      } else if (controls.lob) {
         // Only start winding up when there is actually a shell to throw.
         // Charging a lob you cannot fire, and then having it not go off on
         // release, is the kind of thing a player reads as the key not working.
@@ -3195,6 +3348,9 @@ export class Game {
     // taken to zero by a chopper should not also eat a shell in the same frame
     // and report two deaths.
     this.takeChopperFire(now)
+    // And everybody else's juggernauts, for the same reason and in the same
+    // place: continuous fire that lands before the shells do.
+    this.takeSuitFire(now)
     this.stepRewards(now)
     this.stepNuke(now)
     this.stepFlags(now)
@@ -3385,6 +3541,13 @@ export class Game {
     // a round that had already ended.
     this.regenAt = 0
     this.shieldRearmAt = 0
+    // The suit dies with you. Fourteen seconds of juggernaut that survived
+    // being killed would be a reward you cannot lose, and the tank that
+    // respawns is a tank — a mech standing where a wreck should be is worse
+    // than either.
+    this.suitUntil = 0
+    this.suitAt = null
+    this.suitHitAt.clear()
     // Last round's EMP does not darken this round's first seconds.
     this.empUntil = 0
     this.tank.respawnAt = performance.now() + RESPAWN_DELAY * 1000 * this.modifier.respawn
@@ -3498,6 +3661,8 @@ export class Game {
         peer.view.held = newest.held
         peer.view.chopperUntil = newest.chopperUntil
         peer.view.chopperAt = newest.chopperAt
+        peer.view.suitUntil = newest.suitUntil
+        peer.view.suitAt = newest.suitAt
         peer.view.team = newest.team
         continue
       }
@@ -3532,6 +3697,8 @@ export class Game {
       // shooting at.
       peer.view.chopperUntil = bb.chopperUntil
       peer.view.chopperAt = bb.chopperAt
+      peer.view.suitUntil = bb.suitUntil
+      peer.view.suitAt = bb.suitAt
       // The newer sample. A side is a step, not a slope.
       peer.view.team = bb.team
       while (b.length > 2 && b[1].t < renderAt) b.shift()
@@ -3646,6 +3813,15 @@ export class Game {
               : {}),
           }
         : {}),
+      // The suit, on the same terms. Unlike the gunship this does not move
+      // `x`/`y` anywhere: a juggernaut is standing exactly where the tick says
+      // they are, which is the entire reason they can be shot.
+      ...(this.suited
+        ? {
+            j: Math.round(this.suitUntil - now),
+            ...(this.suitAt ? { jx: Math.round(this.suitAt.x), jy: Math.round(this.suitAt.y) } : {}),
+          }
+        : {}),
     }
     this.publishAsSession(KIND_STATE, payload)
   }
@@ -3728,6 +3904,11 @@ export class Game {
     this.nuke = null
     this.nukeFlashAt = 0
     this.nukeSeen.clear()
+    // Nor does the suit. Fourteen seconds is a rung on a streak, and the
+    // streak is reset above.
+    this.suitUntil = 0
+    this.suitAt = null
+    this.suitHitAt.clear()
     // Nor does a gunship. Ten seconds is a rung on a streak, and the streak is
     // reset three lines above this — carrying the reward across the boundary
     // would be a tank nobody can shoot on a board it did not earn.
