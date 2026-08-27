@@ -116,6 +116,13 @@ export interface PresencePayload {
    * follows the chain, which is every room that existed before this field.
    */
   board?: string
+  /**
+   * The room's declared bot count — how populated the creator wants the arena
+   * to feel. Zero is a meaningful answer, so this is present-or-absent rather
+   * than truthy: absent means the room never said, and joiners keep their own
+   * preference.
+   */
+  bots?: number
   /** Unix seconds, by the publisher's clock. Only used to age out ghosts. */
   at: number
 }
@@ -142,6 +149,8 @@ export interface LiveRoom {
   mode: RoomMode
   /** The board the room is pinned to, when it is not following the chain. */
   board?: string
+  /** The room's declared bot count, when anyone in it has said one. */
+  bots?: number
   /** Newest beacon in the room, so the list can sort by liveliness. */
   freshest: number
   /**
@@ -164,6 +173,7 @@ export async function publishPresence(
   mode?: RoomMode,
   board?: string,
   listed = true,
+  bots?: number,
 ): Promise<void> {
   const at = Math.floor(Date.now() / 1000)
   const payload: PresencePayload = {
@@ -179,6 +189,10 @@ export async function publishPresence(
     ...(mode && mode !== 'dm' ? { mode } : {}),
     // Same shape for the board: following the chain is the absent value.
     ...(board ? { board } : {}),
+    // Not the same shape: zero bots is an answer, so presence is the signal.
+    ...(bots !== undefined
+      ? { bots: Math.max(0, Math.min(SEATS - 1, Math.floor(bots))) }
+      : {}),
   }
   const signed = await identity.signAsSelf({
     kind: KIND_PRESENCE,
@@ -229,7 +243,10 @@ export function groupRooms(events: Event[], nowSeconds = Math.floor(Date.now() /
   /** room -> pubkey -> their newest beacon. */
   const rooms = new Map<
     string,
-    Map<string, Occupant & { block?: number; layout?: string; mode?: RoomMode; board?: string }>
+    Map<
+      string,
+      Occupant & { block?: number; layout?: string; mode?: RoomMode; board?: string; bots?: number }
+    >
   >()
   const cutoff = nowSeconds - PRESENCE_TTL_S * 3
   for (const e of events) {
@@ -256,6 +273,10 @@ export function groupRooms(events: Event[], nowSeconds = Math.floor(Date.now() /
       layout: typeof p.layout === 'string' ? p.layout.slice(0, 32) : undefined,
       mode: asRoomMode(p.mode) ?? undefined,
       board: typeof p.board === 'string' ? p.board.slice(0, 32) : undefined,
+      bots:
+        typeof p.bots === 'number' && Number.isFinite(p.bots)
+          ? Math.max(0, Math.min(SEATS - 1, Math.floor(p.bots)))
+          : undefined,
     })
   }
 
@@ -269,17 +290,19 @@ export function groupRooms(events: Event[], nowSeconds = Math.floor(Date.now() /
     // player who joined thirty seconds ago knows the current round and one who
     // has been sitting in a stale tab does not.
     const newest = all.reduce((best, o) => (o.at > best.at ? o : best), all[0])
-    // The mode and the pin come from the newest beacon that *declares* one,
-    // not the newest outright: a pre-mode client sitting in a CTF room says
-    // nothing about the rules, and its silence must not flicker the room back
-    // to deathmatch or unpin its board.
-    const declared = <K extends 'mode' | 'board'>(k: K) =>
-      all.filter((o) => o[k]).reduce<typeof newest | null>(
+    // The mode, the pin and the bot count come from the newest beacon that
+    // *declares* one, not the newest outright: a pre-mode client sitting in a
+    // CTF room says nothing about the rules, and its silence must not flicker
+    // the room back to deathmatch, unpin its board, or forget its bots.
+    // Presence, not truthiness — `bots: 0` is a declaration.
+    const declared = <K extends 'mode' | 'board' | 'bots'>(k: K) =>
+      all.filter((o) => o[k] !== undefined).reduce<typeof newest | null>(
         (best, o) => (!best || o.at > best.at ? o : best),
         null,
       )
     const spoke = declared('mode')
     const pinned = declared('board')
+    const crewed = declared('bots')
     out.push({
       room,
       players,
@@ -290,6 +313,7 @@ export function groupRooms(events: Event[], nowSeconds = Math.floor(Date.now() /
       layout: newest?.layout,
       mode: spoke?.mode ?? 'dm',
       board: pinned?.board,
+      bots: crewed?.bots,
       freshest: newest?.at ?? 0,
     })
   }

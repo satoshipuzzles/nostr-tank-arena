@@ -633,6 +633,17 @@ let botsWanted = ((): number => {
   const n = Number(raw)
   return Number.isFinite(n) ? Math.max(0, Math.min(MAX_BOTS, Math.floor(n))) : BOT_COUNT
 })()
+// The invite link can say how crewed the room should feel, like it says the
+// mode and the board. Applied to the variable directly: `setBots` reaches for
+// `running`, which is declared further down, and calling it during module
+// init is a temporal-dead-zone crash that takes the whole lobby with it.
+{
+  const fromUrl = params.get('bots')
+  if (fromUrl !== null && Number.isFinite(Number(fromUrl))) {
+    botsWanted = Math.max(0, Math.min(MAX_BOTS, Math.floor(Number(fromUrl))))
+  }
+}
+
 /** What the middle button restores when it is clicked back on. */
 let botsLast = botsWanted || BOT_COUNT
 
@@ -658,7 +669,9 @@ function setBots(n: number): void {
   if (botsWanted) botsLast = botsWanted
   store('tank.bots', String(botsWanted))
   paintBotsButton()
-  if (running) for (const p of running.players) p.game.botsWanted = botsWanted
+  // Player one's game only: player two's bots would be invisible on the shared
+  // screen and still shoot. Same rule as the push at match start.
+  if (running) running.players[0].game.botsWanted = botsWanted
 }
 // `paintBotsButton`, not `setBots`: `setBots` reaches for `running`, which is
 // declared further down this file, and calling it during module init is a
@@ -1696,6 +1709,9 @@ function startBeacon(
       mode,
       board,
       listed,
+      // Read at send time, not captured at join: the stepper is live mid-game
+      // and the room's declared crew should follow it.
+      botsWanted,
     ).catch(() => {
       // A refused beacon costs this room a line in somebody's lobby for thirty
       // seconds. It is not worth a message on top of a game.
@@ -1754,6 +1770,9 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
       // must also *clear* a leftover pick, or the joiner plays a different
       // board from everyone in it.
       boardSelect.value = live.board && boardIndexOf(live.board) !== null ? live.board : ''
+      // And the crew: the room's declared bot count is how populated its
+      // creator wants it to feel, and each human seat replaces one bot.
+      if (live.bots !== undefined) setBots(live.bots)
     }
     // Settled for the whole match: the block callbacks below close over it.
     const pin = boardIndexOf(boardSelect.value || null)
@@ -1960,11 +1979,13 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     // relay is; `Profiles.get` queues an unknown npub for the next batch and
     // answers with a placeholder, so calling it once per tank per frame is free.
     renderer.setPictureSource((pubkey) => (pubkey ? profiles.get(pubkey).picture : null))
-    // The stored preference reaches the fresh `Game`. `syncBots` still decides
-    // whether any actually appear — in a couch match player two is a peer of
-    // player one, so the room is never empty and the bots stand down on their
-    // own without this having to know about couch mode.
-    for (const p of players) p.game.botsWanted = botsWanted
+    // The stored preference reaches the fresh `Game` — player one's only.
+    // Bots replace humans one for one now, so a second game running its own
+    // would no longer zero itself out — and player two's bots would be tanks
+    // the shared screen never draws (only player one's game is rendered) that
+    // still put real shells into player two. Invisible damage is not a game.
+    players[0].game.botsWanted = botsWanted
+    for (const p of players.slice(1)) p.game.botsWanted = 0
     // The remembered side reaches the fresh `Game`, and player two shares it —
     // two people on one couch are on one team unless they say otherwise, which
     // is what a couch is.
@@ -2006,6 +2027,8 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     else url.searchParams.delete('board')
     if (!listed) url.searchParams.set('private', '1')
     else url.searchParams.delete('private')
+    if (botsWanted !== BOT_COUNT) url.searchParams.set('bots', String(botsWanted))
+    else url.searchParams.delete('bots')
     history.replaceState(null, '', url)
 
     // The lobby's own relay pool and its poll are for the lobby. Leaving them
