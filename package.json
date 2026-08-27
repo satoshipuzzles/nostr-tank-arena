@@ -44,7 +44,8 @@
     "test:rewards": "node test/rewards.mjs",
     "test:domination": "node test/domination.mjs",
     "test:tray": "node test/tray.mjs",
-    "test:terrain": "node test/terrain.mjs"
+    "test:terrain": "node test/terrain.mjs",
+    "test:tiers": "node test/tiers.mjs"
   },
   "dependencies": {
     "nostr-tools": "^2.10.4",

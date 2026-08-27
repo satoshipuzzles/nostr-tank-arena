@@ -114,6 +114,13 @@ try {
     for (let i = 0; i < 6; i++) {
       g.update(0.016, { throttle: 0, steer: 0, aim: null, aimAt: null, fire: false, reload: false, lob: false })
     }
+    // Rewards are banked and spent on a click now (PR 23's tray), so the kill
+    // that reaches a rung no longer fires it. This suite is about what the
+    // strike *does* once it is in the air — that a rung does not fire itself
+    // is the tray suite's claim — so spend what the fifth kill banked and
+    // carry on. Without this the whole section reads "no strike was called",
+    // which is true and is not the thing being tested.
+    if (g.holding(5)) g.spend(5)
     const strike = [...g.strikes.values()][0]
     if (!strike) return { called: false }
     // Two on the lane, one well off it — the control.
@@ -131,13 +138,22 @@ try {
     // otherwise this measures their pathfinding rather than the bombs.
     const t0 = performance.now()
     let firstHitAt = null
+    // Whether each in-lane bot was *ever* hit, accumulated frame by frame
+    // rather than read off its hull at the end. Bots fight each other while
+    // the run walks, and a bot that takes a bomb and then dies to a bot's
+    // shell respawns on full hull — which reads as "the bombs missed it" from
+    // a single sample at the end. One run in four failed exactly that way.
+    const touched = [false, false]
     while (performance.now() - t0 < 6000) {
       g.bots[1].tank.x = 400; g.bots[1].tank.y = strike.y
       g.bots[2].tank.x = 900; g.bots[2].tank.y = strike.y
       g.bots[0].tank.x = offLane.x; g.bots[0].tank.y = offLane.y
       g.bots[0].tank.dead = false
       g.update(0.016, { throttle: 0, steer: 0, aim: null, aimAt: null, fire: false, reload: false, lob: false })
-      if (firstHitAt === null && [1, 2].some((i) => g.bots[i].tank.hp < 3 || g.bots[i].tank.dead)) {
+      for (const i of [1, 2]) {
+        if (g.bots[i].tank.hp < 3 || g.bots[i].tank.dead) touched[i - 1] = true
+      }
+      if (firstHitAt === null && touched.some(Boolean)) {
         firstHitAt = Math.round(performance.now() - t0)
       }
       await new Promise((r) => setTimeout(r, 8))
@@ -145,7 +161,7 @@ try {
     return {
       called: true,
       before,
-      inLane: [1, 2].map((i) => ({ hp: g.bots[i].tank.hp, dead: g.bots[i].tank.dead })),
+      inLane: [1, 2].map((i) => ({ hp: g.bots[i].tank.hp, dead: g.bots[i].tank.dead, hit: touched[i - 1] })),
       offLane: { hp: g.bots[0].tank.hp, dead: g.bots[0].tank.dead },
       firstHitAt,
       botKills: g.botKills,
@@ -156,7 +172,7 @@ try {
   check('a fifth kill in a row calls an air strike', strike.called === true, JSON.stringify(strike))
   check(
     'and the bombs kill the bots standing in the lane',
-    strike.inLane?.every((b) => b.dead || b.hp < 3),
+    strike.inLane?.every((b) => b.hit),
     JSON.stringify(strike.inLane),
   )
   // The control that makes the line above mean something. A strike that killed
@@ -274,6 +290,8 @@ try {
     for (let i = 0; i < 6; i++) {
       g.update(0.016, { throttle: 0, steer: 0, aim: null, aimAt: null, fire: false, reload: false, lob: false })
     }
+    // Earned, then spent: same reason as the strike above.
+    if (g.holding(10)) g.spend(10)
     return { flying: g.flying, left: g.chopperLeft, streak: g.streak }
   })
   check('the chopper runs for twenty seconds now',

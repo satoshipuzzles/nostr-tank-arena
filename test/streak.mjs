@@ -213,7 +213,11 @@ try {
   // one kill early, land the kill for real, and require the banner the game
   // then puts on screen to be about the thing that was promised.
 
-  const RUNGS = [3, 5, 10, 15, 20, 25]
+  // The tiers moved when each one got its own pool of five: the rungs are now
+  // three plus the four tiers a player fills, and 7 and 20 are not rungs at
+  // all. Read from the game rather than written out again — the whole point of
+  // section 4 is that the strip and the ladder are one table.
+  const RUNGS = await page.evaluate(() => window.__game.ladder.map((r) => r.at))
   for (const at of RUNGS) {
     await page.evaluate((n) => { window.__game.streak = n - 1 }, at)
     const before = await stripShowing(at - 1)

@@ -38,6 +38,7 @@ import {
   type SessionPayload,
   type ShellPayload,
   type StrikePayload,
+  type LanePayload,
   type EmpPayload,
   type StatePayload,
   parsePayload,
@@ -192,28 +193,68 @@ const CLAIM_TTL = 600
  * why it is the one with a wire format.
  */
 const STREAK_REPAIR = 3
-/** Kills in a row that call an air strike. The marquee reward. */
-/** Shield and speed together, which is the "come and try it" tier. */
-const STREAK_JUGGERNAUT = 20
-/** A second, longer air strike. Nothing beyond this changes; 25 is the top. */
-const STREAK_CARPET = 25
 
 /**
- * The tiers a player gets to fill, and the rewards they can put on them.
+ * The tiers a player gets to fill, and the rewards they can put on each.
  *
- * Puzz: "players should be able to edit their loadouts including their kill
- * streaks similar to call of duty." The bookends are not choices — three is
- * always the comeback repair, twenty and twenty-five are always the endgame
- * spectacle — but the four rungs in between are yours to arrange: five
- * rewards, four slots, one always left at home. Every reward keeps working
- * on every other screen no matter whose ladder it came off, because each one
- * already has a wire format (the strike and EMP publish, the chopper, recon
- * and siege ride the tick), so somebody else's loadout needs no negotiation
- * to be legible — you see what they earned when they earn it.
+ * Puzz: *"Some kill streaks should only be available at each streak level, we
+ * should have 5 to choose from for each tier. The killstreaks should be more
+ * powerful and cooler the higher the kill streak."*
+ *
+ * So the pools are **per tier** rather than one menu shared by every rung. The
+ * old arrangement let a player put the air strike on fifteen and the EMP on
+ * five, which made "the fifteen-kill reward" mean nothing in particular and
+ * flattened the whole ladder — every rung was worth the same thing, just later.
+ * Now each tier has its own five, they get bigger as you climb, and a reward
+ * you want is a reason to keep the streak alive rather than a menu position.
+ *
+ * The rungs at twenty and twenty-five used to be fixed — juggernaut and carpet
+ * bombing, handed out whether you wanted them or not. Both are now *entries in
+ * a pool*, which is the whole point of the issue: the endgame is a choice. Only
+ * three stays fixed, because the comeback repair is the rung a player who is
+ * losing needs and would never spend a slot on.
+ *
+ * Every reward here rides wire that already existed before it: buffs on the
+ * state tick, the strike payload, the EMP event, the chopper field. Nothing in
+ * this table needs a new kind or a new agreement, which is why twenty of them
+ * can land at once — somebody else's loadout is legible on your screen without
+ * any negotiation, because you are watching mechanics you already understood.
  */
-export const LOADOUT_TIERS = [5, 7, 10, 15] as const
+export const LOADOUT_TIERS = [5, 10, 15, 25] as const
 
-export type RewardId = 'strike' | 'recon' | 'chopper' | 'siege' | 'emp'
+/** What a tier is called on the picker, and the colour it wears. */
+export const TIER_LABELS: Record<(typeof LOADOUT_TIERS)[number], { name: string; blurb: string; hue: number }> = {
+  5: { name: 'Skirmish', blurb: 'five in a row', hue: 45 },
+  10: { name: 'Power', blurb: 'ten in a row', hue: 200 },
+  15: { name: 'Heavy', blurb: 'fifteen in a row', hue: 300 },
+  25: { name: 'Apex', blurb: 'twenty-five in a row', hue: 0 },
+}
+
+export type RewardId =
+  // Tier 5 — skirmish.
+  | 'strike'
+  | 'recon'
+  | 'patch'
+  | 'cache'
+  | 'buck'
+  // Tier 10 — power.
+  | 'chopper'
+  | 'siege'
+  | 'emp'
+  | 'blitz'
+  | 'drone'
+  // Tier 15 — heavy.
+  | 'jugger'
+  | 'salvo'
+  | 'hunter'
+  | 'thermite'
+  | 'bulwark'
+  // Tier 25 — apex.
+  | 'carpet'
+  | 'armageddon'
+  | 'blackout'
+  | 'ironclad'
+  | 'firestorm'
 
 export interface RewardDef {
   id: RewardId
@@ -221,29 +262,73 @@ export interface RewardDef {
   detail: string
   /** The banner hue when the rung lands. */
   hue: number
+  /** Which tier's pool it belongs to. A reward is in exactly one. */
+  tier: (typeof LOADOUT_TIERS)[number]
 }
 
 export const REWARDS: readonly RewardDef[] = [
-  { id: 'strike', name: 'air strike', detail: 'air strike inbound', hue: 20 },
-  { id: 'recon', name: 'recon', detail: 'recon — every enemy marked, eight seconds', hue: 155 },
-  { id: 'chopper', name: 'chopper', detail: 'chopper — ten seconds of gun', hue: 20 },
-  { id: 'siege', name: 'siege shells', detail: 'siege shells — two hull a hit', hue: 300 },
-  { id: 'emp', name: 'EMP', detail: 'EMP — every other screen goes dark', hue: 300 },
+  // --- 5: skirmish. Cheap, immediate, and mostly about the next thirty seconds.
+  { id: 'strike', name: 'air strike', detail: 'air strike inbound', hue: 20, tier: 5 },
+  { id: 'recon', name: 'recon', detail: 'recon — every enemy marked, eight seconds', hue: 155, tier: 5 },
+  { id: 'patch', name: 'field patch', detail: 'hull full — and eight seconds of shield', hue: 130, tier: 5 },
+  { id: 'cache', name: 'ammo cache', detail: 'reloaded, and firing fast for twenty', hue: 40, tier: 5 },
+  { id: 'buck', name: 'buckshot', detail: 'three shells a shot, twenty seconds', hue: 55, tier: 5 },
+  // --- 10: power. A different vehicle, or a swing big enough to take a room.
+  { id: 'chopper', name: 'chopper', detail: 'chopper — ten seconds of gun', hue: 20, tier: 10 },
+  { id: 'siege', name: 'siege shells', detail: 'siege shells — two hull a hit', hue: 300, tier: 10 },
+  { id: 'emp', name: 'EMP', detail: 'EMP — every other screen goes dark', hue: 300, tier: 10 },
+  { id: 'blitz', name: 'blitz', detail: 'blitz — fast, and reloading faster', hue: 285, tier: 10 },
+  { id: 'drone', name: 'repair drone', detail: 'a hull point back every two seconds', hue: 130, tier: 10 },
+  // --- 15: heavy. Two things at once, or something that covers the board.
+  { id: 'jugger', name: 'juggernaut', detail: 'juggernaut — shielded and fast', hue: 190, tier: 15 },
+  { id: 'salvo', name: 'salvo', detail: 'two bomb runs, both halves of the board', hue: 20, tier: 15 },
+  { id: 'hunter', name: 'hunter', detail: 'every enemy marked, every shell doubled', hue: 155, tier: 15 },
+  { id: 'thermite', name: 'thermite lane', detail: 'a lane of fire straight down the board', hue: 10, tier: 15 },
+  { id: 'bulwark', name: 'bulwark', detail: 'a shield that keeps coming back', hue: 200, tier: 15 },
+  // --- 25: apex. The round should be about this for as long as it lasts.
+  { id: 'carpet', name: 'carpet bombing', detail: 'carpet bombing', hue: 0, tier: 25 },
+  { id: 'armageddon', name: 'armageddon', detail: 'three runs, one after another', hue: 0, tier: 25 },
+  { id: 'blackout', name: 'blackout', detail: 'every other screen dark, and you can see them', hue: 300, tier: 25 },
+  { id: 'ironclad', name: 'ironclad', detail: 'thirty seconds of everything at once', hue: 200, tier: 25 },
+  { id: 'firestorm', name: 'firestorm', detail: 'two runs, crossing in the middle', hue: 10, tier: 25 },
 ]
+
+/** The five a given tier offers. Pools are disjoint, so this partitions REWARDS. */
+export function rewardsForTier(tier: number): RewardDef[] {
+  return REWARDS.filter((r) => r.tier === tier)
+}
 
 /** One reward per tier, indexed like `LOADOUT_TIERS`. */
 export type Loadout = [RewardId, RewardId, RewardId, RewardId]
 
-/** The ladder as it has always shipped: strike, recon, chopper, EMP. */
-export const DEFAULT_LOADOUT: Loadout = ['strike', 'recon', 'chopper', 'emp']
+/**
+ * The ladder as it shipped before the pools, mapped onto the new tiers.
+ *
+ * Strike, chopper, juggernaut, carpet: the four rungs a player who never opens
+ * the picker gets, and the four that were already the game's spine. Recon and
+ * the EMP come off the default and stay in their pools — they are the picks for
+ * somebody who would rather see the room than blow it up, and a default that
+ * contains everything teaches nobody that there was a choice.
+ */
+export const DEFAULT_LOADOUT: Loadout = ['strike', 'chopper', 'jugger', 'carpet']
 
-/** A loadout from storage or the wire: four distinct known ids, or null. */
+/**
+ * A loadout from storage or the wire: one known id per tier, in tier order.
+ *
+ * Stricter than it was, on purpose. The old check only asked that four distinct
+ * known ids came back, which was the right rule when every rung offered the
+ * same menu; now a reward belongs to exactly one tier, and an air strike in the
+ * apex slot is not a preference this game can honour. A stored loadout written
+ * by the previous build fails here and falls back to the default, which is the
+ * correct outcome — its rungs no longer exist.
+ */
 export function parseLoadout(v: unknown): Loadout | null {
   if (!Array.isArray(v) || v.length !== LOADOUT_TIERS.length) return null
-  const ids = v.filter((id): id is RewardId => REWARDS.some((r) => r.id === id))
-  if (ids.length !== LOADOUT_TIERS.length) return null
-  if (new Set(ids).size !== ids.length) return null
-  return [ids[0], ids[1], ids[2], ids[3]]
+  const ids = LOADOUT_TIERS.map((tier, i) =>
+    rewardsForTier(tier).some((r) => r.id === v[i]) ? (v[i] as RewardId) : null,
+  )
+  if (ids.some((id) => id === null)) return null
+  return [ids[0], ids[1], ids[2], ids[3]] as Loadout
 }
 
 /**
@@ -255,7 +340,7 @@ export function parseLoadout(v: unknown): Loadout | null {
  * The HUD strip that fixes it has to name the same rungs `onOwnKill` awards,
  * and the way to guarantee that is to have one list rather than two — a
  * hand-written copy in the HUD is a promise that nobody will ever retune the
- * ladder, and this ladder has already been retuned twice.
+ * ladder, and this ladder has already been retuned three times.
  *
  * `name` is what the HUD shows while you are climbing toward it. `detail` is
  * the subtitle on the banner when you land on it, which stays longer because
@@ -265,29 +350,29 @@ export interface StreakRung {
   at: number
   name: string
   detail: string
-  /** What lands, for `onOwnKill` to dispatch on. Bookends have their own. */
-  id: RewardId | 'repair' | 'juggernaut' | 'carpet'
+  /** What lands, for `onOwnKill` to dispatch on. Three has its own. */
+  id: RewardId | 'repair'
 }
 
-/** The ladder a given loadout produces. Bookends fixed, middle four chosen. */
+/** The ladder a given loadout produces. Three is fixed; the four above are chosen. */
 export function ladderFor(loadout: Loadout): StreakRung[] {
-  const middle = loadout.map((id, i) => {
-    const def = REWARDS.find((r) => r.id === id) ?? REWARDS[0]
+  const chosen = loadout.map((id, i) => {
+    const pool = rewardsForTier(LOADOUT_TIERS[i])
+    const def = pool.find((r) => r.id === id) ?? pool[0]
     return { at: LOADOUT_TIERS[i], name: def.name, detail: def.detail, id: def.id }
   })
   return [
     { at: STREAK_REPAIR, name: 'hull repair', detail: 'hull repaired', id: 'repair' },
-    ...middle,
-    { at: STREAK_JUGGERNAUT, name: 'juggernaut', detail: 'juggernaut — shielded and fast', id: 'juggernaut' },
-    { at: STREAK_CARPET, name: 'carpet bombing', detail: 'carpet bombing', id: 'carpet' },
+    ...chosen,
   ]
 }
 
-/** The banner hue when a rung lands. The bookends have house colours. */
+/** The top rung of any ladder. Past it there is nothing left to promise. */
+export const STREAK_TOP = LOADOUT_TIERS[LOADOUT_TIERS.length - 1]
+
+/** The banner hue when a rung lands. The fixed repair has a house colour. */
 const rungHue = (id: StreakRung['id']): number => {
   if (id === 'repair') return 130
-  if (id === 'juggernaut') return 190
-  if (id === 'carpet') return 0
   return REWARDS.find((r) => r.id === id)?.hue ?? 45
 }
 
@@ -307,26 +392,77 @@ const RECON_MS = 8_000
 /** How long an EMP keeps a victim's HUD dark. */
 const EMP_MS = 4_000
 
+// --- the tier pools, in milliseconds -------------------------------------
+//
+// Every one of these is a *self-authoritative* timer: it changes our own hull
+// or our own buffs, which this client already decides for itself and already
+// publishes on the state tick. Tuned so a tier reads as a tier — the skirmish
+// rewards are about the next fight, the heavy ones about the next minute.
+
+/** Field patch: hull back, and long enough of a shield to get out of the open. */
+const PATCH_SHIELD_MS = 8_000
+/** Ammo cache: reloaded now, and firing fast for a while after. */
+const CACHE_MS = 20_000
+/** Buckshot: three shells a shot. */
+const BUCK_MS = 20_000
+/** Blitz: overdrive and rapid fire together. */
+const BLITZ_MS = 18_000
+/** Repair drone: how long it runs, and how often it puts a hull point back. */
+const DRONE_MS = 20_000
+const DRONE_STEP_MS = 2_000
+/** Hunter: marked *and* doubled, for as long as most fights last. */
+const HUNTER_MS = 20_000
 /**
- * Bombs in a five-kill strike, and in the twenty-five-kill one.
+ * Bulwark: how long the warranty runs, and how long a broken shield stays down.
+ *
+ * Two seconds rather than instantly, because a shield that re-arms the same
+ * frame it breaks is not a shield, it is invulnerability — the two seconds are
+ * the window an attacker gets, and they are what keeps a bulwark tank killable
+ * by anyone willing to close the distance.
+ */
+const BULWARK_MS = 25_000
+const BULWARK_REARM_MS = 2_000
+/** Ironclad: the apex defensive pick, which is every timer at once. */
+const IRONCLAD_MS = 30_000
+/** Blackout: how long the caller sees the room it just blinded. */
+const BLACKOUT_RECON_MS = 20_000
+/** Armageddon: the gap between one run and the next. */
+const ARMAGEDDON_GAP_MS = 1_400
+
+/**
+ * How far apart the bombs in a run are, in arena units — not how many there are.
  *
  * Sized so the line is *continuous*. The first version dropped nine across a
  * 1728-unit run, which is one bomb every 216 units against a 64-unit blast
  * radius — so two thirds of the lane was safe ground and a tank standing still
  * in the middle of the strike usually took nothing at all. It looked
  * spectacular and did nothing, which is the worst thing a kill streak can be.
- * Fourteen was closer and still not closed. The run sweeps `ARENA_W + 2R` =
- * 1728 units across `n - 1` gaps, so fourteen bombs sit 133 apart against a
- * 128-unit blast diameter — five units of safe ground every 133, and a tank
- * parked in one takes nothing at all. Found by a test that put a bot at x=400,
- * which lands in exactly such a gap: bombs at 335 and 468, both 65+ away.
  *
- * Fifteen puts them 123 apart, which overlaps. Now the line really is
- * continuous, standing in it is fatal, and the warning stripe and the two
- * seconds of siren mean what the rest of this comment always claimed.
+ * A *count* fixed that on one board and quietly broke it on six. Fifteen bombs
+ * put them 123 apart on Crossroads, which is inside the 128-unit blast
+ * diameter and continuous — but the boards are different sizes, and the same
+ * fifteen on The Quarry (2100 wide) sit 159 apart, which is 31 units of safe
+ * ground every 159. Caught by a bot parked at x=900 taking nothing at all from
+ * a run that walked straight over it: bombs at 827 and 975, both 73 away.
+ *
+ * So the tuning is the *gap*, and the count comes from the board. Any board,
+ * any axis, same line. This is the same lesson as everything else here that
+ * used to be a constant: a number that was only ever right for one board is a
+ * bug waiting for the second one.
  */
-const STRIKE_BOMBS = 15
-const CARPET_BOMBS = 22
+const STRIKE_GAP = 118
+/** The apex runs are denser, so a tank in the lane takes more than one bomb. */
+const CARPET_GAP = 80
+/**
+ * How many bombs a run of this density needs to cover a span.
+ *
+ * Clamped to the 40 a receiver will accept — see `onStrike` — so a board that
+ * grew past what the wire allows drops bombs rather than silently having its
+ * run truncated at the far end by somebody else's clamp.
+ */
+const bombsFor = (span: number, gap: number): number =>
+  Math.max(2, Math.min(40, Math.round(span / gap) + 1))
+
 /** Seconds between one bomb and the next, and the hull each one takes off. */
 const STRIKE_STEP_MS = 190
 const STRIKE_DAMAGE = 2
@@ -450,6 +586,17 @@ export interface Peer {
   bot?: boolean
 }
 
+/** How a bomb run differs from the default one. See `Game.callStrike`. */
+interface StrikeOpts {
+  /** The fixed coordinate of the lane: a row for 'h', a column for 'v'. */
+  lane?: number
+  dir?: 1 | -1
+  axis?: 'h' | 'v'
+  damage?: number
+  /** Milliseconds after the usual lead-in, for staggering several runs. */
+  delay?: number
+}
+
 /** One air strike being re-simulated locally. See `StrikePayload`. */
 interface Strike {
   id: string
@@ -457,8 +604,11 @@ interface Strike {
   owner: string
   /** Start of the run, already shifted into *our* clock. */
   t0: number
+  /** The lane's fixed coordinate: a row when `axis` is 'h', a column when 'v'. */
   y: number
   dir: 1 | -1
+  /** Which way the run walks. Horizontal unless the payload said otherwise. */
+  axis: 'h' | 'v'
   n: number
   damage: number
   /**
@@ -1321,7 +1471,7 @@ export class Game {
       this.earn(rung.at)
       return
     }
-    if (this.streak > STREAK_CARPET) this.announce(`${this.streak} IN A ROW`, 'unstoppable', 45)
+    if (this.streak > STREAK_TOP) this.announce(`${this.streak} IN A ROW`, 'unstoppable', 45)
     else this.pushFeed(`${this.streak} in a row`)
   }
 
@@ -1395,16 +1545,32 @@ export class Game {
     const now = performance.now()
     this.sound('streak')
     switch (rung.id) {
+      // --- fixed ---------------------------------------------------------
       case 'repair':
-        this.tank.hp = this.maxHp
-        this.repairedAt = now
+        this.heal(now)
         break
+      // --- 5: skirmish ---------------------------------------------------
       case 'strike':
-        this.callStrike(now, STRIKE_BOMBS)
+        this.callStrike(now, STRIKE_GAP)
         break
       case 'recon':
-        this.buffs.reconUntil = Math.max(this.buffs.reconUntil, now) + RECON_MS
+        this.extend('reconUntil', now, RECON_MS)
         break
+      case 'patch':
+        this.heal(now)
+        this.extend('shieldUntil', now, PATCH_SHIELD_MS)
+        break
+      case 'cache':
+        // The reload is the point: an ammo cache spent while the barrel is
+        // empty has to end the wait, not shorten the next one.
+        this.tank.ammo = MAG_SIZE
+        this.tank.reloadingUntil = 0
+        this.extend('rapidUntil', now, CACHE_MS)
+        break
+      case 'buck':
+        this.extend('scatterUntil', now, BUCK_MS)
+        break
+      // --- 10: power -----------------------------------------------------
       case 'chopper':
         // A chopper is not a buff — it takes the tank away and hands over a
         // different vehicle. The rung used to give Overdrive, which still
@@ -1412,23 +1578,152 @@ export class Game {
         this.boardChopper(now)
         break
       case 'siege':
-        this.buffs.siegeUntil = Math.max(this.buffs.siegeUntil, now) + STREAK_SIEGE_MS
+        this.extend('siegeUntil', now, STREAK_SIEGE_MS)
         break
       case 'emp':
         this.callEmp(now)
         break
-      case 'juggernaut':
-        this.tank.hp = this.maxHp
-        this.repairedAt = now
-        this.buffs.shieldUntil = Math.max(this.buffs.shieldUntil, now) + STREAK_JUGGER_MS
-        this.buffs.speedUntil = Math.max(this.buffs.speedUntil, now) + STREAK_JUGGER_MS
+      case 'blitz':
+        this.extend('speedUntil', now, BLITZ_MS)
+        this.extend('rapidUntil', now, BLITZ_MS)
         break
+      case 'drone':
+        this.extend('regenUntil', now, DRONE_MS)
+        this.regenAt = now + DRONE_STEP_MS
+        break
+      // --- 15: heavy -----------------------------------------------------
+      case 'jugger':
+        this.heal(now)
+        this.extend('shieldUntil', now, STREAK_JUGGER_MS)
+        this.extend('speedUntil', now, STREAK_JUGGER_MS)
+        break
+      case 'salvo':
+        // Both halves at once, running opposite ways. The caller and their
+        // side are exempt from every bomb, which is what makes covering the
+        // whole board a reward rather than a coin flip.
+        this.callStrike(now, STRIKE_GAP, { lane: ARENA_H * 0.28, dir: 1 })
+        this.callStrike(now, STRIKE_GAP, { lane: ARENA_H * 0.72, dir: -1 })
+        break
+      case 'hunter':
+        this.extend('reconUntil', now, HUNTER_MS)
+        this.extend('siegeUntil', now, HUNTER_MS)
+        break
+      case 'thermite':
+        // Down the board rather than across it: the same bomb run on the
+        // other axis, which is one optional field on a payload every client
+        // already parses.
+        this.callStrike(now, STRIKE_GAP, { axis: 'v', damage: STRIKE_DAMAGE + 1 })
+        break
+      case 'bulwark':
+        this.extend('bulwarkUntil', now, BULWARK_MS)
+        this.buffs.shieldUntil = Math.max(this.buffs.shieldUntil, this.buffs.bulwarkUntil)
+        break
+      // --- 25: apex ------------------------------------------------------
       case 'carpet':
-        this.callStrike(now, CARPET_BOMBS)
+        this.callStrike(now, CARPET_GAP)
+        break
+      case 'armageddon':
+        // Three runs walking down the board one after another, so there is
+        // nowhere that stays safe for more than a second and a half.
+        this.callStrike(now, CARPET_GAP, { lane: ARENA_H * 0.25, dir: 1 })
+        this.callStrike(now, CARPET_GAP, { lane: ARENA_H * 0.5, dir: -1, delay: ARMAGEDDON_GAP_MS })
+        this.callStrike(now, CARPET_GAP, { lane: ARENA_H * 0.75, dir: 1, delay: ARMAGEDDON_GAP_MS * 2 })
+        break
+      case 'blackout':
+        this.callEmp(now)
+        this.extend('reconUntil', now, BLACKOUT_RECON_MS)
+        break
+      case 'ironclad':
+        this.heal(now)
+        this.extend('bulwarkUntil', now, IRONCLAD_MS)
+        this.buffs.shieldUntil = Math.max(this.buffs.shieldUntil, this.buffs.bulwarkUntil)
+        this.extend('siegeUntil', now, IRONCLAD_MS)
+        this.extend('speedUntil', now, IRONCLAD_MS)
+        break
+      case 'firestorm':
+        this.callStrike(now, CARPET_GAP)
+        this.callStrike(now, STRIKE_GAP, { axis: 'v', damage: STRIKE_DAMAGE + 1 })
         break
     }
     this.announce(rung.name.toUpperCase(), rung.detail, rungHue(rung.id))
     return true
+  }
+
+  /**
+   * Hull back to full. Three rewards do this and they should agree about it.
+   *
+   * `repairedAt` drives the flash on the hull bar, so a heal that forgets it
+   * is a heal the player only finds out about by reading a number.
+   */
+  private heal(now: number): void {
+    this.tank.hp = this.maxHp
+    this.repairedAt = now
+  }
+
+  /**
+   * Run a buff for `ms` from now, or from its own end if it is already up.
+   *
+   * `Math.max(current, now) + ms` rather than `now + ms`: spending two rewards
+   * that both grant a shield should give you both, not the second one only.
+   * Written once because it was written five ways, and one of them silently
+   * shortened a running buff.
+   */
+  private extend(key: 'rapidUntil' | 'shieldUntil' | 'speedUntil' | 'scatterUntil' | 'siegeUntil' | 'reconUntil' | 'bulwarkUntil' | 'regenUntil', now: number, ms: number): void {
+    this.buffs[key] = Math.max(this.buffs[key], now) + ms
+  }
+
+  /** When the repair drone puts the next hull point back. */
+  private regenAt = 0
+  /** When a bulwark shield comes back, or 0 if none is owed. */
+  private shieldRearmAt = 0
+
+  /**
+   * A shield ate a hit.
+   *
+   * Under a bulwark the shield is not gone, it is *down* — booked to come back
+   * a couple of seconds later. Said out loud in the banner, because a player
+   * who does not know the shield is coming back plays the next two seconds as
+   * if they had none, which throws away the reward they spent.
+   */
+  private popShield(): void {
+    const now = performance.now()
+    this.buffs.shieldUntil = 0
+    this.sound('shield')
+    if (hasBuff(this.buffs, 'bulwarkUntil', now)) {
+      this.shieldRearmAt = now + BULWARK_REARM_MS
+      this.announce('SHIELD BROKE', 'bulwark — back in two seconds', 200)
+      return
+    }
+    this.announce('SHIELD BROKE', 'that one was free', 200)
+  }
+
+  /**
+   * The two rewards that tick rather than land: the drone and the bulwark.
+   *
+   * Both are deliberately driven from `update` and not from a timer. A
+   * `setTimeout` next to a render loop is a deadline the simulation cannot see
+   * — it fires while the tab is backgrounded, it fires after a death, and it
+   * fires after the round it belonged to has ended. Everything here is checked
+   * against the same clock the buffs themselves are written on.
+   */
+  private stepRewards(now: number): void {
+    if (this.tank.dead || this.watching) return
+    if (hasBuff(this.buffs, 'regenUntil', now) && now >= this.regenAt) {
+      this.regenAt = now + DRONE_STEP_MS
+      if (this.tank.hp < this.maxHp) {
+        this.tank.hp++
+        this.repairedAt = now
+        this.sound('pickup')
+      }
+    }
+    if (!this.shieldRearmAt || now < this.shieldRearmAt) return
+    this.shieldRearmAt = 0
+    // The warranty may have run out while the shield was down. If it has, the
+    // shield stays broken — a bulwark that re-arms after it expires would hand
+    // out a free shield for every hit taken in its last two seconds.
+    if (!hasBuff(this.buffs, 'bulwarkUntil', now)) return
+    this.buffs.shieldUntil = this.buffs.bulwarkUntil
+    this.announce('BULWARK', 'shield back up', 200)
   }
 
   /**
@@ -1444,13 +1739,46 @@ export class Game {
    * so twelve explosions cost one publish — worth stating because a strike is
    * already the loudest thing in the game and it should not also be the
    * heaviest thing on the relay.
+   *
+   * Four rewards are this function with different arguments — salvo is two
+   * runs, armageddon is three staggered ones, thermite turns the lane ninety
+   * degrees, firestorm crosses one of each. None of them is a new mechanic on
+   * the wire, which is why they could all land together: a receiver that
+   * understands an air strike understands every one of them.
    */
-  private callStrike(now: number, bombs: number): void {
-    const y = this.tank.y < ARENA_H / 2 ? ARENA_H * 0.72 : ARENA_H * 0.28
-    const dir: 1 | -1 = this.tank.x < ARENA_W / 2 ? 1 : -1
+  private callStrike(now: number, gap: number, opts: StrikeOpts = {}): void {
+    const axis = opts.axis ?? 'h'
+    // The count comes from the board, not from a constant: the eight boards are
+    // between 1500 and 2100 units across, and a fixed number of bombs is a
+    // continuous line on one of them and a dashed one on the rest.
+    const bombs = bombsFor((axis === 'v' ? ARENA_H : ARENA_W) + STRIKE_RADIUS * 2, gap)
+    // The lane defaults to the far half on whichever axis this run walks. A
+    // caller in the top half gets a run along the bottom; a vertical run on a
+    // caller sitting left goes down the right. Same rule, one axis over.
+    const lane =
+      opts.lane ??
+      (axis === 'v'
+        ? this.tank.x < ARENA_W / 2
+          ? ARENA_W * 0.72
+          : ARENA_W * 0.28
+        : this.tank.y < ARENA_H / 2
+          ? ARENA_H * 0.72
+          : ARENA_H * 0.28)
+    const dir: 1 | -1 =
+      opts.dir ?? (axis === 'v' ? (this.tank.y < ARENA_H / 2 ? 1 : -1) : this.tank.x < ARENA_W / 2 ? 1 : -1)
+    const damage = opts.damage ?? STRIKE_DAMAGE
     // The run starts two seconds from now, not now — see `STRIKE_LEAD_MS`.
-    const t0 = now + STRIKE_LEAD_MS
-    const payload: StrikePayload = { t0, y, dir, n: bombs, d: STRIKE_DAMAGE }
+    // `delay` staggers the runs of a multi-run reward on top of that, and it
+    // rides in `t0` rather than in a field of its own so a receiver needs to
+    // know nothing about armageddon to walk its three runs correctly.
+    const t0 = now + STRIKE_LEAD_MS + (opts.delay ?? 0)
+    // Two shapes, one kind. A vertical run carries `x` and no `y` so a client
+    // that predates it drops the payload instead of walking the column
+    // coordinate down a row — see `LanePayload`.
+    const payload: StrikePayload | LanePayload =
+      axis === 'v'
+        ? { k: 'lane', t0, x: lane, dir, n: bombs, d: damage }
+        : { t0, y: lane, dir, n: bombs, d: damage }
     const id = randomId()
     // Ours runs locally from the same numbers rather than waiting for the relay
     // to echo it back — otherwise the person who called it watches their own
@@ -1463,10 +1791,11 @@ export class Game {
       // two seconds before anybody else sees it — which is exactly the kind of
       // divergence the payload exists to prevent.
       t0,
-      y,
+      y: lane,
       dir,
+      axis,
       n: bombs,
-      damage: STRIKE_DAMAGE,
+      damage,
       fired: new Set(),
     })
     this.publishAsSession(KIND_STRIKE, payload)
@@ -1515,13 +1844,16 @@ export class Game {
   }
 
   private onStrike(e: Event): void {
-    const p = parsePayload<StrikePayload & Partial<EmpPayload>>(e.content)
+    const p = parsePayload<StrikePayload & Partial<EmpPayload> & Partial<LanePayload>>(e.content)
     if (!p) return
     // An EMP rides this kind with no `y` on purpose: a client too old to know
     // the branch below falls through to the shape check and drops it, rather
     // than clamping it into a one-bomb strike along the top wall.
     if (p.k === 'emp') return this.onEmp(e)
-    if (typeof p.t0 !== 'number' || typeof p.y !== 'number') return
+    // A lane run says where it is in `x`, and deliberately carries no `y`.
+    const vertical = p.k === 'lane'
+    const lane = vertical ? p.x : p.y
+    if (typeof p.t0 !== 'number' || typeof lane !== 'number') return
     // Our own strike, echoed back by a relay. Every other handler guards
     // against this and this one did not, and the consequences were much worse
     // than a duplicate: `ensurePeer` created a peer *for ourselves*, which put
@@ -1543,14 +1875,15 @@ export class Game {
       owner: e.pubkey,
       // Into our clock, like every other timestamp that crosses the wire.
       t0: p.t0 + peer.offset,
-      y: Math.max(0, Math.min(ARENA_H, p.y)),
+      y: Math.max(0, Math.min(vertical ? ARENA_W : ARENA_H, lane)),
       dir: p.dir === -1 ? -1 : 1,
+      axis: vertical ? 'v' : 'h',
       n: Math.max(1, Math.min(40, Math.floor(p.n))),
       damage: Math.max(1, Math.min(MAX_HULL, Math.floor(p.d))),
       fired: new Set(),
     })
-    this.sound('siren', { at: { x: ARENA_W / 2, y: p.y } })
-    this.pushFeed(`${peer.name} called an air strike`)
+    this.sound('siren', { at: vertical ? { x: lane, y: ARENA_H / 2 } : { x: ARENA_W / 2, y: lane } })
+    this.pushFeed(`${peer.name} called ${vertical ? 'a thermite lane' : 'an air strike'}`)
   }
 
   /**
@@ -1562,17 +1895,23 @@ export class Game {
    */
   private stepStrikes(now: number): void {
     for (const [id, strike] of this.strikes) {
-      const span = ARENA_W + STRIKE_RADIUS * 2
+      // A vertical run walks the height of the board instead of its width.
+      // Everything below is the same walk on the other axis: the bomb's moving
+      // coordinate is `along`, and the lane supplies the other one.
+      const vertical = strike.axis === 'v'
+      const span = (vertical ? ARENA_H : ARENA_W) + STRIKE_RADIUS * 2
       for (let i = 0; i < strike.n; i++) {
         if (strike.fired.has(i)) continue
         if (now < strike.t0 + i * STRIKE_STEP_MS) continue
         strike.fired.add(i)
         const t = strike.n > 1 ? i / (strike.n - 1) : 0.5
         const along = strike.dir === 1 ? t : 1 - t
-        const x = -STRIKE_RADIUS + along * span
+        const walk = -STRIKE_RADIUS + along * span
+        const x = vertical ? strike.y : walk
+        const y = vertical ? walk : strike.y
         const mine = strike.owner === this.identity.sessionPubkey
-        this.blasts.push({ x, y: strike.y, mine })
-        this.sound('blast', { at: { x, y: strike.y } })
+        this.blasts.push({ x, y, mine })
+        this.sound('blast', { at: { x, y } })
         // Bots are in the lane like anybody else.
         //
         // They were not, and it is the whole reason Puzz reported the air
@@ -1583,14 +1922,14 @@ export class Game {
         // for exactly this reason — `rakeBots` came after bots and does hit
         // them — which is the tell that this was an omission rather than a
         // balance decision.
-        this.strikeBots(x, strike.y, strike.damage, strike.owner)
+        this.strikeBots(x, y, strike.damage, strike.owner)
         if (mine || this.watching || this.tank.dead) continue
         // A teammate's strike walks over us. The lane is picked away from the
         // caller already; on a team that exemption has to cover the side, or a
         // reward earned by one player is a punishment for their partner.
         if (this.friendly(strike.owner)) continue
         const dx = this.tank.x - x
-        const dy = this.tank.y - strike.y
+        const dy = this.tank.y - y
         if (dx * dx + dy * dy > STRIKE_RADIUS * STRIKE_RADIUS) continue
         if (hasBuff(this.buffs, 'shieldUntil', now)) {
           this.sound('shield')
@@ -2193,9 +2532,7 @@ export class Game {
     if (this.friendly(owner)) return
     if ((this.tank.x - x) ** 2 + (this.tank.y - y) ** 2 > r * r) return
     if (hasBuff(this.buffs, 'shieldUntil', performance.now())) {
-      this.buffs.shieldUntil = 0
-      this.sound('shield')
-      this.announce('SHIELD BROKE', 'that one was free', 200)
+      this.popShield()
       return
     }
     this.tank.hp -= 1
@@ -2337,9 +2674,7 @@ export class Game {
       if (now < (this.chopperHitAt.get(peer.session) ?? 0)) continue
       this.chopperHitAt.set(peer.session, now + CHOPPER_HIT_MS)
       if (hasBuff(this.buffs, 'shieldUntil', now)) {
-        this.buffs.shieldUntil = 0
-        this.sound('shield')
-        this.announce('SHIELD BROKE', 'that one was free', 200)
+        this.popShield()
         continue
       }
       this.tank.hp -= CHOPPER_DAMAGE
@@ -2682,6 +3017,7 @@ export class Game {
     // taken to zero by a chopper should not also eat a shell in the same frame
     // and report two deaths.
     this.takeChopperFire(now)
+    this.stepRewards(now)
     this.stepFlags(now)
     this.stepTerritory(dt)
     this.refreshPickups()
@@ -2762,9 +3098,7 @@ export class Game {
     const r = LOB_BLAST + TANK_RADIUS
     if ((this.tank.x - shell.x) ** 2 + (this.tank.y - shell.y) ** 2 > r * r) return
     if (hasBuff(this.buffs, 'shieldUntil', performance.now())) {
-      this.buffs.shieldUntil = 0
-      this.sound('shield')
-      this.announce('SHIELD BROKE', 'that one was free', 200)
+      this.popShield()
       return
     }
     this.tank.hp -= shell.damage
@@ -2793,9 +3127,7 @@ export class Game {
       // tank decides what happened to it, and the result rides out in the next
       // state tick like any other change.
       if (hasBuff(this.buffs, 'shieldUntil', performance.now())) {
-        this.buffs.shieldUntil = 0
-        this.sound('shield')
-        this.announce('SHIELD BROKE', 'that one was free', 200)
+        this.popShield()
         return
       }
       this.tank.hp -= shell.damage
@@ -2869,6 +3201,11 @@ export class Game {
     this.tank.hp = 0
     this.streak = 0
     clearBuffs(this.buffs)
+    // The two rewards that tick have bookkeeping outside `Buffs`, and a timer
+    // that survives a death or a round boundary is a hull point handed out in
+    // a round that had already ended.
+    this.regenAt = 0
+    this.shieldRearmAt = 0
     // Last round's EMP does not darken this round's first seconds.
     this.empUntil = 0
     this.tank.respawnAt = performance.now() + RESPAWN_DELAY * 1000 * this.modifier.respawn
@@ -3198,6 +3535,11 @@ export class Game {
     // you both, for the same reason the score resets.
     this.earned = []
     clearBuffs(this.buffs)
+    // The two rewards that tick have bookkeeping outside `Buffs`, and a timer
+    // that survives a death or a round boundary is a hull point handed out in
+    // a round that had already ended.
+    this.regenAt = 0
+    this.shieldRearmAt = 0
     // A strike called under the old block does not keep bombing the new one.
     this.strikes.clear()
     // Nor does a gunship. Ten seconds is a rung on a streak, and the streak is
