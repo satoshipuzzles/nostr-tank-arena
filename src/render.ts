@@ -988,6 +988,14 @@ function coverMaterials(): Record<CoverKind, THREE.MeshStandardMaterial> {
     // of the wheel.
     rock: new THREE.MeshStandardMaterial({ map: stone, bumpMap: stone, bumpScale: 1.6, color: 0x9e988e, roughness: 0.94 }),
     fence: new THREE.MeshStandardMaterial({ map: stone, color: 0x8d8479, roughness: 0.96 }),
+    // The vault wall. The same stone as the border it continues, warmed and
+    // lightened — enough that a player who has seen one knows what they are
+    // looking at from across the board, and not so much that a player who
+    // never has reads it as a different *material*. The tell that it can be
+    // broken is the damage tiers it goes through once somebody starts, which
+    // is a thing you can point at rather than a colour you have to be told
+    // about.
+    breach: new THREE.MeshStandardMaterial({ map: stone, color: 0xb09a72, roughness: 0.9 }),
     crate: new THREE.MeshStandardMaterial({ map: woodTexture(), color: 0xb08a55, roughness: 0.82 }),
     barrel: new THREE.MeshStandardMaterial({ map: drumTexture(), color: 0x847c6b, roughness: 0.52, metalness: 0.3 }),
     sandbag: new THREE.MeshStandardMaterial({ map: canvasTexture(), color: 0xbdb583, roughness: 0.98 }),
@@ -1291,6 +1299,10 @@ const SCENERY: Record<CoverKind, (r: Rect, rnd: () => number, bag: ReturnType<ty
   sandbag: sandbagParts,
   hedge: hedgeParts,
   fence: fenceParts,
+  // The same coursing as the border, deliberately: a vault wall is a piece of
+  // the border that happens to be soft, and building it out of different
+  // geometry would say "this is scenery" rather than "this is a wall".
+  breach: fenceParts,
   water: waterParts,
   cliff: cliffParts,
 }

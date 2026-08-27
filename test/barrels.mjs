@@ -42,14 +42,19 @@ await build({
   logLevel: 'error',
 })
 const {
-  BREAKABLE, BARREL_HP, CRATE_HP, WALLS, applyCoverBits, coverBits, coverGeneration,
+  BREAKABLE, BARREL_HP, CRATE_HP, fullHpOf, WALLS, applyCoverBits, coverBits, coverGeneration,
   damageCover, explodes, resetCover, setLayout, pointInTallWall, isLow,
   spawnShell, stepShell,
 } = await import(out)
 
 /** Just the barrels, which is what most of this suite is about. */
 const barrels = () => BREAKABLE.filter((b) => explodes(b))
-const crates = () => BREAKABLE.filter((b) => !explodes(b))
+// By kind, not by "does not explode". Those meant the same thing while barrels
+// and crates were the only two destructible kinds; the vault's breach walls are
+// a third, and they are eight-hit-shaped enough that this quietly started
+// testing one of them instead — "a crate starts at its own hull" failed with
+// `crate 6 against barrel 3`, which is a breach wall wearing a crate's name.
+const crates = () => BREAKABLE.filter((b) => b.kind === 'crate')
 
 const failures = []
 const check = (name, ok, detail = '') => {
@@ -215,12 +220,14 @@ resetCover()
   damageCover(gone.id, gone.hp)
   damageCover(dented.id, 1)
   check('a partly-shot board reports its holes',
-    coverBits() === 1 && dented.hp === (explodes(dented) ? BARREL_HP : CRATE_HP) - 1,
+    // `fullHpOf`, not "barrel or crate": the vault's breach walls are a third
+    // destructible kind and this arithmetic silently expected a crate's eight.
+    coverBits() === 1 && dented.hp === fullHpOf(dented) - 1,
     `bits=${coverBits()} dented=${dented.hp}`)
   resetCover()
   check('a new round puts everything back, including the dented one',
     coverBits() === 0 &&
-      BREAKABLE.every((b) => b.gone === false && b.hp === (explodes(b) ? BARREL_HP : CRATE_HP)))
+      BREAKABLE.every((b) => b.gone === false && b.hp === fullHpOf(b)))
 
   // The case that made `resetCover` necessary rather than leaving it to
   // `setLayout`: the map is `blockHash % 8`, so two rounds in a row land on the

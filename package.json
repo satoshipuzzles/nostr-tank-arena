@@ -52,7 +52,8 @@
     "test:suit": "node test/suit.mjs",
     "test:spitfire": "node test/spitfire.mjs",
     "test:spitfire-browser": "node test/spitfire-browser.mjs",
-    "test:death": "node test/death.mjs"
+    "test:death": "node test/death.mjs",
+    "test:vault": "node test/vault.mjs"
   },
   "dependencies": {
     "nostr-tools": "^2.10.4",

@@ -36,7 +36,16 @@
  * the *edge* of high ground; what makes it different from a rock is that a
  * shell fired from up there passes over it. See `pointInShellWall`.
  */
-export type CoverKind = 'rock' | 'crate' | 'barrel' | 'sandbag' | 'hedge' | 'fence' | 'water' | 'cliff'
+export type CoverKind =
+  | 'rock'
+  | 'crate'
+  | 'barrel'
+  | 'sandbag'
+  | 'hedge'
+  | 'fence'
+  | 'breach'
+  | 'water'
+  | 'cliff'
 
 export interface Rect {
   x: number
@@ -180,6 +189,11 @@ export const RUBBLE_SPEED = 0.55
 const DESTRUCTIBLE: ReadonlyMap<CoverKind, number> = new Map<CoverKind, number>([
   ['barrel', 3],
   ['crate', 8],
+  // Six: between a barrel and a crate, and the number is the whole balance of
+  // the vault. Three and every round is opened in the first minute by somebody
+  // driving past; ten and nobody ever bothers. Six is two magazines, which is a
+  // decision to spend rather than a thing that happens.
+  ['breach', 6], // BREACH_HP, declared below with the other two
 ])
 
 /**
@@ -230,6 +244,19 @@ export const damageTier = (r: Rect): number => Math.max(r.dmg ?? 0, tierFromHp(r
 /** Kept as a name because the blast is a barrel's alone. See `explodes`. */
 export const BARREL_HP = 3
 export const CRATE_HP = 8
+/** A vault wall. Two magazines, which makes breaching a decision. */
+export const BREACH_HP = 6
+
+/**
+ * How much hull a piece of cover starts with, by kind.
+ *
+ * Exported because the suites need it and because "not a barrel, therefore a
+ * crate" stopped being true the moment the vault added a third destructible
+ * kind — two checks in test/barrels.mjs were quietly measuring a breach wall
+ * against a crate's numbers.
+ */
+export const fullHpOf = (r: Rect): number =>
+  (r.kind === undefined ? undefined : DESTRUCTIBLE.get(r.kind)) ?? 0
 
 /** True if destroying this rect should take everything nearby with it. */
 export const explodes = (r: Rect): boolean => r.kind === 'barrel'
@@ -270,6 +297,67 @@ export interface Pt {
 const BORDER = 24
 
 /** The outer fence, sized to the board. */
+/**
+ * The vault: a sealed pocket against the border, opened by shooting into it.
+ *
+ * Puzz: *"maybe we should have a secret part of maps that can unlock when
+ * shooting through the wall border, maybe some borders can be broken through."*
+ *
+ * Three walls and the board's own border make a room with a pickup pad in it
+ * and no way in. The walls are `breach` — destructible like a crate, six hits,
+ * with the same visible damage tiers, so a wall somebody has been working on
+ * reads as *nearly open* from across the board and everybody can see it coming.
+ *
+ * It rides the machinery destructible cover already has, and that is the whole
+ * reason this is cheap: a breached wall is a bit in the `b` union on the state
+ * tick, which is order-independent, idempotent, impossible to un-set and
+ * self-healing for a late joiner. There is no "the vault is open" event to
+ * miss, and two clients cannot disagree about a room being open.
+ *
+ * Placed at a fraction of the board rather than at fixed pixels, because the
+ * boards are between 1500 and 2100 across and a vault authored in pixels is a
+ * vault in a different place on every one. The mirror puts the second one in
+ * the opposite corner, like everything else here.
+ */
+const VAULT_SIDE = 150
+const VAULT_WALL = 20
+/**
+ * Where the pocket's interior starts, as a fraction of the board's width.
+ *
+ * 0.18 rather than anything nearer the middle, and the number was measured
+ * rather than chosen: at 0.22 and above the vault lands on The Quarry's crates,
+ * at 0.32 on The Yard's and at 0.36 on The Lanes' boulders. Between 0.14 and
+ * 0.20 every board in the rotation is clear, and 0.18 sits in the middle of
+ * that window — far enough from the corner spawn at (175, 175) that nobody
+ * respawns against the wall, and close enough to the corner that the pocket
+ * reads as part of the edge rather than as a shed in the open.
+ */
+const VAULT_AT = 0.18
+
+const vaultOrigin = (w: number): { x: number; y: number } => ({
+  x: Math.round(w * VAULT_AT),
+  y: BORDER,
+})
+
+const vault = (w: number): Rect[] => {
+  const { x, y } = vaultOrigin(w)
+  return [
+    // The face, along the bottom of the pocket: the wall most shots will find,
+    // because it is the one pointing at the middle of the board.
+    { x: x - VAULT_WALL, y: y + VAULT_SIDE, w: VAULT_SIDE + VAULT_WALL * 2, h: VAULT_WALL, kind: 'breach' },
+    // And the two sides, so a player who works out what it is can pick their
+    // own way in rather than everybody queueing at the same hole.
+    { x: x - VAULT_WALL, y, w: VAULT_WALL, h: VAULT_SIDE, kind: 'breach' },
+    { x: x + VAULT_SIDE, y, w: VAULT_WALL, h: VAULT_SIDE, kind: 'breach' },
+  ]
+}
+
+/** The cache inside. One pad, and the mirror puts one in the far vault too. */
+const vaultPad = (w: number): Pt => {
+  const { x, y } = vaultOrigin(w)
+  return { x: x + VAULT_SIDE / 2, y: y + VAULT_SIDE / 2 }
+}
+
 const ring = (w: number, h: number): Rect[] => [
   { x: 0, y: 0, w, h: BORDER, kind: 'fence' },
   { x: 0, y: h - BORDER, w, h: BORDER, kind: 'fence' },
@@ -733,8 +821,21 @@ export function setLayout(index: number): void {
   layoutName = spec.name
 
   const half = spec.cover(spec.w, spec.h)
+  // The vault goes in next to the border rather than being authored per board,
+  // for the same reason the border is: it is placed as a fraction of the board,
+  // so it lands in the same *relative* corner on a 1500-wide knife fight and on
+  // a 2100-wide one, and a board added later gets one without anybody
+  // remembering to add it. Its mirror is explicit because — unlike `ring` — one
+  // vault is not symmetric on its own.
+  const vaults = vault(spec.w)
   WALLS.length = 0
-  WALLS.push(...ring(spec.w, spec.h), ...half, ...half.map((r) => flip(r, spec.w, spec.h)))
+  WALLS.push(
+    ...ring(spec.w, spec.h),
+    ...vaults,
+    ...vaults.map((r) => flip(r, spec.w, spec.h)),
+    ...half,
+    ...half.map((r) => flip(r, spec.w, spec.h)),
+  )
 
   // Stamp identity and hulls. Order is `ring`, then the authored half, then its
   // mirror — the same on every client, because the layout came from the block
@@ -757,7 +858,9 @@ export function setLayout(index: number): void {
   SPAWNS.length = 0
   SPAWNS.push(...spec.spawns(spec.w, spec.h))
 
-  const pads = spec.pads(spec.w, spec.h)
+  // The cache goes first so its index is stable across boards, which makes a
+  // pad id in a log answer "was that the vault" without a lookup.
+  const pads = [vaultPad(spec.w), ...spec.pads(spec.w, spec.h)]
   PADS.length = 0
   PADS.push(...pads, ...pads.map((p) => flipPt(p, spec.w, spec.h)))
 
