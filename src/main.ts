@@ -2937,7 +2937,15 @@ function drawNotice(game: Game, now: number): void {
   node.hidden = false
   node.style.opacity = String(age > 0.7 ? 1 - (age - 0.7) / 0.3 : 1)
   node.style.setProperty('--notice-hue', String(notice.hue))
-  node.innerHTML = `<b>${escapeHtml(notice.text)}</b><span>${escapeHtml(notice.sub)}</span>`
+  // Rewritten only when the notice itself changes. This runs every HUD frame,
+  // and `innerHTML` replaces the children even when the string is identical —
+  // which would restart the punch animation on `#notice b` at HUD rate and
+  // turn it into a strobe. Keyed on `at` rather than the text, because two
+  // consecutive "TRIPLE KILL"s are two different punches.
+  if (node.dataset.at !== String(notice.at)) {
+    node.dataset.at = String(notice.at)
+    node.innerHTML = `<b>${escapeHtml(notice.text)}</b><span>${escapeHtml(notice.sub)}</span>`
+  }
 }
 
 /**
