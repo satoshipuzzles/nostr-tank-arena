@@ -27,9 +27,12 @@ import {
   ARENA_H,
   ARENA_W,
   DAMAGE_TIERS,
+  MESAS,
+  RAMPS,
   WALLS,
   coverGeneration,
   damageTier,
+  elevationAt,
   onLayoutChange,
   pointInTallWall,
 } from './arena'
@@ -47,6 +50,14 @@ import { DEFAULT_SKIN, SKINS, type CamoId, type Skin, type SkinId } from './skin
 // Board furniture, in arena units so it stays in scale with the simulation.
 const WALL_H = 58
 const FENCE_H = 96
+/**
+ * How high a mesa stands. Everything on high ground — the slab, the cliff
+ * faces around it, a tank driving on it, the shell that tank fires — is
+ * lifted by `elevationAt(x, y) * MESA_H`, so this one number is the whole
+ * vertical language of terrain. Below WALL_H on purpose: a rock on the mesa
+ * top must still read as cover, and a tank up there must not see over one.
+ */
+const MESA_H = 38
 const BOARD_DROP = 110
 const RIM = 46
 /** Where the aim raycast meets the world — turret height, so pointing at a
@@ -799,6 +810,35 @@ const canvasTexture = () =>
     }
   }, 0x77b2)
 
+/**
+ * Still water with light on it: a deep blue-green base, pale ripple arcs, and
+ * a few darker patches so a big rect does not tile visibly. The mini-golf
+ * water hazard, which is exactly the register the rest of this board plays in.
+ */
+const waterTexture = () =>
+  paint((ctx, rnd) => {
+    ctx.fillStyle = '#2e6b8f'
+    ctx.fillRect(0, 0, 128, 128)
+    for (let i = 0; i < 26; i++) {
+      const x = rnd() * 128
+      const y = rnd() * 128
+      ctx.fillStyle = rnd() > 0.5 ? 'rgba(24,74,104,0.35)' : 'rgba(58,124,156,0.30)'
+      ctx.beginPath()
+      ctx.ellipse(x, y, 8 + rnd() * 22, 5 + rnd() * 12, rnd() * TAU, 0, TAU)
+      ctx.fill()
+    }
+    ctx.strokeStyle = 'rgba(214,236,244,0.5)'
+    ctx.lineWidth = 1.6
+    for (let i = 0; i < 22; i++) {
+      const x = rnd() * 128
+      const y = rnd() * 128
+      const r = 4 + rnd() * 10
+      ctx.beginPath()
+      ctx.arc(x, y, r, Math.PI * (0.1 + rnd() * 0.3), Math.PI * (0.6 + rnd() * 0.3))
+      ctx.stroke()
+    }
+  }, 0x4ab7)
+
 /** Painted steel that has been outside a while. */
 const drumTexture = () =>
   paint((ctx, rnd) => {
@@ -838,6 +878,13 @@ function coverMaterials(): Record<CoverKind, THREE.MeshStandardMaterial> {
     barrel: new THREE.MeshStandardMaterial({ map: drumTexture(), color: 0x847c6b, roughness: 0.52, metalness: 0.3 }),
     sandbag: new THREE.MeshStandardMaterial({ map: canvasTexture(), color: 0xbdb583, roughness: 0.98 }),
     hedge: new THREE.MeshStandardMaterial({ map: foliageTexture(), color: 0x7a9455, roughness: 0.95 }),
+    // Glossier than everything else so it reads as wet, but not mirror-smooth:
+    // at 0.16 the sun blew the east half of the river out to a white sheet
+    // from the board camera's angle, and a river you read by glare alone is a
+    // river half the board cannot see.
+    water: new THREE.MeshStandardMaterial({ map: waterTexture(), color: 0x86aec4, roughness: 0.6, metalness: 0 }),
+    // The mesa's retaining wall: the same granite as the boulders, sunburnt.
+    cliff: new THREE.MeshStandardMaterial({ map: stone, bumpMap: stone, bumpScale: 1.4, color: 0xa08d6d, roughness: 0.95 }),
   }
 }
 
@@ -1085,6 +1132,44 @@ function rubbleParts(r: Rect, rnd: () => number, bag: ReturnType<typeof partBag>
   }
 }
 
+/**
+ * A pool sunk into the felt: one low slab whose top sits just proud of the
+ * turf, and a scatter of flat lily-pad discs to break the sheet up. The slab
+ * fills the whole footprint because the *bank* is the rule — a tank stops at
+ * the rect's edge, so the water has to visibly reach it.
+ */
+function waterParts(r: Rect, rnd: () => number, bag: ReturnType<typeof partBag>): void {
+  const { long, short } = longAxis(r)
+  const g = new RoundedBoxGeometry(long, 7, short, 1, 2.5)
+  g.translate(0, 0.5, 0)
+  bag.put(g)
+  const n = Math.max(2, Math.round((long * short) / 60000))
+  for (let i = 0; i < n; i++) {
+    const rad = 7 + rnd() * 9
+    const pad = new THREE.CylinderGeometry(rad, rad, 1.6, 10)
+    pad.translate((rnd() - 0.5) * (long - rad * 2) * 0.9, 4.2, (rnd() - 0.5) * (short - rad * 2) * 0.9)
+    bag.put(pad)
+  }
+}
+
+/**
+ * A retaining wall the height of the mesa it edges. Courses of cut stone
+ * rather than boulders, packed flush like the rocks are, because the shell
+ * bounces off the whole rectangle and the silhouette has to fill it. The
+ * height jitter is per block and small — a rampart, not a rockslide.
+ */
+function cliffParts(r: Rect, rnd: () => number, bag: ReturnType<typeof partBag>): void {
+  const { long, short } = longAxis(r)
+  const n = Math.max(1, Math.round(long / Math.max(short, 44)))
+  const seg = long / n
+  for (let i = 0; i < n; i++) {
+    const hgt = MESA_H * (0.94 + rnd() * 0.1)
+    const g = new RoundedBoxGeometry(seg * 1.02, hgt, short, 1, 2.5)
+    g.translate((i + 0.5) * seg - long / 2, hgt / 2, 0)
+    bag.put(g)
+  }
+}
+
 const SCENERY: Record<CoverKind, (r: Rect, rnd: () => number, bag: ReturnType<typeof partBag>) => void> = {
   rock: rockParts,
   crate: crateParts,
@@ -1092,6 +1177,8 @@ const SCENERY: Record<CoverKind, (r: Rect, rnd: () => number, bag: ReturnType<ty
   sandbag: sandbagParts,
   hedge: hedgeParts,
   fence: fenceParts,
+  water: waterParts,
+  cliff: cliffParts,
 }
 
 /**
@@ -2211,9 +2298,45 @@ export class Renderer {
       mesh.position.set(w.x + w.w / 2, 0, w.y + w.h / 2)
       // The fence is the one thing a shadow buys nothing on: it rings the
       // board, so its shadow falls outward onto the rim and off the world.
-      mesh.castShadow = kind !== 'fence'
+      // Water lies flat on the felt and has no shadow to cast either.
+      mesh.castShadow = kind !== 'fence' && kind !== 'water'
       mesh.receiveShadow = true
       this.board.add(mesh)
+    }
+
+    // High ground. The slab is the drivable top — the cliff rects around it
+    // are ordinary cover, drawn by the loop above — and the wedge is the ramp.
+    // Turf-coloured but a shade drier than the felt, so the high ground reads
+    // as its own place from the board camera.
+    for (const m of MESAS) {
+      const slab = new THREE.Mesh(
+        new RoundedBoxGeometry(m.w, MESA_H, m.h, 2, 6),
+        toy(0x8aa257, { roughness: 0.95 }),
+      )
+      slab.position.set(m.x + m.w / 2, MESA_H / 2 - 1, m.y + m.h / 2)
+      slab.castShadow = true
+      slab.receiveShadow = true
+      this.board.add(slab)
+    }
+    for (const r of RAMPS) {
+      const alongX = r.dir === 'e' || r.dir === 'w'
+      const run = alongX ? r.w : r.h
+      const width = alongX ? r.h : r.w
+      const slope = Math.hypot(run, MESA_H)
+      const angle = Math.atan2(MESA_H, run)
+      const wedge = new THREE.Mesh(
+        new THREE.BoxGeometry(alongX ? slope : width, 10, alongX ? width : slope),
+        toy(0x96a86a, { roughness: 0.95 }),
+      )
+      // A tilted slab whose top runs from the turf at the low end to the mesa
+      // lip at the high end. The curbs alongside are cliff rects in the
+      // layout, so the open sides of the box are never seen.
+      if (alongX) wedge.rotation.z = r.dir === 'e' ? angle : -angle
+      else wedge.rotation.x = r.dir === 's' ? -angle : angle
+      wedge.position.set(r.x + r.w / 2, MESA_H / 2 - 4, r.y + r.h / 2)
+      wedge.castShadow = true
+      wedge.receiveShadow = true
+      this.board.add(wedge)
     }
   }
 
@@ -2661,7 +2784,10 @@ export class Renderer {
    */
   private applyTank(rig: TankRig, dt: number, now: number, v: TankView, eye = false): void {
     const { x, y, hull, gun, hp, dead, hue, name, verified } = v
-    rig.root.position.set(x, 0, y)
+    // The whole rig rides the ground height, which is what carries a tank up a
+    // ramp and onto a mesa. A pure function of position, so remote tanks —
+    // whose (x, y) is all we know — climb exactly like ours does.
+    rig.root.position.set(x, elevationAt(x, y) * MESA_H, y)
     rig.hull.rotation.y = -hull
     rig.turret.rotation.y = -gun
 
@@ -2921,7 +3047,7 @@ export class Renderer {
         this.scene.add(rig.root)
         this.pointRings.set(i, rig)
       }
-      rig.root.position.set(point.x, GROUND_Y + DECAL_LIFT, point.y)
+      rig.root.position.set(point.x, GROUND_Y + DECAL_LIFT + elevationAt(point.x, point.y) * MESA_H, point.y)
 
       const ownerHue = state.owner ? (TEAM_HUE[state.owner] ?? 0) : null
       const outer = rig.outer.material as THREE.MeshBasicMaterial
@@ -3002,7 +3128,7 @@ export class Renderer {
         this.scene.add(rig.root)
         this.flagPoles.set(team, rig)
       }
-      rig.root.position.set(base.x, 0, base.y)
+      rig.root.position.set(base.x, elevationAt(base.x, base.y) * MESA_H, base.y)
       const out = held.has(team)
       rig.cloth.visible = !out
       // The ring is the "this flag is out" mark, and it pulses so it reads from
@@ -3373,7 +3499,9 @@ export class Renderer {
         this.confetti.burst(shell.x, shell.y, 5, 45, { speed: 90, up: 60, y: 24, size: 0.55, life: 0.35 })
       }
       const height = shellHeight(shell)
-      mesh.position.set(shell.x, 24 + height, shell.y)
+      // A shell keeps the elevation it was fired at for its whole flight,
+      // which is also what the physics does with it — see `Shell.elev`.
+      mesh.position.set(shell.x, 24 + height + (shell.elev ?? 0) * MESA_H, shell.y)
       mesh.rotation.y += 0.3
       if (shell.lob > 0) {
         // Grow with the arc. A 7-unit sphere seen from the board camera two
@@ -3513,7 +3641,9 @@ export class Renderer {
         beam.position.y = 95
         beam.name = 'beam'
         group.add(gem, pad, beam)
-        group.position.set(pickup.at.x, 0, pickup.at.y)
+        // A pad authored on a mesa top sits on the mesa top, ring and beam and
+        // all, rather than glowing from inside the slab.
+        group.position.set(pickup.at.x, elevationAt(pickup.at.x, pickup.at.y) * MESA_H, pickup.at.y)
         this.scene.add(group)
         this.pickupMeshes.set(pickup.id, group)
       }
@@ -3616,7 +3746,11 @@ export class Renderer {
     this.reloadBar.scale.x = width * frac
     // Directly under the health pips, so "am I loaded" and "am I alive" are one
     // glance rather than two.
-    this.reloadBar.position.set(game.tank.x - width / 2 + (width * frac) / 2, 52, game.tank.y)
+    this.reloadBar.position.set(
+      game.tank.x - width / 2 + (width * frac) / 2,
+      52 + elevationAt(game.tank.x, game.tank.y) * MESA_H,
+      game.tank.y,
+    )
   }
 
   /** Decaying camera shake. Never moves where the camera is looking. */
@@ -3636,7 +3770,7 @@ export class Renderer {
     const t = game.tank
     const dirX = Math.cos(t.gun)
     const dirZ = Math.sin(t.gun)
-    const height = EYE_Y + this.you.sink
+    const height = EYE_Y + this.you.sink + elevationAt(t.x, t.y) * MESA_H
 
     // Reverse into a wall and the eye ends up inside it, looking out through
     // the back face at the board — cover you cannot see past is most of what

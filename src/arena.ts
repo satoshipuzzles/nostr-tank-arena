@@ -27,8 +27,16 @@
  * tank in a way that a yellow block is not.
  *
  * `fence` is the board's outer ring and is generated, never authored.
+ *
+ * `water` and `cliff` are terrain wearing the cover machinery, and that is a
+ * choice rather than a shortcut: a rect in `WALLS` already knows how to stop a
+ * tank, stop a shell, and be agreed on by every client, which is everything a
+ * river or a mesa edge needs. Water is a `low` rect that cannot be destroyed —
+ * tanks stop at the bank, shells fly over. A cliff is a `solid` rect that is
+ * the *edge* of high ground; what makes it different from a rock is that a
+ * shell fired from up there passes over it. See `pointInShellWall`.
  */
-export type CoverKind = 'rock' | 'crate' | 'barrel' | 'sandbag' | 'hedge' | 'fence'
+export type CoverKind = 'rock' | 'crate' | 'barrel' | 'sandbag' | 'hedge' | 'fence' | 'water' | 'cliff'
 
 export interface Rect {
   x: number
@@ -86,8 +94,13 @@ export interface Rect {
  * nothing for you. They are a movement obstacle, not cover, and a player who
  * expects otherwise learns it the hard way. Naming them after the one thing
  * on a battlefield you actually can shoot over is the best signpost available.
+ *
+ * Water joined the set with the terrain pass: a tank stops at the bank, a
+ * shell crosses the river. Same two answers as a sandbag line, which is why it
+ * is a membership here and not a third mechanism. The difference between them
+ * is entirely in the renderer.
  */
-const LOW_KINDS: ReadonlySet<CoverKind> = new Set<CoverKind>(['sandbag'])
+const LOW_KINDS: ReadonlySet<CoverKind> = new Set<CoverKind>(['sandbag', 'water'])
 
 /**
  * What a rect does to the things that run into it.
@@ -278,6 +291,20 @@ const flip = (r: Rect, w: number, h: number): Rect => ({
 
 const flipPt = (p: Pt, w: number, h: number): Pt => ({ x: w - p.x, y: h - p.y })
 
+/**
+ * A drivable slope between ground level and a mesa top.
+ *
+ * `dir` names the *high* side — the edge that touches the mesa. A tank
+ * crossing the rect toward that edge is at a fraction of full height given by
+ * how far across it is, which is what `elevationAt` returns and what the
+ * renderer uses to carry a tank smoothly up the slope. Nothing in the physics
+ * reads the fraction: a ramp is open ground to tanks and shells alike, and the
+ * cliff rects either side of it are what keep the climb honest.
+ */
+export interface Ramp extends Rect {
+  dir: 'n' | 's' | 'e' | 'w'
+}
+
 export interface LayoutSpec {
   name: string
   w: number
@@ -287,6 +314,18 @@ export interface LayoutSpec {
   spawns: (w: number, h: number) => Pt[]
   /** Where pickups can appear. Mirrored, so no corner is closer to more of them. */
   pads: (w: number, h: number) => Pt[]
+  /**
+   * High ground, as footprints. Mirrored like cover, except that a rect which
+   * mirrors onto itself — a centred plateau — is kept once rather than twice.
+   *
+   * The footprint includes the cliff band around its edge on purpose: a tank
+   * at the rim fires from a muzzle 26 units in front of its centre, which can
+   * be over the cliff rect, and a muzzle that measured ground level there
+   * would have its own shell bounce off its own parapet.
+   */
+  mesas?: (w: number, h: number) => Rect[]
+  /** The slopes up. Mirrored, with the high side swapping like the geometry. */
+  ramps?: (w: number, h: number) => Ramp[]
 }
 
 /**
@@ -315,7 +354,7 @@ const corners = (w: number, h: number): Pt[] => [
 ]
 
 /**
- * Eight boards, and the size range is as much of the variety as the shapes are.
+ * Ten boards, and the size range is as much of the variety as the shapes are.
  *
  * 1500x1100 is a knife fight with four players in it; 2100x1550 gives you
  * somewhere to go and three seconds to watch somebody come and get you. Every
@@ -529,6 +568,81 @@ export const LAYOUTS: LayoutSpec[] = [
       { x: 430, y: 900 },
     ],
   },
+  {
+    name: 'The Shallows',
+    w: 1800,
+    h: 1300,
+    // The water showcase. A river crosses the whole board with two fords, so
+    // every drive to the other half funnels through one of two 140-unit gaps —
+    // but a *shell* does not care, which is the mechanic: the river is a moat
+    // for tanks and open air for gunnery, a sandbag line drawn in blue and
+    // scaled up to a terrain feature. The pond pair in the quarters does the
+    // small version of the same thing around the flanks.
+    cover: (_w, h) => [
+      { x: 24, y: h / 2 - 70, w: 436, h: 140, kind: 'water' },
+      { x: 600, y: h / 2 - 70, w: 300, h: 140, kind: 'water' },
+      { x: 280, y: 220, w: 260, h: 170, kind: 'water' },
+      // The fords are the fight, so the cover faces them.
+      { x: 470, y: 430, w: 120, h: 48, kind: 'crate' },
+      { x: 860, y: 300, w: 90, h: 90, kind: 'rock' },
+      { x: 620, y: 210, w: 180, h: 48, kind: 'sandbag' },
+      { x: 180, y: 820, w: 100, h: 100, kind: 'barrel' },
+    ],
+    // Not `corners`: the default mid-edge spawns at (150, h/2) sit in the
+    // river. The side spawns move up and down the bank instead, still as a
+    // 180-degree pair.
+    spawns: (w, h) => [
+      { x: 175, y: 175 },
+      { x: w - 175, y: 175 },
+      { x: 175, y: h - 175 },
+      { x: w - 175, y: h - 175 },
+      { x: w / 2, y: 150 },
+      { x: w / 2, y: h - 150 },
+      { x: 150, y: 380 },
+      { x: w - 150, y: 920 },
+    ],
+    pads: (w, h) => [
+      { x: w / 2, y: 210 },
+      // On the ford itself. Standing on the one strip of dry crossing to
+      // collect a pickup is exactly the exposed moment the board is about.
+      { x: 530, y: h / 2 },
+      { x: w / 2, y: 490 },
+    ],
+  },
+  {
+    name: 'The Bluff',
+    w: 1900,
+    h: 1400,
+    // The height showcase. A mesa holds the middle: cliffs all round, one ramp
+    // up from each short side, and both mesa pads on top. A tank up there
+    // shoots out over its own cliff edge — `pointInShellWall` lets a shell
+    // fired from high ground cross `cliff` rects — while a tank below has to
+    // put shells through a ramp mouth or climb. King of the hill, where the
+    // hill actually works like a hill.
+    cover: () => [
+      // The mesa's retaining wall, minus the two ramp mouths at y 640..760.
+      { x: 670, y: 520, w: 560, h: 40, kind: 'cliff' },
+      { x: 670, y: 560, w: 40, h: 80, kind: 'cliff' },
+      { x: 670, y: 760, w: 40, h: 120, kind: 'cliff' },
+      // Curbs either side of the west ramp, so the only way onto the slope is
+      // the low end and the climb fraction is always the drive fraction.
+      { x: 550, y: 600, w: 120, h: 40, kind: 'cliff' },
+      { x: 550, y: 760, w: 120, h: 40, kind: 'cliff' },
+      // The plains: something to fight from while contesting the ramps.
+      { x: 280, y: 260, w: 130, h: 130, kind: 'rock' },
+      { x: 360, y: 620, w: 48, h: 180, kind: 'sandbag' },
+      { x: 820, y: 280, w: 260, h: 48, kind: 'crate' },
+      { x: 1350, y: 300, w: 100, h: 100, kind: 'barrel' },
+    ],
+    spawns: corners,
+    pads: (w, h) => [
+      { x: w / 2, y: 620 },
+      { x: 250, y: h / 2 },
+      { x: w / 2, y: 380 },
+    ],
+    mesas: (w, h) => [{ x: w / 2 - 280, y: h / 2 - 180, w: 560, h: 360 }],
+    ramps: (_w, h) => [{ x: 550, y: h / 2 - 60, w: 120, h: 120, dir: 'e' }],
+  },
 ]
 
 /**
@@ -563,6 +677,42 @@ export const SPAWNS: Pt[] = []
  * would be a visible flip-flop.
  */
 export const PADS: Pt[] = []
+
+/**
+ * High ground on the current board, as footprints. Empty on a flat board.
+ *
+ * Like `WALLS`, mutated in place by `setLayout` so every importer sees the
+ * current board. Unlike `WALLS`, nothing here collides: the mesa's edge is
+ * made of `cliff` rects that live in `WALLS` like any other cover, and these
+ * footprints only answer "how high is the ground at (x, y)" — for the
+ * renderer, and for stamping a shell's elevation when it is fired.
+ */
+export const MESAS: Rect[] = []
+export const RAMPS: Ramp[] = []
+
+/**
+ * How high the ground is at a point, as a fraction of one mesa tier.
+ *
+ * 1 on a mesa, 0 on the flat, and the drive fraction on a ramp — which is
+ * what lets the renderer carry a tank up a slope without a step in it. A pure
+ * function of the layout, so every client agrees on it the same way they
+ * agree on the walls.
+ */
+export function elevationAt(x: number, y: number): number {
+  for (const m of MESAS) {
+    if (x >= m.x && x <= m.x + m.w && y >= m.y && y <= m.y + m.h) return 1
+  }
+  for (const r of RAMPS) {
+    if (x < r.x || x > r.x + r.w || y < r.y || y > r.y + r.h) continue
+    switch (r.dir) {
+      case 'e': return (x - r.x) / r.w
+      case 'w': return (r.x + r.w - x) / r.w
+      case 's': return (y - r.y) / r.h
+      case 'n': return (r.y + r.h - y) / r.h
+    }
+  }
+  return 0
+}
 
 const listeners: ((index: number) => void)[] = []
 
@@ -610,6 +760,27 @@ export function setLayout(index: number): void {
   const pads = spec.pads(spec.w, spec.h)
   PADS.length = 0
   PADS.push(...pads, ...pads.map((p) => flipPt(p, spec.w, spec.h)))
+
+  // Mirrored like cover, except that a centred footprint mirrors onto itself
+  // and must not be kept twice — the physics would not notice, but the
+  // renderer would build two identical slabs z-fighting for the same air.
+  const sameRect = (a: Rect, b: Rect) => a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h
+  const mesas = spec.mesas?.(spec.w, spec.h) ?? []
+  MESAS.length = 0
+  MESAS.push(...mesas)
+  for (const m of mesas) {
+    const f = flip(m, spec.w, spec.h)
+    if (!MESAS.some((o) => sameRect(o, f))) MESAS.push(f)
+  }
+
+  const ramps = spec.ramps?.(spec.w, spec.h) ?? []
+  const flipDir = { n: 's', s: 'n', e: 'w', w: 'e' } as const
+  RAMPS.length = 0
+  RAMPS.push(...ramps)
+  for (const r of ramps) {
+    const f: Ramp = { ...flip(r, spec.w, spec.h), dir: flipDir[r.dir] }
+    if (!RAMPS.some((o) => sameRect(o, f) && o.dir === f.dir)) RAMPS.push(f)
+  }
 
   for (const fn of listeners) fn(next)
 }
@@ -674,16 +845,38 @@ export function pointInWall(x: number, y: number): Rect | null {
 }
 
 /**
- * What stops a *shell*. The same rects minus the barricades.
+ * What stops a *shell fired from the flat*. The same rects minus the
+ * barricades and the water.
  *
- * Two predicates rather than a height on the rect because there are exactly
- * two questions anything in this game asks, and a number invites a third that
- * nobody has designed. Whoever adds a genuinely half-height wall later should
- * pay for the height field then.
+ * Still the predicate for sight lines and for bots, both of which reason from
+ * ground level. A shell in flight asks `pointInShellWall` instead, which is
+ * this plus one exception for high ground.
  */
 export function pointInTallWall(x: number, y: number): Rect | null {
   for (const w of WALLS) {
     if (passing(w) !== 'solid') continue
+    if (x >= w.x && x <= w.x + w.w && y >= w.y && y <= w.y + w.h) return w
+  }
+  return null
+}
+
+/**
+ * What stops a shell whose muzzle was at elevation `elev`.
+ *
+ * The one place height changes the rules: a shell fired *from* a mesa crosses
+ * `cliff` rects — its own parapet on the way out, and any other mesa's edge on
+ * the way past — where a shell fired from the flat bounces off them like any
+ * wall. Everything else is unchanged: rocks and crates are tall from every
+ * height, water and sandbags stop nothing.
+ *
+ * `elev` is stamped on the shell at fire time from `elevationAt`, so it is a
+ * pure function of the fire event's own coordinates and every client
+ * re-simulating that shell agrees on it without a byte on the wire.
+ */
+export function pointInShellWall(x: number, y: number, elev = 0): Rect | null {
+  for (const w of WALLS) {
+    if (passing(w) !== 'solid') continue
+    if (elev >= 1 && w.kind === 'cliff') continue
     if (x >= w.x && x <= w.x + w.w && y >= w.y && y <= w.y + w.h) return w
   }
   return null

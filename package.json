@@ -43,7 +43,8 @@
     "profile": "node test/profile.mjs",
     "test:rewards": "node test/rewards.mjs",
     "test:domination": "node test/domination.mjs",
-    "test:tray": "node test/tray.mjs"
+    "test:tray": "node test/tray.mjs",
+    "test:terrain": "node test/terrain.mjs"
   },
   "dependencies": {
     "nostr-tools": "^2.10.4",

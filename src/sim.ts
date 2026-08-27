@@ -2,7 +2,7 @@
 // roughly 2.5x tank speed, so at 150-300ms of relay latency the correct play is
 // to lead your target. Latency becomes a skill instead of a stutter.
 
-import { ARENA_H, ARENA_W, WALLS, pointInTallWall, resolveCircle } from './arena'
+import { ARENA_H, ARENA_W, WALLS, elevationAt, pointInShellWall, resolveCircle } from './arena'
 
 export const TANK_RADIUS = 22
 export const MAX_HP = 3
@@ -126,6 +126,14 @@ export interface Shell {
    * arrived are both dead.
    */
   landed: boolean
+  /**
+   * The elevation of the muzzle this left, from `elevationAt` — 1 if fired on
+   * high ground. Derived at spawn from the fire event's own coordinates, so
+   * every client stamps the same value without it riding the wire. A high
+   * shell crosses cliff edges instead of bouncing off them; see
+   * `pointInShellWall`.
+   */
+  elev: number
   age: number
   dead: boolean
 }
@@ -167,6 +175,11 @@ export function spawnShell(
     travel: 0,
     struck: -1,
     landed: false,
+    // Rounded, not the raw fraction: a shell fired halfway up a ramp is
+    // treated as fired from whichever level it was closer to, and every
+    // client rounds the same way because the fraction is a pure function of
+    // the layout and the fire coordinates.
+    elev: elevationAt(x, y) >= 0.5 ? 1 : 0,
     age: 0,
     dead: false,
   }
@@ -198,10 +211,12 @@ const SHELL_STEP = 1 / 120
  * event 200ms late can fast-forward it and land on the same trajectory as the
  * shooter — walls are static, so the path is a pure function of (x, y, angle, t).
  *
- * `pointInTallWall`, not `pointInWall`: sandbag barricades stop tanks and not
- * shells. That keeps the trajectory a pure function of the same inputs, because
- * which rects are low comes out of the layout and the layout comes out of the
- * block hash — every client re-simulating this shell already agrees on it.
+ * `pointInShellWall`, not `pointInWall`: sandbag barricades and water stop
+ * tanks and not shells, and a shell fired from high ground crosses cliff
+ * edges. That keeps the trajectory a pure function of the same inputs, because
+ * which rects are low comes out of the layout, the layout comes out of the
+ * block hash, and the shell's elevation comes out of its own fire coordinates
+ * — every client re-simulating this shell already agrees on all three.
  */
 export function stepShell(s: Shell, dt: number): void {
   // A lob is above the geometry for its whole flight, so it does not consult
@@ -257,7 +272,7 @@ export function stepShell(s: Shell, dt: number): void {
 
     const nx = s.x + s.vx * step
     const ny = s.y + s.vy * step
-    const wall = pointInTallWall(nx, ny)
+    const wall = pointInShellWall(nx, ny, s.elev)
     if (!wall) {
       s.x = nx
       s.y = ny
@@ -270,8 +285,8 @@ export function stepShell(s: Shell, dt: number): void {
     s.struck = wall.id ?? -1
 
     // Bounce off whichever axis we actually crossed this step.
-    const hitX = pointInTallWall(nx, s.y) !== null
-    const hitY = pointInTallWall(s.x, ny) !== null
+    const hitX = pointInShellWall(nx, s.y, s.elev) !== null
+    const hitY = pointInShellWall(s.x, ny, s.elev) !== null
     if (hitX) s.vx = -s.vx
     if (hitY) s.vy = -s.vy
     if (!hitX && !hitY) {
