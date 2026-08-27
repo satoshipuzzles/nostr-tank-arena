@@ -2113,3 +2113,63 @@ button.blocktile:focus-visible {
   .dr-ratio { display: none; }
 }
 
+
+
+/*
+ * The nuke: five seconds of countdown, then the screen goes white.
+ *
+ * Fixed to the viewport rather than placed in the HUD's grid, because the
+ * white-out has to cover the HUD as well as the board — including the panels,
+ * the tray and the feed. `pointer-events: none` throughout: the board stays
+ * clickable underneath, which matters because the countdown is five seconds
+ * long and a player is still driving through all of it.
+ */
+#doomsday {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 4px;
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+#doomsday[hidden] { display: none !important; }
+#doomsday.counting b {
+  font-size: clamp(18px, 4vw, 34px);
+  letter-spacing: 0.18em;
+  color: #ffe17a;
+  text-shadow: 0 0 18px rgba(255, 138, 32, 0.85), 0 2px 0 #000;
+  animation: doom-pulse 1s steps(2, end) infinite;
+}
+#doomsday.counting span {
+  font-size: clamp(56px, 16vw, 132px);
+  line-height: 0.95;
+  font-weight: 700;
+  color: #fff;
+  text-shadow: 0 0 34px rgba(255, 90, 20, 0.9), 0 3px 0 #000;
+}
+#doomsday.counting i {
+  font-style: normal;
+  font-size: 12px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(255, 225, 122, 0.85);
+}
+/* The flash. `--white` is set per frame from `drawDoomsday`, not by an
+   animation: an animation restarts on a class change, and a second nuke in one
+   round would pick up wherever the first had got to. */
+#doomsday.blast {
+  background: rgba(255, 255, 255, var(--white, 0));
+}
+#doomsday.blast b {
+  font-size: clamp(40px, 12vw, 110px);
+  letter-spacing: 0.3em;
+  color: #1a0d05;
+  opacity: calc(var(--white, 0) * 0.9);
+}
+@keyframes doom-pulse {
+  50% { opacity: 0.35; }
+}

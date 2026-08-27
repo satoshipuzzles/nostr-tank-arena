@@ -336,6 +336,27 @@ export interface LanePayload {
 }
 
 /**
+ * The nuke, riding the strike kind like the EMP and the lane run.
+ *
+ * One event for the whole thing: a detonation time and nothing else. Where the
+ * bomb lands is not a question — it lands on everything — so the payload has no
+ * position, no damage number and no target list. Every client counts down to
+ * the same `t0`, applies the death to *itself* if it is not the caller or on
+ * the caller's side, and flattens every piece of cover. Same trust model as the
+ * bombs: the event asserts "a nuke went off", and dying to it is exactly as
+ * self-authoritative as taking a shell.
+ *
+ * No `y`, like the others, so a client that predates it drops the payload as
+ * malformed instead of reading the detonation time as a lane and walking one
+ * bomb along the top wall.
+ */
+export interface NukePayload {
+  k: 'nuke'
+  /** Caller's clock at detonation, ms. The countdown is `t0 - now`. */
+  t0: number
+}
+
+/**
  * An EMP, riding the strike kind rather than earning a kind of its own.
  *
  * One publish, no position, no damage: every receiver that is not on the

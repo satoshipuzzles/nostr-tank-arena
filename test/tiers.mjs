@@ -120,9 +120,12 @@ try {
 
   const rows = await picker()
   check('the picker has one row per tier', rows.length === 4, JSON.stringify(rows.map((r) => r.tier)))
+  // Five is the floor Puzz asked for, not a cap: the apex pool grew to six
+  // when the nuke landed, and a check written as `=== 5` would have made the
+  // next reward a test failure rather than a reward.
   check(
-    'and every tier offers exactly five',
-    rows.every((r) => r.rewards.length === 5),
+    'and every tier offers at least five',
+    rows.every((r) => r.rewards.length >= 5),
     JSON.stringify(rows.map((r) => r.rewards.length)),
   )
   check(
@@ -146,7 +149,7 @@ try {
   const ids = rows.flatMap((r) => r.rewards.map((x) => x.id))
   check(
     'no reward appears in two tiers — the pools partition the rewards',
-    new Set(ids).size === 20,
+    new Set(ids).size === ids.length && ids.length >= 20,
     `${ids.length} cards, ${new Set(ids).size} distinct`,
   )
   check(

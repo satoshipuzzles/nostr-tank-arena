@@ -52,6 +52,7 @@ const MAX_LANES = 4
 /** How wide a warning stripe is, in arena units. The blast radius is 64. */
 const LANE_WIDTH = 128
 import type { CoverKind, Rect } from './arena'
+import { NUKE_FLASH_MS } from './game'
 import type { Game, Peer } from './game'
 import { LOB_APEX, LOB_BLAST, MAX_HP, RELOAD, TANK_RADIUS, shellHeight } from './sim'
 import { ICON_POLYS, PICKUPS, hasBuff } from './pickups'
@@ -2073,6 +2074,18 @@ export class Renderer {
    * death, the precise thing the stripe exists to prevent.
    */
   private strikeLanes: THREE.Mesh[] = []
+  /**
+   * The mushroom cloud: a stem and a cap, grown and faded in one pass.
+   *
+   * Two meshes rather than a particle system. The cloud has to read as *the*
+   * shape from any camera and at four frames a second under a software
+   * rasteriser, and a cloud of sprites at that frame rate is a puff of grey.
+   * The silhouette is the whole point of the reward.
+   */
+  private nukeStem: THREE.Mesh
+  private nukeCap: THREE.Mesh
+  /** The shockwave: a ring on the felt, running out to the fence. */
+  private nukeRing: THREE.Mesh
   private lastShellSeen = new Map<string, { x: number; y: number }>()
   private wasDead = new Map<string, boolean>()
   private lastHp = MAX_HP
@@ -2197,6 +2210,38 @@ export class Renderer {
     // and cannot disagree with itself. The lift is not decoration: the felt is
     // at GROUND_Y and a decal placed at the same height z-fights, or worse,
     // ends up *under* it and is drawn every frame for nobody.
+    // The mushroom, parked at the middle of the board and hidden until a nuke
+    // lands. Built once: this is the apex reward and it should not be the one
+    // thing in the game that allocates geometry in the frame it is needed.
+    const cloudMat = () =>
+      new THREE.MeshStandardMaterial({
+        color: 0xffb066,
+        emissive: 0xff6a2a,
+        emissiveIntensity: 0.9,
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+      })
+    this.nukeStem = new THREE.Mesh(new THREE.CylinderGeometry(46, 90, 260, 16, 1, true), cloudMat())
+    this.nukeCap = new THREE.Mesh(new THREE.SphereGeometry(1, 20, 14), cloudMat())
+    this.nukeRing = new THREE.Mesh(
+      new THREE.RingGeometry(0.86, 1, 56),
+      new THREE.MeshBasicMaterial({
+        color: 0xffd27a,
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      }),
+    )
+    this.nukeRing.rotation.x = -Math.PI / 2
+    this.nukeStem.visible = false
+    this.nukeCap.visible = false
+    this.nukeRing.visible = false
+    this.scene.add(this.nukeStem)
+    this.scene.add(this.nukeCap)
+    this.scene.add(this.nukeRing)
+
     for (let i = 0; i < MAX_LANES; i++) {
       const lane = new THREE.Mesh(
         new THREE.PlaneGeometry(1, 1),
@@ -2671,6 +2716,7 @@ export class Renderer {
     }
 
     this.strikes(game, now)
+    this.nuke(game, now)
     this.syncShells(game)
     this.syncLobAim(game)
     this.syncPickups(game, now)
@@ -3742,6 +3788,56 @@ export class Renderer {
       if (d < 420) this.shake = Math.max(this.shake, 24 * (1 - d / 420))
     }
     game.blasts.length = 0
+  }
+
+  /**
+   * The nuke landing: a cloud that grows out of the middle of the board.
+   *
+   * The white-out itself is a DOM overlay rather than anything in here — the
+   * HUD is already DOM, it sits over the canvas in both the board view and the
+   * cockpit, and a full-screen quad in the scene would be behind the HUD in one
+   * of them. This is the part that has to be *in* the world: it is lit by the
+   * same lights, it is behind the fence, and the camera shakes around it.
+   */
+  private nuke(game: Game, now: number): void {
+    const since = game.nukeFlashAt ? now - game.nukeFlashAt : Infinity
+    if (since < 0 || since > NUKE_FLASH_MS) {
+      this.nukeStem.visible = false
+      this.nukeCap.visible = false
+      this.nukeRing.visible = false
+      return
+    }
+    const t = since / NUKE_FLASH_MS
+    // Rise and swell, then thin out. Not a fade from full: a mushroom cloud
+    // that arrives at full size and dims looks like a light being turned off.
+    const rise = Math.min(1, t * 2.2)
+    const fade = t < 0.45 ? 1 : 1 - (t - 0.45) / 0.55
+    const x = ARENA_W / 2
+    const z = ARENA_H / 2
+    this.nukeStem.visible = true
+    this.nukeCap.visible = true
+    this.nukeStem.position.set(x, GROUND_Y + 160 * rise, z)
+    this.nukeStem.scale.set(1, Math.max(0.05, rise * 1.25), 1)
+    // The cap clears the stem rather than sitting inside it: a mushroom whose
+    // head overlaps its own column reads as a blob, and the silhouette is the
+    // entire reason this is two meshes and not a particle cloud.
+    this.nukeCap.position.set(x, GROUND_Y + 330 * rise + 30, z)
+    this.nukeCap.scale.set(Math.max(1, 250 * rise), Math.max(1, 165 * rise), Math.max(1, 250 * rise))
+    ;(this.nukeStem.material as THREE.MeshStandardMaterial).opacity = 0.95 * fade
+    ;(this.nukeCap.material as THREE.MeshStandardMaterial).opacity = 0.92 * fade
+    // The shockwave runs out to the fence in the first half-second and is gone
+    // before the cloud is. It is what makes the flat felt read as *hit* — the
+    // cloud alone is something happening in the air above a board that looks
+    // exactly as it did a second ago.
+    const wave = Math.min(1, t * 3.4)
+    this.nukeRing.visible = wave < 1
+    this.nukeRing.position.set(x, GROUND_Y + DECAL_LIFT * 1.4, z)
+    this.nukeRing.scale.setScalar(Math.max(1, wave * ARENA_W * 0.72))
+    ;(this.nukeRing.material as THREE.MeshBasicMaterial).opacity = 0.85 * (1 - wave)
+    // The shake is held rather than set once: at four frames a second a single
+    // impulse can decay to nothing between two drawn frames, and the biggest
+    // moment in the game would arrive perfectly still.
+    if (t < 0.5) this.shake = Math.max(this.shake, 30 * (1 - t * 2))
   }
 
   private deaths(game: Game): void {
