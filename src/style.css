@@ -1944,6 +1944,10 @@ button.tiny {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  /* Three in the row now (name · mode · seats): the name soaks up the slack so
+     the chips sit together at the right edge instead of drifting apart. */
+  flex: 1;
+  min-width: 0;
 }
 .lr-seats {
   font-variant-numeric: tabular-nums;
@@ -1959,6 +1963,23 @@ button.tiny {
 .lr-seats.full {
   color: var(--dim);
   background: rgba(255, 255, 255, 0.06);
+}
+/* What the table is playing — `pit — CTF 3/8`. Deathmatch is quiet because it
+   is the ambient game; a created mode is the thing worth a glance. */
+.lr-mode {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  padding: 2px 7px;
+  border-radius: 999px;
+  flex: none;
+  color: var(--dim);
+  background: rgba(255, 255, 255, 0.06);
+}
+.lr-mode.tdm,
+.lr-mode.ctf,
+.lr-mode.dom {
+  color: #8ec9ff;
+  background: rgba(142, 201, 255, 0.12);
 }
 .lr-faces {
   display: flex;

@@ -85,6 +85,20 @@ export const SEATS = 8
 
 export type Role = 'seat' | 'queue' | 'watch'
 
+/**
+ * What is being played in a room. A property of the ROOM, not of a client:
+ * declared by whoever is in it, carried on the beacon, adopted by joiners.
+ *
+ * Absent on the wire means deathmatch — which is also what every beacon written
+ * before this field existed says, so old clients read as the ambient game
+ * rather than as broken.
+ */
+export type RoomMode = 'dm' | 'tdm' | 'ctf' | 'dom'
+
+export function asRoomMode(v: unknown): RoomMode | null {
+  return v === 'dm' || v === 'tdm' || v === 'ctf' || v === 'dom' ? v : null
+}
+
 export interface PresencePayload {
   room: string
   name: string
@@ -95,6 +109,8 @@ export interface PresencePayload {
   block?: number
   /** Board name, so the lobby can say what map is up without deriving it. */
   layout?: string
+  /** The room's rules. Omitted for deathmatch, so old beacons parse the same. */
+  mode?: RoomMode
   /** Unix seconds, by the publisher's clock. Only used to age out ghosts. */
   at: number
 }
@@ -117,8 +133,15 @@ export interface LiveRoom {
   open: number
   block?: number
   layout?: string
+  /** What the room is playing, per its own occupants. Absent beacons mean dm. */
+  mode: RoomMode
   /** Newest beacon in the room, so the list can sort by liveliness. */
   freshest: number
+  /**
+   * True only on the placeholder the standing-deathmatch rule invents. A room
+   * that exists because people are in it never carries this.
+   */
+  standing?: boolean
 }
 
 /** Announce where you are. Signed by your real npub, so the face is yours. */
@@ -131,6 +154,7 @@ export async function publishPresence(
   role: Role,
   block?: number,
   layout?: string,
+  mode?: RoomMode,
 ): Promise<void> {
   const at = Math.floor(Date.now() / 1000)
   const payload: PresencePayload = {
@@ -141,6 +165,9 @@ export async function publishPresence(
     at,
     ...(block ? { block } : {}),
     ...(layout ? { layout } : {}),
+    // Deathmatch is the absent value, deliberately: a beacon written before
+    // modes were on the wire must mean the same thing as one written after.
+    ...(mode && mode !== 'dm' ? { mode } : {}),
   }
   const signed = await identity.signAsSelf({
     kind: KIND_PRESENCE,
@@ -184,7 +211,10 @@ export async function fetchLiveRooms(net: Net, limit = 300): Promise<LiveRoom[]>
  */
 export function groupRooms(events: Event[], nowSeconds = Math.floor(Date.now() / 1000)): LiveRoom[] {
   /** room -> pubkey -> their newest beacon. */
-  const rooms = new Map<string, Map<string, Occupant & { block?: number; layout?: string }>>()
+  const rooms = new Map<
+    string,
+    Map<string, Occupant & { block?: number; layout?: string; mode?: RoomMode }>
+  >()
   const cutoff = nowSeconds - PRESENCE_TTL_S * 3
   for (const e of events) {
     const p = parsePayload<PresencePayload>(e.content)
@@ -208,6 +238,7 @@ export function groupRooms(events: Event[], nowSeconds = Math.floor(Date.now() /
       at: e.created_at,
       block: typeof p.block === 'number' ? Math.floor(p.block) : undefined,
       layout: typeof p.layout === 'string' ? p.layout.slice(0, 32) : undefined,
+      mode: asRoomMode(p.mode) ?? undefined,
     })
   }
 
@@ -221,6 +252,13 @@ export function groupRooms(events: Event[], nowSeconds = Math.floor(Date.now() /
     // player who joined thirty seconds ago knows the current round and one who
     // has been sitting in a stale tab does not.
     const newest = all.reduce((best, o) => (o.at > best.at ? o : best), all[0])
+    // The mode comes from the newest beacon that *declares* one, not the newest
+    // outright: a pre-mode client sitting in a CTF room says nothing about the
+    // rules, and its silence must not flicker the room back to deathmatch.
+    const spoke = all.filter((o) => o.mode).reduce<typeof newest | null>(
+      (best, o) => (!best || o.at > best.at ? o : best),
+      null,
+    )
     out.push({
       room,
       players,
@@ -229,6 +267,7 @@ export function groupRooms(events: Event[], nowSeconds = Math.floor(Date.now() /
       open: Math.max(0, SEATS - players.length),
       block: newest?.block,
       layout: newest?.layout,
+      mode: spoke?.mode ?? 'dm',
       freshest: newest?.at ?? 0,
     })
   }
@@ -241,6 +280,52 @@ export function groupRooms(events: Event[], nowSeconds = Math.floor(Date.now() /
       b.freshest - a.freshest ||
       a.room.localeCompare(b.room),
   )
+}
+
+/** The room deathmatch always lives in. Overflow rooms are `lobby-2`, `-3`… */
+export const STANDING_ROOM = 'lobby'
+
+/**
+ * Deathmatch is always on.
+ *
+ * Puzz: "deathmatch the default should always be ongoing... There should
+ * always be deathmatch lobby/rooms that are always playing."
+ *
+ * There is no server to keep a room warm, so "always on" is a promise the
+ * *list* makes: it always contains a deathmatch room with an open seat. Walk
+ * the standing chain — `lobby`, `lobby-2`, `lobby-3`… — and the first name
+ * that is missing, or present with a free deathmatch seat, is the ambient
+ * game. A chain room that is full, or that somebody has turned into a team
+ * game, simply is not the standing room today and the next name is.
+ *
+ * The invented entry is a placeholder, not a claim: zero people, eight open
+ * seats, deathmatch. Joining it is just being first through the door — bots
+ * fill the arena until a second player arrives, which is what "always
+ * playing" feels like from inside.
+ */
+export function withStanding(rooms: LiveRoom[]): LiveRoom[] {
+  for (let n = 1; n <= 99; n++) {
+    const name = n === 1 ? STANDING_ROOM : `${STANDING_ROOM}-${n}`
+    const known = rooms.find((r) => r.room === name)
+    if (!known) {
+      return [
+        ...rooms,
+        {
+          room: name,
+          players: [],
+          queue: [],
+          watchers: [],
+          open: SEATS,
+          mode: 'dm',
+          freshest: 0,
+          standing: true,
+        },
+      ]
+    }
+    if (known.open > 0 && known.mode === 'dm') return rooms
+  }
+  // Ninety-nine full lobbies is not a failure state this game has.
+  return rooms
 }
 
 /**
