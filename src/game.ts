@@ -3165,8 +3165,8 @@ export class Game {
     // shape as dropping them on arrival, moved one step later.
     this.modifier = modifierForBlock(hash)
     // Every barrel back. Not left to `setLayout`, which returns early when the
-    // new block lands on the same map — about one round in eight, since the map
-    // is `blockHash % 8`. See `resetCover`.
+    // new block lands on the same map — about one round per board count, since
+    // the map is `blockHash % LAYOUTS.length`. See `resetCover`.
     resetCover()
     // Glass Cannon narrows the hull; a tank carrying three points into a
     // one-hit round would be invincible for two shots and nobody would know
