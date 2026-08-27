@@ -74,7 +74,10 @@ const tray = () =>
       hidden: !!n?.hidden,
       slots: [...(n?.querySelectorAll('.reward') ?? [])].map((b) => ({
         at: Number(b.dataset.at),
-        name: b.querySelector('.reward-name')?.textContent ?? '',
+        // The name is the *accessible* name now — the pill itself is icon and
+        // number, and the word lives on aria-label and the tooltip.
+        name: b.getAttribute('aria-label') ?? '',
+        word: (b.querySelector('.reward-name')?.textContent ?? '') !== '',
         key: b.querySelector('.reward-key')?.textContent ?? '',
         disabled: b.disabled,
         icon: !!b.querySelector('svg'),
@@ -163,9 +166,20 @@ try {
   const after = await world()
   check('reaching a rung puts an icon in the tray', !!three && three.slots.length === 1,
     JSON.stringify(three?.slots))
-  check('the icon has a picture, a name and a number key on it',
-    three?.slots[0]?.icon === true && /repair/.test(three.slots[0].name) && three.slots[0].key === '1',
+  check('the icon has a picture, a number key, and its name on the label — no visible word',
+    three?.slots[0]?.icon === true && /repair/.test(three.slots[0].name) &&
+      three.slots[0].key === '1' && three.slots[0].word === false,
     JSON.stringify(three?.slots[0]))
+  // The earn moment names the reward twice outside the tray: the banner wears
+  // the reward's own icon as a medal, and the feed line carries it in
+  // miniature. Both read the id off the model, so an id the icon table does
+  // not know would fail here as a missing svg.
+  const medal = await page.evaluate(() => ({
+    banner: !!document.querySelector('#notice svg.notice-ico'),
+    feed: !!document.querySelector('#feed svg.feed-ico'),
+  }))
+  check('the earn banner wears the reward icon as a medal', medal.banner, JSON.stringify(medal))
+  check('and the feed line for the earn carries the icon too', medal.feed, JSON.stringify(medal))
   check(
     'and the reward does NOT fire on its own — the hull is still the hull it was',
     after.hp === before.hp && before.hp === 1,
@@ -186,6 +200,16 @@ try {
 
   // --------------------------------------------------- 3. clicking spends it
 
+  // Armed before the click, because the ghost lives for one animation and a
+  // poll that starts after the spend is a coin toss against its lifetime.
+  await page.evaluate(() => {
+    window.__ghostSeen = false
+    new MutationObserver((muts) => {
+      for (const m of muts)
+        for (const n of m.addedNodes)
+          if (n instanceof Element && n.classList.contains('reward-ghost')) window.__ghostSeen = true
+    }).observe(document.body, { childList: true })
+  })
   await page.click('.reward[data-at="3"]')
   const spent = await until(async () => {
     const t = await tray()
@@ -201,6 +225,13 @@ try {
     spent?.slots[0]?.key === '1' && spent.slots[0].at === 5,
     JSON.stringify(spent?.slots[0]),
   )
+  // "Seen and then gone" is one condition on purpose: seen-but-still-there is
+  // just the animation mid-flight, so the poll keeps waiting rather than
+  // failing the cleanup half a beat early.
+  const ghost = await until(() =>
+    page.evaluate(() =>
+      window.__ghostSeen && !document.querySelector('.reward-ghost') ? true : null))
+  check('the spent pill flashes out as a ghost, which then leaves the DOM', ghost === true)
 
   // The keyboard is the other half of "select them by clicking or something".
   await page.keyboard.press('Digit1')
@@ -286,6 +317,36 @@ try {
     JSON.stringify(twice.slots.map((s) => s.at)),
   )
 
+  // ------------------------------------- 7. the stylesheet knows every class
+
+  // The ghost, the medal and the feed icon are classes the scripts mint at
+  // runtime. jsdom-style structure checks cannot notice a selector typo — the
+  // markup ships and renders as unstyled bare content — so the *built*
+  // stylesheet is asked directly whether it styles what the code creates.
+  const styled = await page.evaluate(() => {
+    const sels = []
+    const frames = []
+    const walk = (rules) => {
+      for (const r of rules) {
+        if (r.selectorText) sels.push(r.selectorText)
+        else if (r.name) frames.push(r.name)
+        if (r.cssRules) walk(r.cssRules)
+      }
+    }
+    for (const sheet of document.styleSheets) {
+      try { walk(sheet.cssRules) } catch { /* cross-origin sheet — not ours */ }
+    }
+    // Word-boundary, not substring: a renamed `.reward-ghostX` still *contains*
+    // the class it no longer styles.
+    const has = (cls) => sels.some((s) => new RegExp(cls.replace(/[.]/g, '\\.') + '(?![\\w-])').test(s))
+    return {
+      ghost: has('.reward-ghost'), medal: has('.notice-ico'),
+      feed: has('.feed-ico'), burn: frames.includes('reward-burn'),
+    }
+  })
+  check('the built stylesheet styles the ghost, the medal, the feed icon, and the burn',
+    styled.ghost && styled.medal && styled.feed && styled.burn, JSON.stringify(styled))
+
   check('no page errors', pageErrors.length === 0, pageErrors.join(' | '))
 
   if (process.env.TANK_SHOT) {
@@ -293,7 +354,7 @@ try {
     await page.evaluate(() => {
       const g = window.__game
       g.tank.dead = false
-      g.earned = [5, 10, 20]
+      g.earned = [5, 10, 15]
     })
     await wait(400)
     await page.screenshot({ path: process.env.TANK_SHOT })

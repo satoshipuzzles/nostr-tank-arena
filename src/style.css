@@ -305,6 +305,15 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
   padding: 4px 12px;
 }
 
+/* The line's icon, when the entry carried one — feed-text sized, so a line
+   with a medal on it is still one line. */
+.feed-ico {
+  width: 14px;
+  height: 14px;
+  vertical-align: -2px;
+  margin-right: 6px;
+}
+
 /*
  * The HUD floats over a daylight sky now, not over a near-black canvas. Dim
  * text and transparent buttons were legible against #07090f and vanish against
@@ -408,6 +417,14 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
   text-shadow: 0 2px 0 #10141c, 0 0 22px hsl(var(--notice-hue, 45) 90% 40%);
 }
 #notice span { font-size: 14px; color: #e8eef8; text-shadow: 0 1px 4px #000; }
+/* The medal above the headline — the banner's own hue, drop-shadowed like the
+   text so it sits in the same light. */
+.notice-ico {
+  width: clamp(30px, 4.4vw, 44px);
+  height: clamp(30px, 4.4vw, 44px);
+  fill: hsl(var(--notice-hue, 45) 90% 66%);
+  filter: drop-shadow(0 2px 0 #10141c) drop-shadow(0 0 14px hsl(var(--notice-hue, 45) 90% 40%));
+}
 
 /*
  * The round's rule change. Top-centre, on screen the whole round rather than
@@ -763,7 +780,26 @@ body.emp #hud::before {
    removed, because "where did my air strike go" is a worse question to leave a
    player with than "why is that dim". */
 .reward:disabled { opacity: 0.45; cursor: default; }
-.reward svg { width: 15px; height: 15px; fill: currentColor; flex: none; }
+/* Icon and number is the whole pill now, so the icon is the pill: big enough
+   to be the thing you recognise, not a bullet point beside a word. */
+.reward svg { width: 20px; height: 20px; fill: currentColor; flex: none; }
+/* The spent pill's exit: a clone left where the button stood, burning off.
+   Fixed, because the tray under it has already been rebuilt without it. */
+.reward-ghost {
+  position: fixed;
+  margin: 0;
+  z-index: 30;
+  pointer-events: none;
+  animation: reward-burn 0.32s ease-out forwards;
+}
+@keyframes reward-burn {
+  from { opacity: 1; transform: scale(1); filter: brightness(1); }
+  35% { filter: brightness(2.1); }
+  to { opacity: 0; transform: scale(1.55); filter: brightness(2.4); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .reward-ghost { display: none; }
+}
 /* The spitfire's second decision: the tray becomes a four-corner pad. Green
    rather than the reward gold, so it reads as a question, not another pill. */
 .reward.corner { background: #8ce8a6; border-color: #8ce8a6; }
@@ -2356,6 +2392,8 @@ button.blocktile:focus-visible {
   62% { transform: scale(0.97); filter: brightness(1); }
 }
 #notice b { animation: banner-punch 0.3s cubic-bezier(0.25, 0.9, 0.35, 1); }
+/* The medal punches with its headline — same rebuild-once guard applies. */
+.notice-ico { animation: banner-punch 0.3s cubic-bezier(0.25, 0.9, 0.35, 1); }
 
 /* Podium standings deal in one at a time, top seat first. Eight delays cover
    the eight-seat room; a ninth row would simply arrive with the eighth. */
@@ -2379,6 +2417,7 @@ button.blocktile:focus-visible {
   #rules,
   #ctf,
   #notice b,
+  .notice-ico,
   #podium-rows .score-row {
     animation: none;
   }

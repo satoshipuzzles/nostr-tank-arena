@@ -697,6 +697,12 @@ interface StateSample {
 export interface FeedEntry {
   text: string
   at: number
+  /**
+   * Which icon rides the line, when one does — a reward id (or pickup kind)
+   * the HUD resolves against its own icon tables. An id and not markup,
+   * because the feed renderer escapes `text` and should keep doing so.
+   */
+  icon?: string
 }
 
 /** A finished round, kept so the podium has something to show. */
@@ -910,7 +916,7 @@ export class Game {
   /** Timed effects on our own tank. */
   readonly buffs: Buffs = noBuffs()
   /** A big centre-screen message. The HUD clears it after a couple of seconds. */
-  notice: { text: string; sub: string; hue: number; at: number } | null = null
+  notice: { text: string; sub: string; hue: number; at: number; icon?: string } | null = null
   /** Set when a block lands; the podium is up until it clears. */
   lastRound: RoundResult | null = null
   intermissionUntil = 0
@@ -1588,6 +1594,7 @@ export class Game {
       `${at} IN A ROW`,
       `${rung?.name ?? 'reward'} ready — press ${this.earned.indexOf(at) + 1}`,
       45,
+      rung?.id,
     )
   }
 
@@ -1724,7 +1731,7 @@ export class Game {
         this.callNuke(now)
         break
     }
-    this.announce(rung.name.toUpperCase(), rung.detail, rungHue(rung.id))
+    this.announce(rung.name.toUpperCase(), rung.detail, rungHue(rung.id), rung.id)
     return true
   }
 
@@ -1770,7 +1777,7 @@ export class Game {
     this.sound('shield')
     if (hasBuff(this.buffs, 'bulwarkUntil', now)) {
       this.shieldRearmAt = now + BULWARK_REARM_MS
-      this.announce('SHIELD BROKE', 'bulwark — back in two seconds', 200)
+      this.announce('SHIELD BROKE', 'bulwark — back in two seconds', 200, 'bulwark')
       return
     }
     this.announce('SHIELD BROKE', 'that one was free', 200)
@@ -1802,7 +1809,7 @@ export class Game {
     // out a free shield for every hit taken in its last two seconds.
     if (!hasBuff(this.buffs, 'bulwarkUntil', now)) return
     this.buffs.shieldUntil = this.buffs.bulwarkUntil
-    this.announce('BULWARK', 'shield back up', 200)
+    this.announce('BULWARK', 'shield back up', 200, 'bulwark')
   }
 
   /**
@@ -1904,7 +1911,7 @@ export class Game {
     })
     this.publishAsSession(KIND_STRIKE, payload)
     this.sound('siren', { at: cornerAt(corner) })
-    this.pushFeed('spitfire inbound')
+    this.pushFeed('spitfire inbound', 'spitfire')
     return true
   }
 
@@ -1927,7 +1934,7 @@ export class Game {
   private callEmp(now: number): void {
     const payload: EmpPayload = { k: 'emp', t0: now }
     this.publishAsSession(KIND_STRIKE, payload)
-    this.pushFeed('EMP away — their screens go dark')
+    this.pushFeed('EMP away — their screens go dark', 'emp')
   }
 
   /**
@@ -1953,7 +1960,7 @@ export class Game {
     const payload: NukePayload = { k: 'nuke', t0 }
     this.publishAsSession(KIND_STRIKE, payload)
     this.armNuke(this.identity.sessionPubkey, t0)
-    this.pushFeed('NUKE away — five seconds')
+    this.pushFeed('NUKE away — five seconds', 'nuke')
   }
 
   /** An inbound nuke: who called it and when it goes off, in our clock. */
@@ -2042,11 +2049,11 @@ export class Game {
 
     if (this.watching) return
     if (owner === this.identity.sessionPubkey) {
-      this.announce('NUKE', 'the board is gone', 55)
+      this.announce('NUKE', 'the board is gone', 55, 'nuke')
       return
     }
     if (this.friendly(owner)) {
-      this.announce('NUKE', "your side's — and everything else is gone", 55)
+      this.announce('NUKE', "your side's — and everything else is gone", 55, 'nuke')
       return
     }
     // Flying does not save you either: the chopper comes down with everything
@@ -2056,7 +2063,7 @@ export class Game {
     if (this.tank.dead) return
     this.tank.hp = 0
     this.die(owner)
-    this.announce('NUKE', 'there was nowhere to be', 55)
+    this.announce('NUKE', 'there was nowhere to be', 55, 'nuke')
   }
 
   /** Run the countdown. Called every frame from `update`. */
@@ -2275,9 +2282,9 @@ export class Game {
   }
 
   /** A banner, and a line in the feed. Bigger than the feed alone deserves. */
-  private announce(text: string, sub: string, hue: number): void {
-    this.notice = { text, sub, hue, at: performance.now() }
-    this.pushFeed(`${text.toLowerCase()} — ${sub}`)
+  private announce(text: string, sub: string, hue: number, icon?: string): void {
+    this.notice = { text, sub, hue, at: performance.now(), icon }
+    this.pushFeed(`${text.toLowerCase()} — ${sub}`, icon)
   }
 
   /** Set when a repair lands, so the renderer can show it. */
@@ -3435,8 +3442,8 @@ export class Game {
    * a fact about a browser extension, not about a tank. The feed is the only
    * place in this UI for a sentence that does not deserve a banner.
    */
-  pushFeed(text: string): void {
-    this.feed.push({ text, at: performance.now() })
+  pushFeed(text: string, icon?: string): void {
+    this.feed.push({ text, at: performance.now(), icon })
     if (this.feed.length > 6) this.feed.shift()
   }
 
@@ -4210,6 +4217,7 @@ export class Game {
         spec.label.toUpperCase(),
         pickup.kind === 'repair' ? spec.blurb : `${spec.blurb} — ${spec.seconds}s`,
         spec.hue,
+        pickup.kind,
       )
       this.publishClaim(pickup)
     }
