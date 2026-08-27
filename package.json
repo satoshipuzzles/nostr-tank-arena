@@ -47,7 +47,8 @@
     "test:terrain": "node test/terrain.mjs",
     "test:tiers": "node test/tiers.mjs",
     "test:roommode": "node test/roommode.mjs",
-    "test:nuke": "node test/nuke.mjs"
+    "test:nuke": "node test/nuke.mjs",
+    "test:creategame": "node test/creategame.mjs"
   },
   "dependencies": {
     "nostr-tools": "^2.10.4",
