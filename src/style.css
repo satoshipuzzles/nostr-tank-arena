@@ -751,6 +751,14 @@ body.emp #hud::before {
   white-space: nowrap;
 }
 .reward:hover:not(:disabled) { filter: brightness(1.1); }
+/* Pills pop when they land in the tray. The tray only rewrites itself when
+   its contents change (see `trayKey`), so this fires on earn, not per frame. */
+.reward { animation: pill-pop 0.18s ease-out; }
+@keyframes pill-pop {
+  from { transform: scale(0.8); opacity: 0.4; }
+  65% { transform: scale(1.06); }
+  to { transform: scale(1); opacity: 1; }
+}
 /* Held but not spendable — dead, or already in a chopper. Shown rather than
    removed, because "where did my air strike go" is a worse question to leave a
    player with than "why is that dim". */
@@ -982,8 +990,19 @@ body.emp #hud::before {
   border-color: var(--accent);
   background: linear-gradient(180deg, rgba(255, 196, 77, 0.16), rgba(255, 196, 77, 0.04));
 }
+/* The mode's icon — the card should read at a glance before the words do.
+   Dim until chosen, so the lit one is the answer. */
+.mode-ico { width: 22px; height: 22px; fill: currentColor; opacity: 0.55; flex: none; }
+.mode.on .mode-ico { color: var(--accent); opacity: 1; }
 .mode-name { font-size: 13px; font-weight: 700; white-space: nowrap; }
 .mode.on .mode-name { color: var(--accent); }
+/* Choosing should feel like a press, not a repaint. */
+.mode.on { animation: mode-pop 0.18s ease-out; }
+@keyframes mode-pop {
+  from { transform: scale(0.96); }
+  60% { transform: scale(1.02); }
+  to { transform: scale(1); }
+}
 .mode-fine {
   font-size: 11px;
   font-weight: 400;
