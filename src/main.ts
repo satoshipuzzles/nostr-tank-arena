@@ -699,9 +699,10 @@ const REWARD_PATHS: Record<string, string> = {
     '<path d="M3 8h18v12H3Z"/><path d="M6 4h12l2 3H4Z"/>' +
     '<path d="M9 11h2v6H9Zm4 0h2v6h-2Z" fill="#0b0e13"/>',
   buck:
-    '<circle cx="12" cy="20" r="2.4"/>' +
-    '<path d="M11 2h2l1.6 7h-5.2Z"/><path d="M3.5 6.5 5 5l4 5.6-2.2 1.6Z"/>' +
-    '<path d="M20.5 6.5 19 5l-4 5.6 2.2 1.6Z"/>',
+    // Three fat pellets leaving one muzzle. Drawn heavy on purpose: at the
+    // 16px the picker renders these at, a thin spray reads as noise.
+    '<path d="M10 19h4v4h-4Z"/>' +
+    '<circle cx="12" cy="10" r="3.4"/><circle cx="4" cy="6" r="3"/><circle cx="20" cy="6" r="3"/>',
   // --- tier 10 ------------------------------------------------------------
   blitz:
     '<path d="M13.5 2 6 13.5h4L8 22l9.5-12h-4Z"/>' +
@@ -729,19 +730,22 @@ const REWARD_PATHS: Record<string, string> = {
     '<path d="M11.2 6.4h1.6V8h-1.6Zm-3.6 3.4h1.6v1.6H7.6Zm7.2 0h1.6v1.6h-1.6Z" fill="#0b0e13"/>',
   // --- tier 25 ------------------------------------------------------------
   armageddon:
-    '<path d="M4 1h2v5H4Zm7 0h2v5h-2Zm7 0h2v5h-2Z"/>' +
-    '<path d="M2 8h20l-3 5H5Z"/>' +
-    '<path d="M12 15c2 1.8 3 3.4 3 5H9c0-1.6 1-3.2 3-5Z"/>' +
-    '<path d="M3 21h18v2H3Z" opacity="0.6"/>',
+    // Three bombs on the way down, and nothing else — the ground line and the
+    // blast that used to be under them turned the whole icon to mush at 16px.
+    '<path d="M3 2h3v6H3Zm0 7.5a3 3 0 1 0 3 3 3 3 0 0 0-3-3Z"/>' +
+    '<path d="M10.5 5h3v6h-3Zm0 7.5a3 3 0 1 0 3 3 3 3 0 0 0-3-3Z"/>' +
+    '<path d="M18 8h3v6h-3Zm0 7.5a3 3 0 1 0 3 3 3 3 0 0 0-3-3Z"/>',
   blackout:
-    '<path d="M2 4h20v13H2Z"/><path d="M9 19h6v2H9Z"/>' +
-    '<path d="M13.6 6 8 12.6h3.2L10 15.8 15.6 9.2h-3.2Z" fill="#0b0e13"/>',
+    // An eclipse: everyone else's screen goes out, and you can see. A monitor
+    // with a bolt in it was the first attempt and it read as a grey box.
+    '<circle cx="12" cy="12" r="10"/><circle cx="17" cy="9" r="8" fill="#0b0e13"/>' +
+    '<circle cx="17" cy="9" r="2.2"/>',
   ironclad:
+    // A shield with a plate riveted across it. Three nested shields was more
+    // faithful to the name and unreadable at the size it is actually drawn.
     '<path d="M12 2 3 6v6c0 5 3.8 9.2 9 10 5.2-.8 9-5 9-10V6Z"/>' +
-    '<path d="M12 4.6 5 7.6v4.4c0 3.7 2.9 7 7 7.7 4.1-.7 7-4 7-7.7V7.6Z" fill="#0b0e13"/>' +
-    '<path d="M12 6.4 6.6 8.6v3.4c0 2.9 2.3 5.5 5.4 6.1 3.1-.6 5.4-3.2 5.4-6.1V8.6Z"/>' +
-    '<circle cx="8.4" cy="9.6" r="0.9" fill="#0b0e13"/><circle cx="15.6" cy="9.6" r="0.9" fill="#0b0e13"/>' +
-    '<circle cx="8.4" cy="14.4" r="0.9" fill="#0b0e13"/><circle cx="15.6" cy="14.4" r="0.9" fill="#0b0e13"/>',
+    '<path d="M4.4 9.4h15.2v3.4H4.4Z" fill="#0b0e13"/>' +
+    '<circle cx="7.4" cy="11.1" r="1.1"/><circle cx="16.6" cy="11.1" r="1.1"/>',
   firestorm:
     '<path d="M2 10h20v3H2Z"/>' +
     '<path d="M10.5 2h3v20h-3Z" opacity="0.45"/>' +
