@@ -152,6 +152,23 @@ export interface StatePayload {
   cx?: number
   cy?: number
   /**
+   * Milliseconds of juggernaut suit left, when this client is wearing one.
+   *
+   * The same trade as `c` above and for the same reason: a suit firing dozens
+   * of rounds a second cannot put those rounds on the wire, so it rides the
+   * tick. Unlike the chopper, `x`/`y` are still the player — the suit stands on
+   * the board and can be shot — so this field only says "draw them as a
+   * juggernaut, and their guns are hosing `jx`/`jy`".
+   *
+   * A duration rather than a deadline, so it needs no clock agreement, and
+   * clamped on receipt: a client claiming a minute of suit is claiming a minute
+   * of continuous fire.
+   */
+  j?: number
+  /** Where the suit's guns are landing, absent while it is not firing. */
+  jx?: number
+  jy?: number
+  /**
    * The team this tank has declared, 1..5, or absent for a free-for-all.
    *
    * **Self-declared, and that is the design rather than a shortcut.** There is

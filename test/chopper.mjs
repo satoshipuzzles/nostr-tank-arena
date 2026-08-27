@@ -44,7 +44,13 @@ setLayout(0)
 
 // ------------------------------------------------------------------ the numbers
 
-check('it is up for the ten seconds Puzz asked for', CHOPPER_MS === 10_000, `${CHOPPER_MS}ms`)
+// Twenty, not the ten this originally asserted: Puzz asked for it to be
+// doubled after calling the chopper "the funniest thing ever", and `CHOPPER_MS`
+// says so in a comment above the constant. The assertion is kept rather than
+// deleted — the intent, that the duration is a decision somebody made on
+// purpose and not a number that drifts, is still worth guarding. Not my change;
+// found red on main while shipping the juggernaut suit.
+check('it is up for the twenty seconds Puzz asked for', CHOPPER_MS === 20_000, `${CHOPPER_MS}ms`)
 check('and it moves faster than a tank, or it is a tank you cannot shoot',
   CHOPPER_SPEED > 175, `${CHOPPER_SPEED} vs a tank's 175`)
 check('and it flies above the cover rather than through it',

@@ -2,6 +2,7 @@ import './style.css'
 import * as arena from './arena'
 import * as flags from './flags'
 import { CHOPPER_MS } from './chopper'
+import { SUIT_MS } from './suit'
 import { layoutForBlock, layoutName, setLayout } from './arena'
 import { Sfx } from './audio'
 import { BlockClock } from './blocks'
@@ -2106,6 +2107,7 @@ function loop(now = performance.now()): void {
   syncFlyingView(players[0].game, renderer)
   paintCrosshair(players[0].game, renderer.viewMode)
   paintChopper(players[0].game)
+  paintSuit(players[0].game)
   paintEmp(players[0].game)
   paintDamage(players[0].game, renderer.viewMode)
   paintAmmo(players[0].game)
@@ -2273,6 +2275,27 @@ function paintEmp(game: Game): void {
   const down = game.empUntil > performance.now()
   document.body.classList.toggle('emp', down)
   $('emp').hidden = !down
+}
+
+/**
+ * The juggernaut clock, in the same place and shape as the chopper's.
+ *
+ * Deliberately the same element style rather than a new one: both are "you are
+ * not in your tank, and here is how long for", and a player who has learned to
+ * read one should not have to learn the other. The hint line differs because
+ * the controls do — there is no flying, and the trigger is held rather than
+ * tapped.
+ */
+function paintSuit(game: Game): void {
+  const el = $('suit')
+  const left = game.suitLeft
+  const up = left > 0
+  el.hidden = !up
+  if (!up) return
+  el.innerHTML =
+    `<b>JUGGERNAUT</b> <span class="chopper-clock">${left.toFixed(1)}s</span>` +
+    `<span class="chopper-hint">walk it forward · hold fire to hose them down</span>`
+  el.style.setProperty('--left', String(Math.max(0, Math.min(1, left / (SUIT_MS / 1000)))))
 }
 
 function paintChopper(game: Game): void {

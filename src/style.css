@@ -1766,7 +1766,8 @@ body.hud-compact #rules {
    the number and the width say the same thing and either one is enough.
    `[hidden] { display: none !important }` at the top of this file is what keeps
    `display: grid` here from pinning it on screen the rest of the round. */
-#chopper {
+#chopper,
+#suit {
   position: fixed;
   top: 96px;
   left: 50%;
@@ -1785,12 +1786,22 @@ body.hud-compact #rules {
   pointer-events: none;
   z-index: 4;
 }
-#chopper b { color: #ffb14d; letter-spacing: 2px; }
+#chopper b,
+#suit b { color: #ffb14d; letter-spacing: 2px; }
+/* The juggernaut wears steel rather than the gunship's orange, so a glance at
+   the top of the screen says *which* of the two you are in without reading it. */
+#suit {
+  border-color: #9fd0ff;
+  box-shadow: 0 0 22px rgba(110, 170, 255, 0.3);
+  color: #d7e9ff;
+}
+#suit b { color: #9fd0ff; }
 .chopper-clock { font-variant-numeric: tabular-nums; font-weight: 700; }
 .chopper-hint { color: #b99a78; font-size: 11px; letter-spacing: 0; }
 /* The bar. An `::after` rather than an element, because the contents are
    rewritten every frame and a child would be thrown away with them. */
-#chopper::after {
+#chopper::after,
+#suit::after {
   content: '';
   grid-column: 1;
   width: 168px;
@@ -1800,6 +1811,16 @@ body.hud-compact #rules {
     to right,
     #ffb14d calc(var(--left, 1) * 100%),
     rgba(255, 177, 77, 0.16) calc(var(--left, 1) * 100%)
+  );
+}
+/* After the shared rule, not before it: same specificity, so the one that
+   comes last is the one that paints. The first cut of this sat above and the
+   juggernaut's bar was quietly the gunship's orange. */
+#suit::after {
+  background: linear-gradient(
+    to right,
+    #9fd0ff calc(var(--left, 1) * 100%),
+    rgba(159, 208, 255, 0.16) calc(var(--left, 1) * 100%)
   );
 }
 
