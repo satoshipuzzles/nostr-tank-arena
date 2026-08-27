@@ -2301,3 +2301,85 @@ button.blocktile:focus-visible {
   #death { min-width: 0; padding: 12px 18px 10px; }
   .death-name { font-size: 17px; }
 }
+
+/* ------------------------------------------------------- motion defaults */
+
+/*
+ * The house motion rules, in one place: panels rise, chips drop, banners
+ * punch, rows deal in. Everything here is an entry animation that starts when
+ * the element's `hidden` comes off — a box coming back from `display: none`
+ * starts its animations from frame zero — so the game loop never has to know
+ * any of this exists.
+ *
+ * One trap this section is shaped around: most of these containers have their
+ * children rebuilt by `innerHTML` every HUD frame (the death card's clock
+ * ticks, the rules banner re-measures), and `innerHTML` replaces the child
+ * nodes even when the string is identical. A keyframe on a rebuilt child
+ * restarts every frame and reads as a strobe. So entry animations sit on the
+ * toggled container, never on its children — except `#notice b`, whose
+ * rewrite `drawNotice` guards by timestamp precisely so each new banner can
+ * punch once.
+ *
+ * Elements that centre themselves with a transform (`#death`, `#rules`,
+ * `#ctf`) need that transform repeated in the `from` frame, or the animation
+ * would ride from `none` and fling them across the screen.
+ */
+
+@keyframes panel-rise {
+  from { opacity: 0; transform: translateY(16px) scale(0.97); }
+}
+.lobby-card,
+.board-card,
+#podium .card {
+  animation: panel-rise 0.28s cubic-bezier(0.2, 1.1, 0.35, 1);
+}
+
+/* The death card slams down onto you rather than rising like furniture. */
+@keyframes card-slam {
+  from { opacity: 0; transform: translate(-50%, -50%) scale(1.14); }
+}
+#death { animation: card-slam 0.2s cubic-bezier(0.2, 1.25, 0.4, 1); }
+
+@keyframes chip-drop {
+  from { opacity: 0; transform: translateX(-50%) translateY(-10px); }
+}
+#rules,
+#ctf {
+  animation: chip-drop 0.3s ease-out;
+}
+
+/* The banner punch: oversized and hot on arrival, settling where it lives.
+   `both` matters on none of these except the delayed rows below, but the
+   overshoot frame here does: a punch that only shrank would read as a fade. */
+@keyframes banner-punch {
+  from { transform: scale(1.5); filter: brightness(1.7); }
+  62% { transform: scale(0.97); filter: brightness(1); }
+}
+#notice b { animation: banner-punch 0.3s cubic-bezier(0.25, 0.9, 0.35, 1); }
+
+/* Podium standings deal in one at a time, top seat first. Eight delays cover
+   the eight-seat room; a ninth row would simply arrive with the eighth. */
+@keyframes row-in {
+  from { opacity: 0; transform: translateX(-12px); }
+}
+#podium-rows .score-row { animation: row-in 0.22s ease-out both; }
+#podium-rows .score-row:nth-child(2) { animation-delay: 0.06s; }
+#podium-rows .score-row:nth-child(3) { animation-delay: 0.12s; }
+#podium-rows .score-row:nth-child(4) { animation-delay: 0.18s; }
+#podium-rows .score-row:nth-child(5) { animation-delay: 0.24s; }
+#podium-rows .score-row:nth-child(6) { animation-delay: 0.3s; }
+#podium-rows .score-row:nth-child(7) { animation-delay: 0.36s; }
+#podium-rows .score-row:nth-child(n + 8) { animation-delay: 0.42s; }
+
+@media (prefers-reduced-motion: reduce) {
+  .lobby-card,
+  .board-card,
+  #podium .card,
+  #death,
+  #rules,
+  #ctf,
+  #notice b,
+  #podium-rows .score-row {
+    animation: none;
+  }
+}

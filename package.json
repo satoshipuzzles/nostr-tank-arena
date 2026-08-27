@@ -53,7 +53,8 @@
     "test:spitfire": "node test/spitfire.mjs",
     "test:spitfire-browser": "node test/spitfire-browser.mjs",
     "test:death": "node test/death.mjs",
-    "test:vault": "node test/vault.mjs"
+    "test:vault": "node test/vault.mjs",
+    "test:motion": "node test/motion.mjs"
   },
   "dependencies": {
     "nostr-tools": "^2.10.4",
