@@ -502,6 +502,63 @@ body.hud-compact #ctf {
 }
 
 /*
+ * The team score.
+ *
+ * Same slot and the same shape as the flag race — they are the same kind of
+ * fact and they never appear together, because a mode has one score. Your own
+ * side is lit and the side that is ahead carries the bar under it, so "am I
+ * winning" is answerable without reading the numbers.
+ *
+ * `[hidden] { display: none !important }` at the top of this file is what keeps
+ * `display: grid` here from pinning it on screen for the rest of the round.
+ */
+#tdm {
+  position: absolute;
+  top: calc(14px + var(--rules-h, 0px));
+  left: 50%;
+  transform: translateX(-50%);
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+  padding: 6px 14px;
+  border-radius: 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  pointer-events: none;
+  text-align: center;
+  z-index: 4;
+  font-size: 12px;
+  white-space: nowrap;
+}
+#tdm[hidden] { display: none !important; }
+#tdm .tdm-race { display: flex; align-items: baseline; gap: 7px; font-size: 13px; }
+#tdm .tdm-side {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  color: hsl(var(--side) 45% 62%);
+  border-bottom: 2px solid transparent;
+}
+#tdm .tdm-side b { font-weight: 700; font-variant-numeric: tabular-nums; }
+/* Yours is the one you find first, so it is the bright one. */
+#tdm .tdm-side.ours { color: hsl(var(--side) 80% 70%); font-weight: 700; }
+/* And the bar says who is ahead without a second number to read. */
+#tdm .tdm-side.ahead { border-bottom-color: hsl(var(--side) 75% 58%); }
+#tdm .tdm-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: hsl(var(--side) 72% 56%);
+  align-self: center;
+}
+#tdm .tdm-dash { font-style: normal; color: var(--dim); }
+#tdm .tdm-bots { color: var(--dim); font-size: 11px; }
+body.hud-compact #tdm {
+  top: calc(max(10px, env(safe-area-inset-top)) + 58px + var(--rules-h, 0px));
+  max-width: min(420px, calc(100vw - 20px));
+}
+
+/*
  * The streak loadout: four tiers, five rewards each, arranged in the lobby.
  *
  * Reads as a rack of tiers — a coloured tier chip on the left, five reward

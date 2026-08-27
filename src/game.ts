@@ -2636,18 +2636,60 @@ export class Game {
    * and "teams with nothing in them" are different things and the HUD draws
    * them differently. One side with one player on it is also a free-for-all —
    * a team of one is a person.
+   *
+   * **People only. The practice tanks are counted separately and never scored.**
+   *
+   * This is the bug Puzz reported as "team death match isnt really working",
+   * and it is visible the moment two humans stand in one room. Bots are local:
+   * each client spawns its own and puts them on sides *relative to itself*. Two
+   * clients measured in the same room, same moment:
+   *
+   *   Alfa's screen:   Red 2 players, Blue 2 players
+   *   Bravo's screen:  Red 1, Blue 2, **Green 1**
+   *
+   * Same room, same instant, three sides on one screen and two on the other,
+   * one of them a phantom made of somebody else's practice tank. A scoreboard
+   * that disagrees with the other player's scoreboard is worse than no
+   * scoreboard, and it cannot be fixed by making the bots agree — they do not
+   * exist on the other client at all.
+   *
+   * So the tally is the people. Their kills are already the only ones that
+   * count: a bot kill does not go on the wire and does not move `kills`, which
+   * this deliberately matches rather than working around. `bots` rides along so
+   * the HUD can say what else is on the board without pretending it has a score.
    */
-  teamStandings(): { team: number; kills: number; deaths: number; players: number }[] | null {
-    const rows = this.scoreboard()
-    const byTeam = new Map<number, { team: number; kills: number; deaths: number; players: number }>()
-    for (const r of rows) {
-      if (!r.team) continue
-      const t = byTeam.get(r.team) ?? { team: r.team, kills: 0, deaths: 0, players: 0 }
-      t.kills += r.kills
-      t.deaths += r.deaths
-      t.players++
-      byTeam.set(r.team, t)
+  teamStandings():
+    | { team: number; kills: number; deaths: number; players: number; bots: number }[]
+    | null {
+    const byTeam = new Map<
+      number,
+      { team: number; kills: number; deaths: number; players: number; bots: number }
+    >()
+    const row = (team: number) => {
+      const t = byTeam.get(team) ?? { team, kills: 0, deaths: 0, players: 0, bots: 0 }
+      byTeam.set(team, t)
+      return t
     }
+    if (this.team && !this.watching) {
+      const t = row(this.team)
+      t.kills += this.kills
+      t.deaths += this.deaths
+      t.players++
+    }
+    for (const p of this.peers.values()) {
+      if (!p.view.team) continue
+      const t = row(p.view.team)
+      if (p.bot) {
+        t.bots++
+        continue
+      }
+      t.kills += p.claimed?.kills ?? p.kills
+      t.deaths += p.claimed?.deaths ?? p.deaths
+      t.players++
+    }
+    // Sides that are nothing but practice tanks are not sides. Without this a
+    // solo player in a team mode grows a scoreboard out of their own bots.
+    for (const [team, t] of byTeam) if (!t.players) byTeam.delete(team)
     if (byTeam.size < 2) return null
     return [...byTeam.values()].sort((a, b) => b.kills - a.kills || a.deaths - b.deaths || a.team - b.team)
   }
