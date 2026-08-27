@@ -27,6 +27,7 @@ import {
 } from './pickups'
 import { Identity, Net } from './nostr'
 import { DEFAULT_SKIN, asSkin, type SkinId } from './skins'
+import { DEFAULT_CARD, asCard, type CardId } from './cards'
 import {
   KIND_CLAIM,
   KIND_DEATH,
@@ -622,6 +623,15 @@ export interface Peer {
   /** The finish they picked. Purely cosmetic; see `src/skins.ts`. */
   skin: SkinId
   /**
+   * The calling card they claim, off the same attestation as the skin.
+   *
+   * *Claim* is the operative word and it is written down rather than implied:
+   * an earned card's condition is defined in terms of that npub's own signed
+   * score events, so anybody can check one — this client checks its own before
+   * letting you wear it, and shows a peer's as claimed. See `src/cards.ts`.
+   */
+  card: CardId
+  /**
    * A local practice tank rather than somebody on a relay.
    *
    * Read by the renderer, which otherwise draws the `?` it puts on any peer
@@ -1001,6 +1011,8 @@ export class Game {
     public watching = false,
     /** The finish this tank wears. Cosmetic only — see `src/skins.ts`. */
     public skin: SkinId = DEFAULT_SKIN,
+    /** The calling card this tank claims. Cosmetic only — see `src/cards.ts`. */
+    public card: CardId = DEFAULT_CARD,
   ) {
     this.displayColor = color
     const spawn = SPAWNS[Math.floor(Math.random() * SPAWNS.length)]
@@ -1081,6 +1093,7 @@ export class Game {
       color: this.color,
       exp: Math.floor(Date.now() / 1000) + SESSION_TTL_S,
       sk: this.skin,
+      cc: this.card,
     }
     const signed = await this.identity.signAsSelf({
       kind: KIND_SESSION,
@@ -1234,6 +1247,7 @@ export class Game {
     peer.name = typeof p.name === 'string' && p.name ? p.name.slice(0, 20) : peer.name
     peer.color = typeof p.color === 'number' ? p.color % 360 : peer.color
     peer.skin = asSkin(p.sk)
+    peer.card = asCard(p.cc)
   }
 
   private ensurePeer(session: string): Peer {
@@ -1271,6 +1285,7 @@ export class Game {
         streak: 0,
         captures: 0,
         skin: DEFAULT_SKIN,
+        card: DEFAULT_CARD,
       }
       this.peers.set(session, peer)
       // Somebody just arrived, and they missed everything we have already said.
@@ -3763,6 +3778,8 @@ export class Game {
     deaths: number
     /** True when a practice tank did it, which costs no death on the board. */
     bot: boolean
+    /** The calling card they claim. Cosmetic; see `src/cards.ts`. */
+    card: CardId
   } | null = null
 
   private die(killer: string | null): void {
@@ -3821,6 +3838,7 @@ export class Game {
       kills: peer?.claimed?.kills ?? peer?.kills ?? 0,
       deaths: peer?.claimed?.deaths ?? peer?.deaths ?? 0,
       bot: fromBot,
+      card: peer?.card ?? DEFAULT_CARD,
     }
     this.pushFeed(killerName ? `${killerName} killed you` : 'you self-destructed')
   }

@@ -55,7 +55,8 @@
     "test:death": "node test/death.mjs",
     "test:vault": "node test/vault.mjs",
     "test:motion": "node test/motion.mjs",
-    "test:tdm": "node test/tdm.mjs"
+    "test:tdm": "node test/tdm.mjs",
+    "test:cards": "node test/cards.mjs"
   },
   "dependencies": {
     "nostr-tools": "^2.10.4",

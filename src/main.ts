@@ -21,6 +21,8 @@ import { modifierForBlock } from './modifiers'
 import { MAG_SIZE, RELOAD } from './sim'
 import { SKINS, SKIN_IDS, SKIN_GROUPS, asSkin } from './skins'
 import type { SkinId } from './skins'
+import { CARDS, DEFAULT_CARD, asCard, cardArt, cardOf, noCareer, unlocked } from './cards'
+import type { CardId, Career } from './cards'
 import { type Buffs, PICKUPS, type PickupKind, iconSvg } from './pickups'
 import { type Profile, Profiles, shortNpub } from './profiles'
 import {
@@ -43,6 +45,7 @@ import {
   fetchBlockScores,
   seasonOf,
   fetchBlockWall,
+  fetchCareer,
   fetchScores,
   fetchSeasons,
   publishScore,
@@ -1442,6 +1445,82 @@ function profilePeek(pubkey: string): void {
  */
 let profilePubkey: string | null = null
 let profileMeta: Record<string, unknown> = {}
+/**
+ * What this npub's own published history adds up to, and the cards it earns.
+ *
+ * Empty for a guest, and that is the honest reading rather than a punishment:
+ * the conditions are defined in terms of what an npub has *published*, and a
+ * guest has published nothing. The free cards are free for exactly that reason.
+ */
+let career: Career = noCareer()
+let cardPick: CardId = asCard(stored('tank.card'))
+
+function paintCards(): void {
+  const open = unlocked(career)
+  $('card-grid').innerHTML = CARDS.map((c) => {
+    const has = open.has(c.id)
+    // A locked card is shown rather than hidden. "What is there to play for"
+    // is most of the value of an achievement, and a grid that only lists what
+    // you already have answers it with silence.
+    return (
+      `<button type="button" data-card="${c.id}" style="--card:${c.hue}" ` +
+      `class="card-pick${has ? '' : ' locked'}" ${has ? '' : 'disabled '}` +
+      `title="${c.rule}" aria-pressed="${cardPick === c.id}">` +
+      `${cardArt(c.id)}<span class="card-name">${c.name}</span>` +
+      `<span class="card-rule">${has && !c.free ? 'earned' : c.rule}</span></button>`
+    )
+  }).join('')
+  const mine = cardOf(cardPick)
+  $('card-note').textContent = profilePubkey
+    ? `Wearing ${mine.name}. Earned cards come from your own signed score records — anyone can check them.`
+    : 'Connect an npub to earn cards. A guest wears the free ones, because the conditions are things you publish.'
+}
+
+/** Load the career for a connected npub, then repaint what it unlocks. */
+async function loadCareer(pubkey: string): Promise<void> {
+  try {
+    career = await fetchCareer(lobbyPool(), pubkey)
+  } catch {
+    // A relay that would not answer is not an empty career, so say nothing
+    // rather than showing zeros as if they were a result.
+    $('profile-career').hidden = true
+    return
+  }
+  const line = $('profile-career')
+  line.hidden = false
+  line.textContent =
+    `${career.rounds} rounds · ${career.kills} kills · ${career.deaths} deaths · ` +
+    `best streak ${career.bestStreak} · ${career.blocksWon} blocks won (recent)`
+  // A card you no longer qualify for is not a card you keep: the picker is the
+  // only place the claim is checked, so it has to re-check on new evidence.
+  if (!unlocked(career).has(cardPick)) cardPick = DEFAULT_CARD
+  paintCards()
+}
+
+paintCards()
+// The unlock rules, exposed for the suite. They are pure functions of a career
+// — which is itself a pure function of published events — so a test that drives
+// them is testing the same thing an outside checker would run, rather than a
+// second implementation of the same table.
+;(window as unknown as { __cards: unknown }).__cards = { unlocked, noCareer, CARDS }
+// And a way to hand the picker a history, for the suite and for a screenshot.
+// It goes through the same repaint the real fetch does, so what a picture shows
+// is what a player with that record would see rather than a mock of it.
+;(window as unknown as { __setCareer: (c: Career) => void }).__setCareer = (c) => {
+  career = c
+  if (!unlocked(career).has(cardPick)) cardPick = DEFAULT_CARD
+  paintCards()
+}
+$('card-grid').addEventListener('click', (e) => {
+  const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-card]')
+  if (!b || b.disabled) return
+  const id = asCard(b.dataset.card)
+  if (!unlocked(career).has(id)) return
+  cardPick = id
+  store('tank.card', id)
+  paintCards()
+  if (running) for (const p of running.players) p.game.card = id
+})
 
 function paintProfileIdent(name: string, picture: string | null, sub: string): void {
   $('profile-name').textContent = name
@@ -1481,6 +1560,7 @@ async function connectProfile(): Promise<void> {
         // A malformed profile is a missing profile, same rule as `Profiles`.
       }
     }
+    void loadCareer(pk)
     const display =
       typeof profileMeta.display_name === 'string' && profileMeta.display_name.trim()
         ? profileMeta.display_name.trim()
@@ -1854,7 +1934,7 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
 
     const net = new Net(relays)
     const profiles = new Profiles(net)
-    const game = new Game(identity, net, room, name, color, watching, skin)
+    const game = new Game(identity, net, room, name, color, watching, skin, cardPick)
     // Only player one has an ear. Two local players share one set of speakers,
     // and every event player two publishes is already heard here as a peer —
     // positioned, through the same code a remote player's shot goes through. A
@@ -1900,7 +1980,7 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
       const secondNet = new Net(relays)
       // Player two wears the same skin. It is a setting on the machine, not on
       // the identity — there is one lobby and one picker in front of one couch.
-      const p2 = new Game(second, secondNet, room, `${name}-2`, (color + 137) % 360, false, skin)
+      const p2 = new Game(second, secondNet, room, `${name}-2`, (color + 137) % 360, false, skin, cardPick)
       p2.chainClock = () => ({ seconds: clock.chainSeconds(), pending: clock.chainPending })
       await p2.start()
       // Each is an ordinary peer of the other, through the same signed events —
@@ -2405,10 +2485,13 @@ function paintDeath(game: Game): void {
     (self
       ? ''
       : `<span class="death-who">${avatar(profile, d.name, d.hue, 56)}` +
-        `<span class="death-name">${escapeHtml(d.name)}${nip05Badge(profile)}` +
-        // The slot. Empty until calling cards exist, and deliberately still
-        // here so the layout it lands into is the layout that shipped.
-        `<span class="death-card-slot"></span></span></span>`) +
+        `<span class="death-name">${escapeHtml(d.name)}${nip05Badge(profile)}</span>` +
+        // The slot the card half of this issue left open, now filled: their
+        // badge and its name, in its own colour. It is what they claim rather
+        // than what this client verified — see `src/cards.ts` — and it is a
+        // costume, so that is the right trade.
+        `<span class="death-card-slot" style="--card:${cardOf(d.card).hue}">` +
+        `${cardArt(d.card, 'card-art small')}${cardOf(d.card).name}</span></span>`) +
     `<span class="death-note">${escapeHtml(note)}</span>` +
     `<span class="death-clock">back in <b>${left.toFixed(1)}s</b></span>`
 }

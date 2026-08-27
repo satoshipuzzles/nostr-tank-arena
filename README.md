@@ -310,6 +310,37 @@ Skins are cosmetic only. Tank *classes* — different hulls that drive and shoot
 differently — are a separate and much larger piece of work, filed as its own
 issue.
 
+## Calling cards, and what a card is worth
+
+A calling card is the badge beside your name on the screen of whoever you just
+killed. Ten of them, three free, the rest earned — and the interesting half is
+what "earned" means when there is no server to award anything.
+
+**Every condition is defined in terms of the player's own signed score events.**
+Those are the same per-block, addressable, publicly queryable records the
+leaderboard is built from. Fifty career kills, a twenty-five streak, five blocks
+won: all of it is arithmetic over events that npub published and signed. So
+anybody who cares to check a card *can*, with the same query this client runs,
+and there is nothing here that only a privileged party could verify.
+
+**A card is still a claim, not a credential, and this is the deliberate
+choice.** The selection rides the session attestation (`cc`) beside the skin.
+This client checks its own history before it lets you wear one, and it displays
+what a peer claims without re-querying them mid-match. A modified client could
+wear a card it has not earned — exactly as it could report hull points it does
+not have, which the "How to cheat this" section below says out loud. The cost of
+that lie is a costume. Buying verification would mean a fetch per player per
+match against relays this game is already careful with, to protect a cosmetic.
+
+The other direction is worth stating too: a card you no longer qualify for is
+not a card you keep, because the picker re-checks against the history rather
+than remembering that you once passed.
+
+A guest has no npub, so a guest has published nothing and wears the free set.
+That is the honest reading of the rule rather than a punishment for playing
+without a key — and playing without a key stays a first-class option everywhere
+else in this game.
+
 ## The board
 
 The arena renders in three.js: a chunky toy board in daylight, plastic tanks
