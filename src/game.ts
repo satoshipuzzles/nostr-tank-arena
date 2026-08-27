@@ -493,7 +493,7 @@ export const NUKE_FLASH_MS = 2_600
  * used to be a constant: a number that was only ever right for one board is a
  * bug waiting for the second one.
  */
-const STRIKE_GAP = 118
+export const STRIKE_GAP = 118
 /** The apex runs are denser, so a tank in the lane takes more than one bomb. */
 const CARPET_GAP = 80
 /**
@@ -503,7 +503,7 @@ const CARPET_GAP = 80
  * grew past what the wire allows drops bombs rather than silently having its
  * run truncated at the far end by somebody else's clamp.
  */
-const bombsFor = (span: number, gap: number): number =>
+export const bombsFor = (span: number, gap: number): number =>
   Math.max(2, Math.min(40, Math.round(span / gap) + 1))
 
 /** Seconds between one bomb and the next, and the hull each one takes off. */
@@ -534,7 +534,7 @@ const STRIKE_LEAD_MS = 2_000
  * driving out of the lane is a real answer — which is the whole reason the
  * bombs walk instead of landing all at once.
  */
-const STRIKE_RADIUS = 64
+export const STRIKE_RADIUS = 64
 /** How long after its last bomb a finished strike is kept around. */
 const STRIKE_LINGER_MS = 1_500
 /** How long the podium sits between rounds. */
