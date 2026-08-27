@@ -2734,23 +2734,33 @@ export class Game {
   /**
    * Spawn, step and retire the practice opponents.
    *
-   * The retire branch is the load-bearing one, and the rule is Puzz's: "players
-   * can take a seat and replace the bots 1 for 1". A human's tick used to stand
-   * every bot down at once; now each human displaces exactly one, so a five-bot
-   * room with two people in it runs four bots and never empties out.
+   * Bots stand down — ALL of them — the moment anybody real is in the room.
    *
-   * The honest cost, chosen deliberately: bots are local and publish nothing,
-   * so with two humans in a room each is fighting bots the other cannot see.
-   * That was already true of a spectator watching a solo player shell "nobody",
-   * and the trade — a room that always feels populated, for a divergence that
-   * only shows from someone else's screen — is the one the issue asked for.
-   * Checked against peers that are *not* bots, because the bots are themselves
-   * in `peers` by the time this runs a second time.
+   * This reverts the one-for-one seat rule from PR #35, and the reason is
+   * written here so nobody re-lands that arithmetic without reading it. Bots
+   * are pure local simulation: `fireBot` never publishes, ids come off a
+   * per-client counter, and every client's bots hunt every client's OWN tank.
+   * But `collide` lets a bot consume any shell (`hitBot` deletes on overlap)
+   * — including one re-simulated from a REMOTE player's fire event. So in a
+   * populated room, the victim's phantom bots — clustered on the victim,
+   * because that is who they hunt — step in front of most incoming fire:
+   * shells vanish with no feedback, and bot shells drain hull from tanks the
+   * rest of the room cannot see. Live symptom, diagnosed by rainmaker:
+   * "hits aren't landing 3/4 of the time". Turning bots off locally cannot
+   * fix it, because it is the *victim's* client that eats your shot.
+   *
+   * The one-for-one seat feature (issue 1335d694) comes back only with bot
+   * AUTHORITY: one owning client stepping the bots and publishing their state
+   * on the tick like any other tank. That is a netcode change, not an
+   * arithmetic one.
+   *
+   * Checked against peers that are *not* bots, because the bots are
+   * themselves in `peers` by the time this runs a second time.
    */
   private syncBots(dt: number, now: number): void {
     const humans = [...this.peers.keys()].filter((k) => !this.isBot(k))
     const asked = Math.max(0, Math.min(MAX_BOTS, Math.floor(this.botsWanted)))
-    const wanted = this.watching ? 0 : Math.max(0, asked - humans.length)
+    const wanted = humans.length === 0 && !this.watching ? asked : 0
 
     if (this.bots.length > wanted) {
       // Retire from the end rather than clearing the lot. Dropping one bot used

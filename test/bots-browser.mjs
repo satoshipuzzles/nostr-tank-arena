@@ -5,10 +5,11 @@
 // that only exist once a bot is wired into a running game:
 //
 //   1. Three of them appear in an empty room and reach the screen as tanks.
-//   2. **Each real player's tick retires exactly one of them.** Puzz's rule:
-//      seats are taken one for one, so a three-bot room with one human runs
-//      two bots and the room never empties out — and enough humans still
-//      clear them entirely.
+//   2. **One real player's tick stands ALL of them down.** The one-for-one
+//      seat rule was reverted (see `syncBots`): bots are local-only, and a
+//      populated room's phantom bots eat authoritative shells — rainmaker's
+//      "hits aren't landing 3/4 of the time" diagnosis. Bots exist only in a
+//      room with nobody real in it; the seat rule returns with bot authority.
 //   3. Shooting one damages it, and killing one moves the streak without
 //      moving the published score. Free kills are available in unlimited
 //      quantity to anyone willing to sit in an empty room.
@@ -220,11 +221,11 @@ try {
     JSON.stringify(death.published),
   )
 
-  // --------------------------- 2. a real player takes a seat, one bot leaves
+  // ------------------------ 2. a real player arrives, every bot stands down
 
   // One state tick from a stranger. That is all it takes on a relay, and it
-  // has to be all it takes here — and it costs exactly one bot, not the lot:
-  // the room is meant to stay populated as humans trickle in.
+  // has to be all it takes here — and it clears the LOT: one phantom bot in a
+  // populated room is one tank that eats real shells. See `syncBots`.
   const stranger = (pk) => ({
     id: 'a' + Math.random().toString(16).slice(2),
     pubkey: pk, kind: 21000, created_at: Math.floor(Date.now() / 1000), tags: [], sig: '0'.repeat(128),
@@ -236,15 +237,9 @@ try {
     for (const ev of events) window.__game.onEvent(ev, false)
     return window.__game.botCount
   }, pks.map(stranger))
-  const oneDown = await until(async () => ((await seats([PEER])) === 2 ? true : null))
-  check('one real player retires exactly one bot', !!oneDown,
-    `botCount=${await seats([PEER])} (wanted 3 − 1 human)`)
-
-  // Two more strangers: the seats are gone, and so are the bots.
-  const others = [PEER, 'd2'.repeat(32), 'd3'.repeat(32)]
-  const cleared = await until(async () => ((await seats(others)) === 0 ? true : null))
-  check('and as many humans as asked-for bots clears them entirely', !!cleared,
-    `botCount=${await seats(others)}`)
+  const allDown = await until(async () => ((await seats([PEER])) === 0 ? true : null))
+  check('one real player stands every bot down', !!allDown,
+    `botCount=${await seats([PEER])} (wanted 0 — bots are local-only)`)
 
   const leftBehind = await page.evaluate(() => {
     const g = window.__game
