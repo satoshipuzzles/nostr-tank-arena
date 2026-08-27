@@ -354,7 +354,7 @@ const corners = (w: number, h: number): Pt[] => [
 ]
 
 /**
- * Eight boards, and the size range is as much of the variety as the shapes are.
+ * Ten boards, and the size range is as much of the variety as the shapes are.
  *
  * 1500x1100 is a knife fight with four players in it; 2100x1550 gives you
  * somewhere to go and three seconds to watch somebody come and get you. Every

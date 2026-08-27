@@ -22,12 +22,15 @@ When the tip moves:
 
 1. the round ends and a podium shows the standings,
 2. scores reset to zero,
-3. **the map changes** — the board is `blockHash % 8`, so every client
+3. **the map changes** — the board is `blockHash % 10`, so every client
    generates the same arena from the same number with no message passing at
-   all. Eight boards ship, and the size range is part of the variety:
+   all. Ten boards ship, and the size range is part of the variety:
    Crossroads (1600x1200), The Lanes (2000x1400), Pillars (1950x1450),
    The Ring (1900x1400), The Yard (1500x1100), The Quarry (2100x1550),
-   The Hedges (1800x1350) and The Depot (1700x1250). Every board is
+   The Hedges (1800x1350), The Depot (1700x1250), The Shallows (1800x1300 —
+   a river tanks cannot ford except at two gaps, though shells cross it
+   freely) and The Bluff (1900x1400 — a central mesa whose cliffs block
+   shots from below while a tank on top fires out over them). Every board is
    180-degree rotationally symmetric, so no spawn is better than another.
 
 Publishing a result writes an addressable record whose `d` tag carries the
