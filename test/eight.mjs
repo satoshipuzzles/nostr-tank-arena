@@ -83,13 +83,15 @@ try {
   // ------------------------------------------------------------- the spawns
 
   // Every layout, not just the pinned one. The map comes from the block hash,
-  // so a room of eight lands on all eight boards over the course of an evening
-  // and a board with four spawns would stack tanks on one of them.
+  // so a room of eight lands on every board over the course of an evening
+  // and a board with four spawns would stack tanks on one of them. Sweep
+  // whatever the build ships, not a pinned count — a board added to LAYOUTS
+  // joins this check without anyone remembering to widen it.
   const spawns = await page.evaluate((seats) => {
     const A = window.__arena
     const out = []
     const before = A.currentLayoutIndex()
-    for (let i = 0; i < 8; i++) {
+    for (let i = 0; i < A.LAYOUTS.length; i++) {
       A.setLayout(i)
       const pts = A.SPAWNS.map((p) => ({ x: Math.round(p.x), y: Math.round(p.y) }))
       // Distinct, and far enough apart that two tanks are not touching. A

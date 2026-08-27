@@ -992,8 +992,8 @@ export function coverBits(): number {
  * Put every barrel back. Called at a round boundary, not at a layout swap.
  *
  * `setLayout` already does this, and relying on it would be a bug waiting for
- * the right block: the map is `blockHash % 8`, so two rounds in a row land on
- * the same board about one time in eight, and `setLayout` returns early when
+ * the right block: the map is `blockHash % LAYOUTS.length`, so two rounds in a
+ * row land on the same board about once per board count, and `setLayout` returns early when
  * the index has not changed. A round that inherited the previous round's holes
  * would be a different board from the one its own hash describes — and a late
  * joiner, who *would* get a fresh layout, would disagree with everybody.
