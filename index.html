@@ -319,6 +319,20 @@
                 <button type="button" id="profile-save" class="tiny">Sign &amp; publish</button>
               </div>
               <p class="fine" id="profile-note"></p>
+              <!-- Lifetime numbers, from the player's own signed score events —
+                   the same records the leaderboard is built from, so there is
+                   nothing here that only this client could know. Blocks won has
+                   a horizon and the line says so. -->
+              <p class="fine" id="profile-career" hidden></p>
+            </div>
+            <!-- The calling card: the badge beside your name on the screen of
+                 whoever you just killed. Earned ones are defined in terms of
+                 that npub's own published score history, so anybody can check
+                 one; this client checks its own. See src/cards.ts. -->
+            <div id="cards">
+              <span class="seg-label">Calling card</span>
+              <div class="card-grid" id="card-grid" role="group" aria-label="Calling card"></div>
+              <p class="fine" id="card-note"></p>
             </div>
           </div>
         </div>

@@ -2394,8 +2394,9 @@ button.blocktile:focus-visible {
 .death-note { font-size: 12px; color: var(--dim); }
 .death-clock { font-size: 12px; color: #cbd6e6; font-variant-numeric: tabular-nums; }
 .death-clock b { color: #fff; }
-/* The calling card lands here. Left in on purpose: an empty slot costs one
-   element and keeps the layout it drops into honest. */
+/* The slot is filled now — see the calling-card block at the foot of this
+   file. It still collapses when a killer has no card to show, which is what a
+   client too old to send one looks like. */
 .death-card-slot:empty { display: none; }
 
 @media (max-width: 560px) {
@@ -2487,3 +2488,68 @@ button.blocktile:focus-visible {
     animation: none;
   }
 }
+
+
+/*
+ * Calling cards.
+ *
+ * A grid in the garage rather than a dropdown, because half the value of an
+ * achievement is seeing the ones you have not got yet — a list that only shows
+ * what you already own answers "what is there to play for" with silence. So
+ * locked cards are drawn, greyed, wearing their condition instead of a label.
+ *
+ * `--card` is the card's own hue, set inline from the table in src/cards.ts.
+ */
+#cards { display: grid; gap: 6px; margin: 8px 0 2px; }
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+  gap: 6px;
+}
+.card-pick {
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+  padding: 8px 6px 6px;
+  border-radius: 10px;
+  border: 1px solid hsl(var(--card) 45% 45% / 0.4);
+  background: hsl(var(--card) 45% 30% / 0.16);
+  color: hsl(var(--card) 70% 78%);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  text-align: center;
+}
+.card-pick .card-art { width: 22px; height: 22px; }
+.card-pick .card-name { font-weight: 700; letter-spacing: 0.02em; }
+.card-pick .card-rule { color: var(--dim); font-size: 10px; line-height: 1.2; }
+.card-pick[aria-pressed='true'] {
+  border-color: hsl(var(--card) 75% 60%);
+  background: hsl(var(--card) 60% 40% / 0.34);
+  box-shadow: 0 0 12px hsl(var(--card) 70% 50% / 0.34);
+}
+/* Locked: legible, obviously out of reach, and not clickable. */
+.card-pick.locked {
+  color: var(--dim);
+  border-color: var(--line);
+  background: rgba(255, 255, 255, 0.03);
+  cursor: default;
+}
+.card-pick.locked .card-art { opacity: 0.4; }
+
+/* The badge as it appears on somebody else's death screen. */
+.death-card-slot {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 2px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: hsl(var(--card, 200) 75% 76%);
+  background: hsl(var(--card, 200) 60% 40% / 0.22);
+  border: 1px solid hsl(var(--card, 200) 60% 55% / 0.45);
+}
+.death-card-slot .card-art.small { width: 13px; height: 13px; }

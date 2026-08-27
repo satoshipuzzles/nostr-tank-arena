@@ -56,6 +56,15 @@ export interface SessionPayload {
    * mid-round. See `src/skins.ts`.
    */
   sk?: string
+  /**
+   * Chosen calling card id. Absent means the default.
+   *
+   * On the attestation for the same reason as the skin: it changes about once
+   * a session, and a lobby setting has no business on a 10Hz tick. It is a
+   * *claim* — see `src/cards.ts` for why that is the design rather than a gap,
+   * and what anybody who wants to check one would query.
+   */
+  cc?: string
 }
 
 /**

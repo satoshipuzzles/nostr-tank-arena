@@ -5,6 +5,8 @@
 import type { Event } from 'nostr-tools'
 import { nip19 } from 'nostr-tools'
 import type { Identity, Net } from './nostr'
+import type { Career } from './cards'
+import { noCareer } from './cards'
 import { KIND_SCORE, SCORE_D_TAG, blockScoreTag, blockTag, parsePayload } from './protocol'
 
 export interface ScorePayload {
@@ -210,6 +212,45 @@ export interface BlockWall {
    * season rather than qualifying it.
    */
   truncated: boolean
+}
+
+/**
+ * One player's own published history, added up.
+ *
+ * Everything a calling card can be earned by, from events that npub signed
+ * themselves — which is the whole verification story for cards: the same query
+ * anybody else can run gives the same answer. See `src/cards.ts`.
+ *
+ * `blocksWon` needs the room's records rather than only this player's, because
+ * winning a block is a comparison. It is therefore bounded by the wall the
+ * leaderboard already fetches, and the UI says "in the last N blocks" rather
+ * than implying it reaches back to genesis — an unqualified career number that
+ * silently has a horizon is the kind of claim this game does not make.
+ */
+export async function fetchCareer(net: Net, pubkey: string): Promise<Career> {
+  const [mine, wall] = await Promise.all([
+    net.list({ kinds: [KIND_SCORE], authors: [pubkey], limit: 400 }) as Promise<Event[]>,
+    fetchBlockWall(net, 200),
+  ])
+  const career = noCareer()
+  // One slot per block: an addressable record re-signed is the same round, and
+  // a relay that hands back both signatures must not double a career.
+  const perBlock = new Map<string, ScorePayload>()
+  for (const e of mine) {
+    const p = parsePayload<ScorePayload>(e.content)
+    if (!p || typeof p.kills !== 'number' || typeof p.deaths !== 'number') continue
+    const key = typeof p.block === 'number' ? `b${Math.floor(p.block)}` : `t${e.id}`
+    const seen = perBlock.get(key)
+    if (!seen || (p.at ?? 0) > (seen.at ?? 0)) perBlock.set(key, p)
+  }
+  for (const p of perBlock.values()) {
+    career.rounds++
+    career.kills += Math.max(0, Math.floor(p.kills))
+    career.deaths += Math.max(0, Math.floor(p.deaths))
+    if (typeof p.streak === 'number') career.bestStreak = Math.max(career.bestStreak, Math.floor(p.streak))
+  }
+  career.blocksWon = wall.blocks.filter((b) => b.winner?.pubkey === pubkey).length
+  return career
 }
 
 export async function fetchBlockWall(net: Net, limit = 60): Promise<BlockWall> {
