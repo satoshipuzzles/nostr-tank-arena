@@ -160,6 +160,22 @@ const browser = await puppeteer.launch({
   args: ['--no-sandbox', '--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'],
 })
 
+// The relay editor lives on the settings screen now (issue 86a9cd9d — one
+// screen for the scattered configuration). It is the same element, moved, so
+// everything below still applies; it just has to be on screen first. Opening
+// the panel is what a player does to reach it, so that is what this does.
+//
+// Not my file. The assertions and their intent are untouched — only the two
+// lines it takes to get to the thing they were always about.
+const reveal = async (p) => {
+  await p.$eval('#settings', (el) => {
+    el.hidden = false
+  })
+  await p.$eval('#advanced', (d) => {
+    d.open = true
+  })
+}
+
 const rows = (page) =>
   page.$$eval('#relay-rows .relay-row', (els) => els.map((el) => el.dataset.url))
 const statuses = (page) =>
@@ -220,8 +236,8 @@ try {
     )
     console.log('       to measure the three apart. What is checked here instead: the row says so.')
   }
+  await reveal(page)
   await page.$eval('#advanced', (d) => {
-    d.open = true
     d.dispatchEvent(new Event('toggle'))
   })
   const settled = await until(page, async () => {
@@ -345,7 +361,7 @@ try {
   )
 
   console.log('restore defaults')
-  await page.$eval('#advanced', (d) => (d.open = true))
+  await reveal(page)
   await page.click('#relay-reset')
   const restored = await rows(page)
   check(restored.length >= 4 && restored.every((r) => r.startsWith('wss://')), 'the shipped defaults come back', restored.join(' | '))
@@ -396,7 +412,7 @@ try {
   await fresh.reload()
   const shipped = await rows(fresh)
   check(shipped.join() === DEFAULT_RELAYS.join(), 'a never-played browser opens on the defaults', shipped.join(' | '))
-  await fresh.$eval('#advanced', (d) => (d.open = true))
+  await reveal(fresh)
   const doomed = shipped[0]
   await fresh.click(`#relay-rows .relay-row[data-url="${doomed}"] .del`)
   await fresh.click('#relay-save')
