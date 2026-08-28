@@ -65,6 +65,14 @@ export interface SessionPayload {
    * and what anybody who wants to check one would query.
    */
   cc?: string
+  /**
+   * Emoji stickers on the hull, slot by slot. Absent means a bare hull.
+   *
+   * On the attestation with the skin and the card, for the same reason they
+   * are. Receivers keep only entries from the catalog — a sticker is a
+   * picture, not a text field, and the reasoning lives in `src/stickers.ts`.
+   */
+  em?: string[]
 }
 
 /**

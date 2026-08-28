@@ -1184,6 +1184,27 @@ body.emp #hud::before {
 }
 .custom-del:hover { color: #ff6b6b; }
 
+/* Emoji stickers: a wrapping grid of one-tap toggles under the art rack.
+   Sized for thumbs — 36px targets, and the worn ones carry the same amber
+   ring the rest of the garage uses for "this is what you have on". */
+#stickers { display: grid; gap: 6px; margin-top: 7px; }
+.sticker-grid { display: flex; flex-wrap: wrap; gap: 5px; }
+.sticker-grid button {
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  font-size: 19px;
+  line-height: 1;
+  border-radius: 9px;
+  border: 2px solid var(--line);
+  background: #0b0f18;
+  cursor: pointer;
+}
+.sticker-grid button[aria-pressed='true'] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(255, 200, 87, 0.25);
+}
+
 /* The driver's card, under the skin picker. */
 #profile { display: grid; gap: 7px; margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--line); }
 .profile-row { display: flex; align-items: center; gap: 9px; }

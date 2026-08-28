@@ -1389,6 +1389,10 @@ interface TankRig {
   face: THREE.Sprite
   avatar: Avatar
   pips: THREE.Mesh[]
+  /** Emoji decals on the deck corners, front pair then rear pair. */
+  stickerPads: THREE.Mesh[]
+  /** What the pads currently show, so retexturing is once per outfit change. */
+  stickerKey: string
   ring: THREE.Mesh
   body: THREE.MeshStandardMaterial
   trim: THREE.MeshStandardMaterial
@@ -1514,6 +1518,8 @@ interface TankView {
    * tank wears `skin`'s fail-soft. See `src/customskins.ts`.
    */
   art: string | null
+  /** Emoji decals on the deck corners, slot by slot. See `src/stickers.ts`. */
+  stickers: string[]
   /** True for the local player, whose ring is always drawn. */
   mine: boolean
   /**
@@ -1663,6 +1669,113 @@ function artTexture(art: string): THREE.Texture {
   return tex
 }
 
+/**
+ * Emoji glyph textures, keyed by the emoji itself and kept forever: the
+ * catalog is 48 entries and a 128px canvas each, which is less texture memory
+ * than one camo.
+ */
+const stickerCache = new Map<string, THREE.Texture>()
+
+function stickerTexture(emoji: string): THREE.Texture {
+  const held = stickerCache.get(emoji)
+  if (held) return held
+  // Two canvases on purpose. The glyph is rasterised on a scratch canvas,
+  // its ink measured, and the inked region alone is copied into the texture
+  // tile scaled to fill it. That is not decoration, it is the fix for two
+  // real problems: emoji leave wildly different margins inside their own em
+  // box (a glyph at 70% of its texture measured as an unreadable speck from
+  // the board camera), and a canvas whose content came straight from
+  // `fillText` uploaded to the GPU shrunken under headless Chromium while a
+  // canvas filled by `drawImage` uploaded clean — so the texture canvas only
+  // ever sees `drawImage`.
+  const scratch = document.createElement('canvas')
+  scratch.width = 128
+  scratch.height = 128
+  const canvas = document.createElement('canvas')
+  canvas.width = 128
+  canvas.height = 128
+  const sctx = scratch.getContext('2d')
+  const ctx = canvas.getContext('2d')
+  if (sctx && ctx) {
+    sctx.font = '100px "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif'
+    sctx.textAlign = 'center'
+    sctx.textBaseline = 'middle'
+    sctx.fillText(emoji, 64, 64)
+    const { data } = sctx.getImageData(0, 0, 128, 128)
+    let minX = 128, maxX = -1, minY = 128, maxY = -1
+    for (let y = 0; y < 128; y++) {
+      for (let x = 0; x < 128; x++) {
+        if (data[(y * 128 + x) * 4 + 3] > 16) {
+          if (x < minX) minX = x
+          if (x > maxX) maxX = x
+          if (y < minY) minY = y
+          if (y > maxY) maxY = y
+        }
+      }
+    }
+    if (maxX > minX && maxY > minY) {
+      // Uniform scale, centred: fill the tile without squashing the glyph.
+      const w = maxX - minX + 1
+      const h = maxY - minY + 1
+      const scale = 120 / Math.max(w, h)
+      const dw = w * scale
+      const dh = h * scale
+      ctx.imageSmoothingQuality = 'high'
+      ctx.drawImage(scratch, minX, minY, w, h, (128 - dw) / 2, (128 - dh) / 2, dw, dh)
+    }
+  }
+  const texture = new THREE.CanvasTexture(canvas)
+  texture.colorSpace = THREE.SRGBColorSpace
+  stickerCache.set(emoji, texture)
+  return texture
+}
+
+/**
+ * Where a sticker can go: the four deck corners, hull-local, oversized on
+ * purpose. The dome and the barrel own the centre strip and the plate stack
+ * means nothing new goes above the turret, so the corners are what a sticker
+ * gets — and an 8-unit decal that fit entirely on the clear steel measured as
+ * an unreadable dot from the board camera. So the pads run big and hang past
+ * the hull edge onto the fenders, the way a toy would actually be stickered;
+ * they float flat at deck height, which from the game's high cameras reads as
+ * a corner wrap rather than a gap.
+ */
+const STICKER_SPOTS = [
+  { x: 18.5, z: -12 },
+  { x: 18.5, z: 12 },
+  { x: -18.5, z: -12 },
+  { x: -18.5, z: 12 },
+]
+// Lying flat, facing up, with the glyph's top toward the barrel — a sticker is
+// read from the board camera, and hull-forward is the one orientation that
+// stays the same on every tank.
+const STICKER_GEO = new THREE.PlaneGeometry(11.5, 11.5)
+
+/**
+ * Dress the deck. Textures are keyed on the outfit so retexturing happens
+ * once per change; visibility is per-frame, because `hidden` (the cockpit,
+ * where the front pair sit a few units under the eye and read as smudges on
+ * the windshield) toggles without the outfit moving.
+ */
+function applyStickers(rig: TankRig, list: string[], hidden: boolean): void {
+  rig.stickerPads.forEach((pad, i) => {
+    pad.visible = !hidden && Boolean(list[i])
+  })
+  const key = list.join(' ')
+  if (key === rig.stickerKey) return
+  rig.stickerKey = key
+  rig.stickerPads.forEach((pad, i) => {
+    const emoji = list[i]
+    if (!emoji) return
+    const mat = pad.material as THREE.MeshBasicMaterial
+    const tex = stickerTexture(emoji)
+    if (mat.map !== tex) {
+      mat.map = tex
+      mat.needsUpdate = true
+    }
+  })
+}
+
 function applySkin(rig: TankRig, skin: Skin, hue: number, art: string | null = null): void {
   const h = hue / 360
   const light = Math.max(0.08, Math.min(0.95, 0.58 * skin.light))
@@ -1782,6 +1895,25 @@ function makeTank(): TankRig {
     tread.castShadow = true
     hull.add(tread)
   }
+
+  // The sticker pads, hidden until somebody wears one. Children of the hull
+  // so they steer with it, floated just clear of the ink shell (its top is at
+  // y≈27.2) — depth-tested like any deck fitting, so the dome and the barrel
+  // hide whatever slides under them, which is what a decal on steel would do.
+  const stickerPads = STICKER_SPOTS.map((spot) => {
+    const pad = new THREE.Mesh(
+      STICKER_GEO,
+      new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false }),
+    )
+    pad.position.set(spot.x, 27.35, spot.z)
+    // Lying flat, facing up, the glyph's top toward the barrel. Per-mesh
+    // rotation rather than baked into the shared geometry — the baked version
+    // rendered tilted, and a rotation you can read back beats one you cannot.
+    pad.rotation.set(-Math.PI / 2, 0, -Math.PI / 2)
+    pad.visible = false
+    hull.add(pad)
+    return pad
+  })
 
   const turret = new THREE.Group()
   turret.position.y = 28
@@ -1906,6 +2038,8 @@ function makeTank(): TankRig {
     trim,
     bubble,
     ping,
+    stickerPads,
+    stickerKey: '',
     smokeOwed: 0,
     labelKey: '',
     recoil: 0,
@@ -2970,6 +3104,7 @@ export class Renderer {
         streak: 0,
         skin: t.s === me ? game.skin : (peer?.skin ?? DEFAULT_SKIN),
         art: t.s === me ? game.customArt : (peer?.customArt ?? null),
+        stickers: t.s === me ? game.stickers : (peer?.stickers ?? []),
         mine: t.s === me,
         team: t.s === me ? game.team : (peer?.view.team ?? 0),
         ourTeam: game.team,
@@ -3086,6 +3221,7 @@ export class Renderer {
       streak: game.streak,
       skin: game.skin,
       art: game.customArt,
+      stickers: game.stickers,
       mine: true,
       team: game.team,
       ourTeam: game.team,
@@ -3132,6 +3268,7 @@ export class Renderer {
         streak: peer.streak,
         skin: peer.skin,
         art: peer.customArt,
+        stickers: peer.stickers,
         mine: localSessions?.has(peer.session) ?? false,
         team: peer.view.team,
         ourTeam: game.team,
@@ -3299,6 +3436,7 @@ export class Renderer {
     } else {
       applySkin(rig, SKINS[v.skin] ?? SKINS[DEFAULT_SKIN], hue, v.art)
       this.wear(rig, v, now, dt, eye && this.view === 'cockpit')
+      applyStickers(rig, v.stickers, eye && this.view === 'cockpit')
     }
 
     // The suit, on the frame it appears. Built lazily, hung off the turret so
@@ -4650,6 +4788,12 @@ export class TankPreview {
   setSkin(skin: SkinId, hue: number, art: string | null = null): void {
     if (this.disposed) return
     applySkin(this.rig, SKINS[skin] ?? SKINS[DEFAULT_SKIN], hue, art)
+  }
+
+  /** Dress the preview's deck, so a sticker pick is seen before it is worn. */
+  setStickers(list: string[]): void {
+    if (this.disposed) return
+    applyStickers(this.rig, list, false)
   }
 
   /** Who is driving: the callsign's initials, or the npub's picture once it lands. */
