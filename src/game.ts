@@ -93,7 +93,7 @@ import {
   asCorner,
   cornerAt,
   spitfirePos,
-  underStrafe,
+  underStrafeSweep,
 } from './spitfire'
 import type { Rect } from './arena'
 import type { Bot, BotTarget } from './bots'
@@ -880,7 +880,16 @@ export class Game {
   /** In-flight spitfire passes, keyed by event id. The renderer reads this. */
   readonly strafes = new Map<
     string,
-    { id: string; owner: string; corner: Corner; t0: number; damage: number; hitAt: Map<string, number> }
+    {
+      id: string
+      owner: string
+      corner: Corner
+      t0: number
+      damage: number
+      hitAt: Map<string, number>
+      /** How far along the flight the damage sweep has raked, in ms from t0. */
+      sweptTo: number
+    }
   >()
   /**
    * A spitfire has been spent and is waiting for its corner. The tray paints a
@@ -2102,6 +2111,7 @@ export class Game {
       t0,
       damage: SPITFIRE_DAMAGE,
       hitAt: new Map(),
+      sweptTo: 0,
     })
     this.publishAsSession(KIND_STRIKE, payload)
     this.sound('siren', { at: cornerAt(corner) })
@@ -2351,6 +2361,7 @@ export class Game {
       t0: p.t0 + peer.offset,
       damage: Math.max(1, Math.min(MAX_HULL, Math.floor(p.d))),
       hitAt: new Map(),
+      sweptTo: 0,
     })
     this.sound('siren', { at: cornerAt(corner) })
     this.pushFeed(`${peer.name} called a spitfire`)
@@ -2374,13 +2385,19 @@ export class Game {
         this.strafes.delete(id)
         continue
       }
+      // The stretch flown since the last step. The footprint is tested
+      // against this whole segment, not the point the plane is on this
+      // frame — the sim steps at the render rate, and a slow device's plane
+      // jumps several footprints a frame. See `underStrafeSweep`.
+      const from = spitfirePos(s.corner, Math.max(0, s.sweptTo))
+      s.sweptTo = t
       const mine = s.owner === this.identity.sessionPubkey
       // Our own local bots, whoever's pass it is.
       for (const bot of this.bots) {
         if (bot.tank.dead) continue
         const peerTeam = this.peers.get(bot.session)?.view.team ?? 0
         if (peerTeam && this.teamOf(s.owner) === peerTeam) continue
-        if (!underStrafe(pos.x, pos.y, bot.tank.x, bot.tank.y)) continue
+        if (!underStrafeSweep(from.x, from.y, pos.x, pos.y, bot.tank.x, bot.tank.y)) continue
         const key = 'bot:' + bot.session
         if (now < (s.hitAt.get(key) ?? 0)) continue
         s.hitAt.set(key, now + SPITFIRE_HIT_MS)
@@ -2394,7 +2411,7 @@ export class Game {
       // Ourselves, when it is somebody else's.
       if (mine || this.watching || this.tank.dead || this.flying) continue
       if (this.friendly(s.owner)) continue
-      if (!underStrafe(pos.x, pos.y, this.tank.x, this.tank.y)) continue
+      if (!underStrafeSweep(from.x, from.y, pos.x, pos.y, this.tank.x, this.tank.y)) continue
       if (now < (s.hitAt.get('self') ?? 0)) continue
       s.hitAt.set('self', now + SPITFIRE_HIT_MS)
       if (hasBuff(this.buffs, 'shieldUntil', now)) {
