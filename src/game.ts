@@ -27,6 +27,7 @@ import {
 } from './pickups'
 import { Identity, Net } from './nostr'
 import { DEFAULT_SKIN, asSkin, type SkinId } from './skins'
+import { CUSTOM_PREFIX, customRefOf } from './customskins'
 import { DEFAULT_CARD, asCard, type CardId } from './cards'
 import {
   KIND_CLAIM,
@@ -636,6 +637,16 @@ export interface Peer {
   /** The finish they picked. Purely cosmetic; see `src/skins.ts`. */
   skin: SkinId
   /**
+   * The custom-skin slug off their attestation (`sk: "u:<slug>"`), or null.
+   *
+   * `skin` above keeps its fail-soft plastic when this is set — the custom
+   * marker rides *beside* the built-in id, so every path that never learns
+   * about custom art keeps working. See `src/customskins.ts`.
+   */
+  customSkin: string | null
+  /** Their fetched art (a validated data URL), once the resolver has it. */
+  customArt: string | null
+  /**
    * The calling card they claim, off the same attestation as the skin.
    *
    * *Claim* is the operative word and it is written down rather than implied:
@@ -1028,6 +1039,13 @@ export class Game {
     public skin: SkinId = DEFAULT_SKIN,
     /** The calling card this tank claims. Cosmetic only — see `src/cards.ts`. */
     public card: CardId = DEFAULT_CARD,
+    /**
+     * The custom skin this tank wears, as its slug, or null for a built-in.
+     * Rides the attestation as `u:<slug>` — see `src/customskins.ts`.
+     */
+    public wornCustom: string | null = null,
+    /** Our own art for the renderer, resolved locally at construction. */
+    public customArt: string | null = null,
   ) {
     this.displayColor = color
     const spawn = SPAWNS[Math.floor(Math.random() * SPAWNS.length)]
@@ -1107,7 +1125,9 @@ export class Game {
       name: this.name,
       color: this.color,
       exp: Math.floor(Date.now() / 1000) + SESSION_TTL_S,
-      sk: this.skin,
+      // A worn custom skin travels as its marker; old clients run it through
+      // `asSkin` and draw plastic in the right hue, losing nothing.
+      sk: this.wornCustom ? CUSTOM_PREFIX + this.wornCustom : this.skin,
       cc: this.card,
     }
     const signed = await this.identity.signAsSelf({
@@ -1262,6 +1282,12 @@ export class Game {
     peer.name = typeof p.name === 'string' && p.name ? p.name.slice(0, 20) : peer.name
     peer.color = typeof p.color === 'number' ? p.color % 360 : peer.color
     peer.skin = asSkin(p.sk)
+    const ref = customRefOf(p.sk)
+    if (ref !== peer.customSkin) {
+      // A new outfit invalidates the fetched art, not just the marker.
+      peer.customSkin = ref
+      peer.customArt = null
+    }
     peer.card = asCard(p.cc)
   }
 
@@ -1300,6 +1326,8 @@ export class Game {
         streak: 0,
         captures: 0,
         skin: DEFAULT_SKIN,
+        customSkin: null,
+        customArt: null,
         card: DEFAULT_CARD,
       }
       this.peers.set(session, peer)
