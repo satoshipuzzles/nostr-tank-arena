@@ -89,6 +89,17 @@ export const CHOPPER_HIT_MS = 520
 export const CHOPPER_DAMAGE = 1
 
 /**
+ * How often the gun is *heard*, in ms.
+ *
+ * The cosmetic half of the fire rate: one rattle per interval while rounds are
+ * landing, played by every client that can see the chopper, faded by distance
+ * like any other peer sound. Nothing reads this to decide damage — that is
+ * `CHOPPER_HIT_MS` above, and the gap between the two is deliberate: it sounds
+ * like a machinegun and kills like a spotlight you have three seconds to leave.
+ */
+export const CHOPPER_RATTLE_MS = 110
+
+/**
  * Where a chopper's rounds are landing, given where it is and where it aims.
  *
  * Clamped to the board and to the gun's reach, and clamped **here** rather than

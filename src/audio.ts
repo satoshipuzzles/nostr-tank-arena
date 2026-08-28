@@ -39,6 +39,7 @@ export type Sound =
   | 'reload'
   | 'siren'
   | 'blast'
+  | 'rattle'
 
 export interface PlayOpts {
   /** Where it happened, in arena pixels. Omit for something that happened to you. */
@@ -239,6 +240,13 @@ export class Sfx {
         // rather than as nine separate events.
         this.noise(ctx, out, t, { dur: 0.42, gain: 0.7 * volume, from: 1800, to: 60 })
         this.tone(ctx, out, t, { type: 'sawtooth', from: 110, to: 28, dur: 0.4, gain: 0.4 * volume })
+        break
+      case 'rattle':
+        // One round out of the chopper's gun. Played about nine times a second
+        // while it fires, so each one is deliberately tiny and mostly noise —
+        // the rhythm is the machinegun, not any single report.
+        this.noise(ctx, out, t, { dur: 0.045, gain: 0.34 * volume, from: 5200, to: 1000 })
+        this.tone(ctx, out, t, { type: 'square', from: 230, to: 120, dur: 0.05, gain: 0.1 * volume })
         break
       case 'reload':
         // Two clacks and a rising note: the magazine going home. The rise is

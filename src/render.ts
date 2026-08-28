@@ -130,7 +130,7 @@ export type ViewMode = 'board' | 'cockpit'
 
 const TAU = Math.PI * 2
 
-/** Reused by the chopper's beam orientation; allocating one a frame is waste. */
+/** Reused by the chopper's tracer orientation; allocating one a frame is waste. */
 const UP = new THREE.Vector3(0, 1, 0)
 
 // --------------------------------------------------------------- materials
@@ -351,12 +351,34 @@ interface ChopperRig {
   root: THREE.Group
   body: THREE.Group
   rotor: THREE.Mesh
-  beam: THREE.Mesh
+  tracers: THREE.InstancedMesh
+  flash: THREE.Mesh
   splash: THREE.Mesh
   shadow: THREE.Mesh
   wasX: number
   wasZ: number
 }
+
+/**
+ * The gun's rounds, as rounds.
+ *
+ * Nine slugs in one instanced draw, each a fixed fraction of a lap behind the
+ * one ahead, marching from the gun to the ground every `TRACER_MS`. Nine at
+ * this spacing is a solid-feeling stream without ever reading as a line; the
+ * jitter table below fans them out toward the impact ring so they land as a
+ * spray rather than as a bead chain, and it is a fixed table rather than
+ * per-frame randomness because shimmer is the one thing that would put the
+ * laser back.
+ */
+const TRACER_N = 9
+const TRACER_MS = 450
+const TRACER_JIT = Array.from({ length: TRACER_N }, (_, i) => ({
+  x: Math.sin(1 + i * 12.9898),
+  y: Math.sin(2 + i * 78.233),
+}))
+const TRACER_DUMMY = new THREE.Object3D()
+const TRACER_DIR = new THREE.Vector3()
+const TRACER_Q = new THREE.Quaternion()
 
 // Sized against the tanks, not against a real helicopter.
 //
@@ -375,7 +397,8 @@ const CHOPPER_GEO = {
   rotor2: new THREE.BoxGeometry(9, 3, 96),
   disc: new THREE.CircleGeometry(52, 26),
   mast: new THREE.CylinderGeometry(3, 3, 16, 8),
-  beam: new THREE.CylinderGeometry(4, 11, 1, 10, 1, true),
+  tracer: new THREE.BoxGeometry(3.4, 15, 3.4),
+  flash: new THREE.SphereGeometry(5, 8, 6),
   splash: new THREE.RingGeometry(CHOPPER_SPREAD - 9, CHOPPER_SPREAD, 30),
   shadow: new THREE.CircleGeometry(30, 22),
 }
@@ -430,20 +453,38 @@ function makeChopper(hue: number): ChopperRig {
   shadow.rotation.x = -Math.PI / 2
   root.add(shadow)
 
-  // Unlit and depth-tested off nothing: it is a beam of light, and shading it
-  // would make it a grey tube.
-  const beam = new THREE.Mesh(
-    CHOPPER_GEO.beam,
+  // The rounds. This was one translucent cone for a while and it photographed
+  // as a laser — the issue that replaced it said so, and it was right. Unlit,
+  // because a tracer is its own light source and shading it would make it a
+  // grey fleck.
+  const tracers = new THREE.InstancedMesh(
+    CHOPPER_GEO.tracer,
     new THREE.MeshBasicMaterial({
-      color: 0xffd68a,
+      color: 0xffd166,
       transparent: true,
-      opacity: 0.7,
+      opacity: 0.95,
       depthWrite: false,
-      side: THREE.DoubleSide,
+    }),
+    TRACER_N,
+  )
+  tracers.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
+  tracers.visible = false
+  root.add(tracers)
+
+  // The muzzle, flickering under the hull while the gun runs. Small on
+  // purpose: it says "the fire starts here", the tracers say the rest.
+  const flash = new THREE.Mesh(
+    CHOPPER_GEO.flash,
+    new THREE.MeshBasicMaterial({
+      color: 0xffe9b3,
+      transparent: true,
+      opacity: 0.9,
+      depthWrite: false,
     }),
   )
-  beam.visible = false
-  root.add(beam)
+  flash.position.set(0, -10, 0)
+  flash.visible = false
+  root.add(flash)
 
   // The ring on the felt is the important half. A player under a gunship is not
   // looking up; what they need is the circle they are standing in.
@@ -461,7 +502,7 @@ function makeChopper(hue: number): ChopperRig {
   splash.visible = false
   root.add(splash)
 
-  return { root, body, rotor, beam, splash, shadow, wasX: 0, wasZ: 0 }
+  return { root, body, rotor, tracers, flash, splash, shadow, wasX: 0, wasZ: 0 }
 }
 
 /** Only the per-rig materials; the geometry above is shared and stays. */
@@ -473,6 +514,8 @@ function disposeChopper(rig: ChopperRig): void {
     if (Array.isArray(m)) m.forEach((x) => x.dispose())
     else m.dispose()
   })
+  // Instance buffers are not materials; traverse above does not free them.
+  rig.tracers.dispose()
 }
 
 interface SpitfireRig {
@@ -3912,30 +3955,40 @@ export class Renderer {
       rig.shadow.position.set(0, GROUND_Y + DECAL_LIFT - CHOPPER_ALT, 0)
 
       const at = c.at
-      rig.beam.visible = !!at
+      rig.tracers.visible = !!at
+      rig.flash.visible = !!at
       rig.splash.visible = !!at
       if (at) {
-        // The rounds, as one cone from the gun to the ground. Cheaper than
-        // tracers and, at this scale, more legible: what a player underneath
-        // needs to read in a quarter of a second is *where*, not how many.
+        // The rounds, marching down the gun line — see `TRACER_N` above for
+        // why they are a fixed instanced stack rather than spawned particles.
         //
         // Built in the rig's local space and oriented with a quaternion rather
         // than with `lookAt`. `lookAt` takes a **world** point, and this mesh is
         // a child of a group that has already been moved to the chopper — the
-        // first cut passed it world coordinates after setting a local position
-        // and the beam pointed off into the sky. It photographed as nothing at
-        // all, which is how a missing effect usually looks.
+        // cone this replaced was first passed world coordinates after setting a
+        // local position and pointed off into the sky. It photographed as
+        // nothing at all, which is how a missing effect usually looks.
         const dxx = at.x - c.x
         const dzz = at.y - c.y
-        const dir = new THREE.Vector3(dxx, -CHOPPER_ALT + GROUND_Y, dzz)
-        const len = dir.length()
-        rig.beam.position.set(dxx / 2, (-CHOPPER_ALT + GROUND_Y) / 2, dzz / 2)
-        rig.beam.quaternion.setFromUnitVectors(UP, dir.normalize())
-        // The geometry is one unit tall, so the scale *is* the length.
-        rig.beam.scale.set(1, len, 1)
-        // Flicker, so it reads as a gun rather than as a laser.
-        const mat = rig.beam.material as THREE.MeshBasicMaterial
-        mat.opacity = 0.34 + Math.abs(Math.sin(now / 40)) * 0.34
+        const dy = -CHOPPER_ALT + GROUND_Y
+        TRACER_DIR.set(dxx, dy, dzz)
+        TRACER_Q.setFromUnitVectors(UP, TRACER_DIR.normalize())
+        for (let i = 0; i < TRACER_N; i++) {
+          const phase = (now / TRACER_MS + i / TRACER_N) % 1
+          // The fan widens with the fall, so rounds leave the gun as one
+          // stream and land as a spray filling the ring on the felt.
+          const fan = phase * CHOPPER_SPREAD * 0.6
+          TRACER_DUMMY.position.set(
+            dxx * phase + TRACER_JIT[i].x * fan,
+            dy * phase - 8,
+            dzz * phase + TRACER_JIT[i].y * fan,
+          )
+          TRACER_DUMMY.quaternion.copy(TRACER_Q)
+          TRACER_DUMMY.updateMatrix()
+          rig.tracers.setMatrixAt(i, TRACER_DUMMY.matrix)
+        }
+        rig.tracers.instanceMatrix.needsUpdate = true
+        rig.flash.scale.setScalar(0.7 + Math.abs(Math.sin(now / 31)) * 0.8)
 
         rig.splash.position.set(dxx, GROUND_Y + DECAL_LIFT - CHOPPER_ALT, dzz)
         rig.splash.scale.setScalar(1 + Math.sin(now / 90) * 0.06)
@@ -4102,9 +4155,11 @@ export class Renderer {
    *
    * Same reasoning as `coverMeshAt`: what is worth checking is not that the
    * game thinks somebody is flying, it is that a mesh exists, is above the
-   * board, and projects onto the screen.
+   * board, and projects onto the screen — and, since the cone became tracer
+   * rounds, that the rounds actually march rather than sitting as a bead-chain
+   * laser, which is why the whole rig goes back rather than just its root.
    */
-  chopperRigAt(owner: string): { root: THREE.Object3D } | null {
+  chopperRigAt(owner: string): ChopperRig | null {
     return this.choppers.get(owner) ?? null
   }
 
