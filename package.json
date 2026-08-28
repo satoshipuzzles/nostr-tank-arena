@@ -27,6 +27,8 @@
     "test:fpv": "node test/fpv.mjs",
     "test:lob": "node test/lob.mjs",
     "test:bots": "node test/bots.mjs",
+    "test:botskill": "node test/botskill.mjs",
+    "test:botskill-browser": "node test/botskill-browser.mjs",
     "test:bots-browser": "node test/bots-browser.mjs",
     "test:pwa": "node test/pwa.mjs",
     "test:barrels": "node test/barrels.mjs",

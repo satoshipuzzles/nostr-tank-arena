@@ -93,6 +93,61 @@ const FIRE_CONE = 0.13
 /** Names, so the feed reads like a game rather than like a test fixture. */
 const NAMES = ['Rust', 'Bolt', 'Cinder', 'Gravel', 'Tinny', 'Scrap']
 
+/**
+ * A difficulty level, expressed the one honest way for a game with no server to
+ * arbitrate a fight: a **reaction delay** and an **aim error**, and never a
+ * health or damage multiplier. That is Puzz's own constraint on the bot issue —
+ * "a bot that takes five shells to kill is not harder, it is longer." A harder
+ * bot reacts sooner and aims truer; it does not soak more shells or hit for
+ * more, because either of those moves the time-to-kill the whole game is
+ * balanced around and turns a duel into a chore.
+ */
+export interface BotSkill {
+  id: string
+  /** Peak aim error in radians — the bound on the per-shot wobble. */
+  aimError: number
+  /**
+   * How long a target has to stay in view before this bot will fire at it, in
+   * real milliseconds. It is the perception lag a person has and the exact-lead
+   * solution below does not: without it the hardest bot is not hard, it is
+   * precognitive. On the real clock next to the reload it gates, for the same
+   * reason the reload is — it is the gun's clock, not the drive's — and cleared
+   * the instant sight is lost, so ducking behind cover makes a bot wind up
+   * again, which is where a reaction actually reads as one.
+   */
+  reactionMs: number
+  /**
+   * Multiplies the random pause between shots above the reload floor. One is
+   * today's cadence; lower is a bot that presses its reload, higher is one that
+   * lets you breathe. It only ever lengthens the wait — see `stepBot`, where it
+   * scales the pause *on top of* a full reload — so no level can fire faster
+   * than a player, which is the one rule the bot's gun has always kept.
+   */
+  cadence: number
+}
+
+/**
+ * Four rungs, easy to hard. `regular` is exactly the bot that shipped before
+ * difficulty existed — the same aim error, no reaction gate, the same cadence —
+ * so turning the feature on and leaving it at the default changes nothing that
+ * was tuned against it. Above `regular` the lever is aim and cadence, not
+ * reaction: you cannot react faster than the instant the gun bears, which is
+ * already when the shipped bot fires.
+ */
+export const BOT_SKILLS: readonly BotSkill[] = [
+  { id: 'recruit', aimError: 0.42, reactionMs: 620, cadence: 1.55 },
+  { id: 'regular', aimError: AIM_ERROR, reactionMs: 0, cadence: 1 },
+  { id: 'veteran', aimError: 0.1, reactionMs: 0, cadence: 0.74 },
+  { id: 'elite', aimError: 0.05, reactionMs: 0, cadence: 0.55 },
+]
+
+/** The rung a room sits at until somebody moves it: the shipped bot. */
+export const DEFAULT_SKILL = 1
+
+/** Clamp an index to a real rung, so a stored or wire value can never crash. */
+export const botSkillFor = (index: number): BotSkill =>
+  BOT_SKILLS[Math.max(0, Math.min(BOT_SKILLS.length - 1, Math.floor(index)))]
+
 export interface Bot {
   /**
    * Synthetic session key. 64 hex characters because everything downstream —
@@ -146,6 +201,13 @@ export interface Bot {
    * throttle actually open count.
    */
   stuckFor: number
+  /**
+   * Real-clock ms at which the current target came into view, or 0 for "not in
+   * view". The reaction delay is measured from here — see `BotSkill.reactionMs`.
+   * On the real clock rather than `clock`, because it gates the gun, which runs
+   * on the same `performance.now()` the reload does.
+   */
+  sawSince: number
 }
 
 let seq = 0
@@ -194,6 +256,7 @@ export function makeBot(index: number, now: number): Bot {
     deaths: 0,
     wasAt: { x: spot.x, y: spot.y },
     stuckFor: 0,
+    sawSince: 0,
   }
 }
 
@@ -226,6 +289,7 @@ export function stepBot(
   now: number,
   maxHp: number,
   reloadMul: number,
+  skill: BotSkill = BOT_SKILLS[DEFAULT_SKILL],
 ): BotAction {
   const t = bot.tank
 
@@ -238,6 +302,7 @@ export function stepBot(
       t.y = spot.y
       bot.goal = null
       bot.stuckFor = 0
+      bot.sawSince = 0
       bot.wasAt = { x: t.x, y: t.y }
       // A fresh gun has no carried lead. `stepTank` adopts the short way round
       // when it sees a stale one, but respawning also moves the tank, and the
@@ -251,6 +316,18 @@ export function stepBot(
   const live = target && !target.dead ? target : null
   const dist = live ? Math.hypot(live.x - t.x, live.y - t.y) : Infinity
   const sees = live ? hasLineOfSight(t.x, t.y, live.x, live.y) : false
+
+  // The reaction wind-up. A target has to be *held* in view for the level's
+  // delay before the bot will shoot at it, and losing the line resets it — so a
+  // Recruit that just rounded a corner onto you gets a beat before it fires,
+  // and an Elite does not. `regular` and up run at zero here, which is the
+  // shipped behaviour of firing the moment the gun bears.
+  if (live && sees) {
+    if (bot.sawSince === 0) bot.sawSince = now
+  } else {
+    bot.sawSince = 0
+  }
+  const reacted = bot.sawSince > 0 && now - bot.sawSince >= skill.reactionMs
 
   // ------------------------------------------------------------------ aiming
 
@@ -370,13 +447,17 @@ export function stepBot(
   // ------------------------------------------------------------------ firing
 
   let fire: number | null = null
-  if (live && sees && now >= t.reloadAt && Math.abs(angleDelta(t.gun, want)) < FIRE_CONE) {
+  if (live && sees && reacted && now >= t.reloadAt && Math.abs(angleDelta(t.gun, want)) < FIRE_CONE) {
     // Resampled per shot rather than held as a per-bot bias, so a bot that is
-    // missing to the left is not missing to the left all match.
+    // missing to the left is not missing to the left all match. The bound is
+    // the level's, so a Recruit sprays and an Elite threads it.
     const hurt = 1 - Math.max(0, Math.min(1, t.hp / Math.max(1, maxHp)))
-    bot.wobble = (Math.random() - 0.5) * 2 * AIM_ERROR * (1 - hurt * 0.55)
+    bot.wobble = (Math.random() - 0.5) * 2 * skill.aimError * (1 - hurt * 0.55)
     fire = t.gun + bot.wobble
-    t.reloadAt = now + RELOAD * 1000 * reloadMul * (1.5 + Math.random() * 0.9)
+    // A full reload plus a random beat, and `cadence` scales only that beat —
+    // the `1 +` keeps the wait at or above one reload no matter the level, so a
+    // harder bot fires more often but never faster than a player can.
+    t.reloadAt = now + RELOAD * 1000 * reloadMul * (1 + (0.5 + Math.random() * 0.9) * skill.cadence)
   }
 
   return { fire }
