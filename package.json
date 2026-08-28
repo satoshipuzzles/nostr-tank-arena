@@ -64,7 +64,9 @@
     "test:killfeed": "node test/killfeed.mjs",
     "test:botauthority": "node test/botauthority.mjs",
     "test:boardshape": "node test/boardshape.mjs",
-    "test:tower": "node test/tower.mjs"
+    "test:tower": "node test/tower.mjs",
+    "test:moonmirror": "node test/moonmirror.mjs",
+    "test:moonlob": "node test/moonlob.mjs"
   },
   "dependencies": {
     "nostr-tools": "^2.10.4",

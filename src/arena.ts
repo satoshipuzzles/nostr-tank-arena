@@ -44,6 +44,7 @@ export type CoverKind =
   | 'hedge'
   | 'fence'
   | 'breach'
+  | 'mirror'
   | 'water'
   | 'cliff'
 
@@ -194,6 +195,10 @@ const DESTRUCTIBLE: ReadonlyMap<CoverKind, number> = new Map<CoverKind, number>(
   // driving past; ten and nobody ever bothers. Six is two magazines, which is a
   // decision to spend rather than a thing that happens.
   ['breach', 6], // BREACH_HP, declared below with the other two
+  // Glass. Two hits, and it is the lowest number on this list on purpose: a
+  // panel is not cover, it is a redirection, and a player who wants it gone
+  // should be able to have it gone. See `reflects`.
+  ['mirror', 2],
 ])
 
 /**
@@ -265,6 +270,8 @@ export const BARREL_HP = 3
 export const CRATE_HP = 8
 /** A vault wall. Two magazines, which makes breaching a decision. */
 export const BREACH_HP = 6
+/** A solar panel. Glass, and it goes on the second hit. */
+export const MIRROR_HP = 2
 
 /**
  * How much hull a piece of cover starts with, by kind.
@@ -276,6 +283,23 @@ export const BREACH_HP = 6
  */
 export const fullHpOf = (r: Rect): number =>
   (r.kind === undefined ? undefined : DESTRUCTIBLE.get(r.kind)) ?? 0
+
+/**
+ * True if a shell bouncing off this rect keeps its bounce budget.
+ *
+ * Every solid rect in the game already reflects a shell — the difference a
+ * mirror makes is that the ricochet is *free*. A flat shell carries one bounce
+ * (`SHELL_BOUNCES`), so an ordinary wall gives you a ricochet and then the
+ * shell is spent; a panel does not spend anything, and a shot fired down a row
+ * of them zings between the glass until it finds somebody or ages out at four
+ * seconds.
+ *
+ * That is the whole of The Solar Farm's rule, and it is deterministic for the
+ * same reason every other shell rule is: the geometry comes from the block
+ * hash and the path is a pure function of (x, y, angle, t), so every client
+ * walks the same ricochet without anybody publishing a word about it.
+ */
+export const reflects = (r: Rect): boolean => r.kind === 'mirror' && !r.gone
 
 /** True if destroying this rect should take everything nearby with it. */
 export const explodes = (r: Rect): boolean => r.kind === 'barrel'
@@ -460,6 +484,34 @@ export interface LayoutSpec {
   mesas?: (w: number, h: number) => Rect[]
   /** The slopes up. Mirrored, with the high side swapping like the geometry. */
   ramps?: (w: number, h: number) => Ramp[]
+  /**
+   * How hard the board pulls, as a fraction of ordinary gravity. 1 everywhere
+   * but the moon.
+   *
+   * It only reaches one thing: how far a lob goes for a given charge, and how
+   * high the arc is on the way. A flat shell is a ray and does not care, and a
+   * tank's drive is unchanged — a board where you cannot steer would be a
+   * novelty rather than a map.
+   *
+   * Safe to derive from because the layout is `blockHash % LAYOUTS.length` and
+   * nothing else, so every client in the round has the same number. The value
+   * a lob is fired at still rides the wire, as it always has; gravity only
+   * changes what the shooter charges up to and the bound the receiver clamps
+   * against.
+   */
+  gravity?: number
+  /**
+   * What the ground is made of, when it is not a pitch.
+   *
+   * Cosmetic and nothing else — no rect, no spawn and no physics reads it.
+   * It exists because a board called Moon Base drawn on mown grass with
+   * touchlines on it is a board that lies about its own name, and the map name
+   * in the HUD is the only other thing telling the player where they are.
+   *
+   * `lines: false` drops the chalk, which is the half that actually sells it:
+   * the pitch markings are more recognisable than the green.
+   */
+  ground?: { base: string; shade: string; blade: string; dark: string; lines?: boolean }
 }
 
 /**
@@ -488,7 +540,7 @@ const corners = (w: number, h: number): Pt[] => [
 ]
 
 /**
- * Twelve boards, and the size range is as much of the variety as the shapes are.
+ * Fourteen boards, and the size range is as much of the variety as the shapes are.
  *
  * 1500x1100 is a knife fight with four players in it; 2100x1550 gives you
  * somewhere to go and three seconds to watch somebody come and get you. Every
@@ -848,6 +900,84 @@ export const LAYOUTS: LayoutSpec[] = [
       { x: 1350, y: 620 },
     ],
   },
+  {
+    name: 'The Solar Farm',
+    w: 2000,
+    h: 1400,
+    // Rows of mirrored panels, and the panels are the weapon.
+    //
+    // Every solid rect in this game already bounces a shell; what a panel does
+    // is not charge you a bounce for it (`reflects`). A flat shell carries one,
+    // so an ordinary wall gives you a ricochet and then the shell is spent — a
+    // shot fired down the corridor between two panel rows keeps going, off one
+    // face and then the other, for as long as four seconds of flight allows.
+    //
+    // The corridor is the board. It is 174 units wide, which is enough to drive
+    // and not enough to lean out of a ricochet, and it points at nothing in
+    // particular — the shot you take down it is aimed at where somebody will be
+    // rather than where they are.
+    //
+    // Glass is two hits, the lowest number on the board, so the answer to the
+    // corridor is to break one wall of it and take the geometry away.
+    cover: () => [
+      { x: 300, y: 260, w: 460, h: 36, kind: 'mirror' },
+      { x: 300, y: 470, w: 460, h: 36, kind: 'mirror' },
+      { x: 1100, y: 200, w: 36, h: 380, kind: 'mirror' },
+      { x: 1400, y: 380, w: 400, h: 36, kind: 'mirror' },
+      // The skeleton. Two rects that do not come down, so a room that breaks
+      // every panel still has a board to play on.
+      { x: 850, y: 150, w: 90, h: 90, kind: 'rock' },
+      { x: 1500, y: 620, w: 220, h: 46, kind: 'crate' },
+    ],
+    spawns: corners,
+    pads: () => [
+      // In the corridor, which is the most dangerous flat ground in the game.
+      { x: 530, y: 370 },
+      // Off the centre line: a pad at the exact middle mirrors onto itself and
+      // the board ships with five pads pretending to be six.
+      { x: 1000, y: 790 },
+      { x: 1600, y: 250 },
+    ],
+  },
+  {
+    name: 'Moon Base',
+    w: 2100,
+    h: 1550,
+    // Puzz asked for a moon base, and the issue was right that one board which
+    // changes how a weapon works beats five that change the paint.
+    //
+    // Gravity is half, and it reaches exactly one thing: the lob. The same
+    // charge throws roughly twice as far and hangs about twice as long, with an
+    // arc to match — `LOB_MAX` here is a bit under 1250 units against 620
+    // everywhere else, on the largest board in the rotation. A mortar that
+    // crosses half the map is a different weapon from one that clears a hedge,
+    // and it is slow enough that everybody watches it come.
+    //
+    // The cost is at the other end: the minimum also doubles, so there is no
+    // such thing as a short lob here. Point blank is the tank gun's again.
+    //
+    // Deliberately the most open board in the game. Low gravity is only worth
+    // anything if there is somewhere to throw.
+    gravity: 0.5,
+    // Regolith, and no touchlines. Grey enough to read as dust from the board
+    // camera and not so grey that the four tank colours stop separating from
+    // it — the hulls are saturated and the ground is not, which is the same
+    // contrast the grass was providing.
+    ground: { base: '#8d8a83', shade: '#807d76', blade: '#b6b2a7', dark: '#5c5a54', lines: false },
+    cover: () => [
+      { x: 380, y: 300, w: 300, h: 60, kind: 'sandbag' },
+      { x: 820, y: 220, w: 120, h: 120, kind: 'rock' },
+      { x: 1200, y: 420, w: 260, h: 48, kind: 'crate' },
+      { x: 1600, y: 200, w: 110, h: 110, kind: 'barrel' },
+      { x: 560, y: 560, w: 48, h: 200, kind: 'rock' },
+    ],
+    spawns: corners,
+    pads: () => [
+      { x: 1050, y: 560 },
+      { x: 300, y: 520 },
+      { x: 1750, y: 640 },
+    ],
+  },
 ]
 
 /**
@@ -868,6 +998,10 @@ export function layoutForBlock(hash: string | null): number {
 export let ARENA_W = LAYOUTS[0].w
 export let ARENA_H = LAYOUTS[0].h
 export let layoutName = ''
+/** This board's gravity. See `LayoutSpec.gravity`. */
+export let arenaGravity = LAYOUTS[0].gravity ?? 1
+/** This board's ground, when it is not a pitch. See `LayoutSpec.ground`. */
+export let arenaGround = LAYOUTS[0].ground ?? null
 
 export const WALLS: Rect[] = []
 export const SPAWNS: Pt[] = []
@@ -936,6 +1070,8 @@ export function setLayout(index: number): void {
   ARENA_W = spec.w
   ARENA_H = spec.h
   layoutName = spec.name
+  arenaGravity = spec.gravity ?? 1
+  arenaGround = spec.ground ?? null
 
   const half = spec.cover(spec.w, spec.h)
   // The vault goes in next to the border rather than being authored per board,

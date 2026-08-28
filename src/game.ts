@@ -100,8 +100,7 @@ import type { Bot, BotTarget } from './bots'
 import {
   LOB_BLAST,
   LOB_CHARGE_MS,
-  LOB_MAX,
-  LOB_MIN,
+  lobRange,
   MUZZLE_OFFSET,
   MAG_RELOAD,
   TANK_RADIUS,
@@ -1599,7 +1598,9 @@ export class Game {
     // that hurts *us* appears, so a hostile event does not get to place one on
     // the far side of the map or at zero distance under our own tracks.
     const lob =
-      typeof p.l === 'number' && p.l > 0 ? Math.min(LOB_MAX, Math.max(LOB_MIN, p.l)) : 0
+      typeof p.l === 'number' && p.l > 0
+        ? Math.min(lobRange(1), Math.max(lobRange(0), p.l))
+        : 0
     // Whose shell it is. A bot cannot sign, so its shells come out under its
     // owner's signature with an index attached — and *who fired it* decides who
     // it may hit, because a side does not shoot itself.
@@ -3858,7 +3859,7 @@ export class Game {
   get lobAim(): { x: number; y: number; r: number; charge: number } | null {
     if (!this.lobFrom || this.tank.dead) return null
     const charge = this.lobCharge(performance.now())
-    const range = LOB_MIN + (LOB_MAX - LOB_MIN) * charge
+    const range = lobRange(charge)
     return {
       x: this.tank.x + Math.cos(this.tank.gun) * range,
       y: this.tank.y + Math.sin(this.tank.gun) * range,
@@ -4022,7 +4023,7 @@ export class Game {
       } else if (this.lobFrom) {
         const charge = this.lobCharge(now)
         this.lobFrom = 0
-        if (armed) this.fire(now, LOB_MIN + (LOB_MAX - LOB_MIN) * charge)
+        if (armed) this.fire(now, lobRange(charge))
       } else if (controls.fire && armed) {
         this.fire(now)
       }
