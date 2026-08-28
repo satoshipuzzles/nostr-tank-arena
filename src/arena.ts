@@ -1063,6 +1063,97 @@ export const LAYOUTS: LayoutSpec[] = [
       { x: 1330, y: 820 },
     ],
   },
+  {
+    name: 'The Gauntlet',
+    w: 2300,
+    h: 900,
+    // The shape is the identity. Every other board is roughly 1.4:1; this one
+    // is 2.6:1 — a firing range with a fence round it, and the long axis is
+    // the game. There is always a shot down the length if you stand in the
+    // open, so the board plays as a rhythm of crossings: sprint the gap,
+    // arrive at the next stagger, trade across the bags, go again.
+    //
+    // The two rocks by the middle are the only tall cover on the centreline,
+    // and the 160-unit slot between them is the one place you cross the board
+    // camera's longest sightline. Everything else is staggered off-axis, so
+    // the flanks are the slow safe road and the middle is the fast loud one.
+    cover: () => [
+      { x: 700, y: 380, w: 260, h: 48, kind: 'sandbag' },
+      { x: 1020, y: 200, w: 48, h: 260, kind: 'rock' },
+      { x: 350, y: 620, w: 220, h: 48, kind: 'crate' },
+      { x: 950, y: 700, w: 110, h: 110, kind: 'barrel' },
+      { x: 260, y: 330, w: 90, h: 90, kind: 'rock' },
+    ],
+    spawns: corners,
+    pads: () => [
+      // In the middle slot, on the worst ground on the board.
+      { x: 1150, y: 300 },
+      { x: 450, y: 450 },
+      { x: 700, y: 780 },
+    ],
+  },
+  {
+    name: 'The Trenches',
+    w: 1800,
+    h: 1300,
+    // The inverse of The Warehouse. There, the cover is tall and the lanes
+    // decide what you can see; here almost everything is sandbags, so you can
+    // see nearly everybody nearly all the time — you just cannot drive at
+    // them. Shells cross the bags, hulls do not, and the board plays as a
+    // slow exchange of fire across a maze neither side can rush.
+    //
+    // The lob is the punishment for camping a trench line, exactly as it is
+    // for camping anywhere else — but on this board it is the *only* indirect
+    // threat, because there is almost nothing to hide the arc behind. The one
+    // drum pair and the two boulders are the only things that break a
+    // sightline at hull height.
+    cover: () => [
+      { x: 300, y: 300, w: 420, h: 48, kind: 'sandbag' },
+      { x: 300, y: 300, w: 48, h: 300, kind: 'sandbag' },
+      { x: 860, y: 200, w: 48, h: 320, kind: 'sandbag' },
+      { x: 560, y: 640, w: 320, h: 48, kind: 'sandbag' },
+      { x: 1180, y: 380, w: 260, h: 48, kind: 'sandbag' },
+      { x: 620, y: 950, w: 48, h: 200, kind: 'sandbag' },
+      { x: 260, y: 1060, w: 90, h: 90, kind: 'rock' },
+      { x: 1350, y: 180, w: 100, h: 100, kind: 'barrel' },
+    ],
+    spawns: corners,
+    pads: () => [
+      { x: 960, y: 480 },
+      { x: 500, y: 1000 },
+      { x: 1440, y: 520 },
+    ],
+  },
+  {
+    name: 'The Tinderbox',
+    w: 1600,
+    h: 1200,
+    // The drum yard. Ten of the twelve pieces of cover on this board explode,
+    // which turns every piece of it into a bet: the thing you are hiding
+    // behind is also the thing that kills you if anybody spends three shells
+    // on it. `blastScaleOf` gives the twin tanks by the middle a bigger bang
+    // than the outriders, and the board's endgame is the opposite of every
+    // other map's — it does not open up slowly, it detonates a piece at a
+    // time until the last two tanks are duelling on a bare floor of rubble.
+    //
+    // The rock and the bag line are the only cover that survives a patient
+    // room, and they are deliberately nowhere near the pads.
+    cover: () => [
+      { x: 500, y: 250, w: 110, h: 110, kind: 'barrel' },
+      { x: 950, y: 300, w: 110, h: 110, kind: 'barrel' },
+      { x: 620, y: 480, w: 130, h: 130, kind: 'barrel' },
+      { x: 260, y: 560, w: 110, h: 110, kind: 'barrel' },
+      { x: 1200, y: 180, w: 110, h: 110, kind: 'barrel' },
+      { x: 420, y: 900, w: 200, h: 48, kind: 'sandbag' },
+      { x: 860, y: 140, w: 80, h: 80, kind: 'rock' },
+    ],
+    spawns: corners,
+    pads: () => [
+      { x: 800, y: 420 },
+      { x: 330, y: 330 },
+      { x: 1150, y: 700 },
+    ],
+  },
 ]
 
 /**
