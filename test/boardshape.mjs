@@ -155,13 +155,17 @@ for (let li = 0; li < LAYOUTS.length; li++) {
   )
   resetCover()
 
-  // The control. The fence is 24 units thick and the fill starts inside it, so
-  // a point in the corner of the border must be *outside* the reachable set —
-  // if it is not, `blocked` is answering false for everything and the two
-  // checks above are measuring nothing at all.
+  // The control: if `blocked` answered false for everything, the two checks
+  // above would be measuring nothing at all. It used to probe the border
+  // corner, "inside the fence" — but The Drop has no fence, and its corner is
+  // rim a tank can legitimately drive to. The centre of the vault's face is a
+  // solid rect on every board, walled or not, so the fill must never have it.
+  const face = WALLS.find((w) => w.kind === 'breach')
+  const faceKey =
+    Math.round((face.x + face.w / 2) / STEP) * 100000 + Math.round((face.y + face.h / 2) / STEP)
   check(
-    !fill.has(0),
-    `${name}: control — the fill does not leak through the fence`,
+    !fill.has(faceKey),
+    `${name}: control — the fill does not leak into the walls`,
   )
 }
 

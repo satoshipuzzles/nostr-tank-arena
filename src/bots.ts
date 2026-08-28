@@ -31,7 +31,15 @@
 // most of what a bot room is for; they do not count for `ks`, `ds` or the block
 // winner. `Game` owns that split — see `isBot`.
 
-import { ARENA_H, ARENA_W, SPAWNS, groundSpeed, hasLineOfSight, pointInTallWall } from './arena'
+import {
+  ARENA_H,
+  ARENA_W,
+  SPAWNS,
+  arenaEdgeless,
+  groundSpeed,
+  hasLineOfSight,
+  pointInTallWall,
+} from './arena'
 import {
   GUN_TURN_RATE,
   MAX_HP,
@@ -390,7 +398,13 @@ export function stepBot(
  * is one the player's shells hit the rock instead of.
  */
 function blocked(x: number, y: number, hull: number): boolean {
-  if (x < TANK_RADIUS || y < TANK_RADIUS || x > ARENA_W - TANK_RADIUS || y > ARENA_H - TANK_RADIUS) {
+  // On an edgeless board the rim strip counts as a wall for pathing, so a bot
+  // steers around it the way it steers around a rock — visibly keeping off
+  // the edge rather than rubbing along it. Sixty units, the same margin every
+  // goal is already clamped to. The hard clamp in `stepBot` is what actually
+  // guarantees a bot cannot fall; this is what makes it look deliberate.
+  const edge = arenaEdgeless ? 60 : TANK_RADIUS
+  if (x < edge || y < edge || x > ARENA_W - edge || y > ARENA_H - edge) {
     return true
   }
   if (pointInTallWall(x, y)) return true

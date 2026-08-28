@@ -2771,7 +2771,9 @@ function paintDeath(game: Game): void {
   const left = Math.max(0, (game.tank.respawnAt - performance.now()) / 1000)
   const profile = d.pubkey ? (running?.profiles.get(d.pubkey) ?? null) : null
   const self = d.killer === null
-  const title = self ? 'YOU BLEW YOURSELF UP' : 'KILLED BY'
+  // A fall is its own way to go. "YOU BLEW YOURSELF UP" over a tank that
+  // quietly drove off the rim is the card calling the player a liar.
+  const title = self ? (d.fell ? 'YOU FELL OFF THE BOARD' : 'YOU BLEW YOURSELF UP') : 'KILLED BY'
   // A bot kill costs nothing on the board and the card says so, because the
   // scoreboard not moving is otherwise the kind of thing that reads as a bug.
   const note = self
