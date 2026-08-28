@@ -744,6 +744,24 @@ export interface FeedEntry {
    * because the feed renderer escapes `text` and should keep doing so.
    */
   icon?: string
+  /**
+   * Set when the line is a kill: both parties, so the painter can put faces
+   * to it. Data and not markup, same rule as `icon` — the painter resolves
+   * pictures from the profiles cache at paint time, which is what lets a kill
+   * that lands before somebody's kind 0 arrives grow its picture the moment
+   * it does. `text` still carries the sentence, so everything that reads the
+   * feed as text keeps working.
+   */
+  kill?: { killer: FeedParty; victim: FeedParty }
+}
+
+/** One side of a kill line: enough to draw an avatar without a lookup. */
+export interface FeedParty {
+  name: string
+  /** Real npub for the picture, or null for guests and practice tanks. */
+  pubkey: string | null
+  /** The dealt hue, for the coloured-initial fallback. */
+  hue: number
 }
 
 /** A finished round, kept so the podium has something to show. */
@@ -1560,9 +1578,23 @@ export class Game {
       this.ensurePeer(p.k).kills++
     }
 
-    this.pushFeed(
-      killerName ? `${killerName} killed ${victim.name}` : `${victim.name} self-destructed`,
-    )
+    if (typeof p.k === 'string' && killerName) {
+      const killer: FeedParty =
+        p.k === this.identity.sessionPubkey
+          ? this.meParty()
+          : {
+              name: killerName,
+              pubkey: this.peers.get(p.k)?.pubkey ?? null,
+              hue: this.peers.get(p.k)?.displayColor ?? 0,
+            }
+      this.pushKill(killer, {
+        name: victim.name,
+        pubkey: victim.pubkey,
+        hue: victim.displayColor,
+      })
+    } else {
+      this.pushFeed(`${victim.name} self-destructed`)
+    }
   }
 
   /**
@@ -2278,7 +2310,7 @@ export class Game {
           this.botKills++
           this.sound('kill')
           this.onOwnKill()
-          this.pushFeed(`you killed ${bot.name}`)
+          this.feedBotKill(bot)
         }
       }
       // Ourselves, when it is somebody else's.
@@ -3008,7 +3040,7 @@ export class Game {
       if (owner === this.identity.sessionPubkey) {
         this.botKills++
         this.onOwnKill()
-        this.pushFeed(`you killed ${bot.name}`)
+        this.feedBotKill(bot)
       }
     }
     if (this.tank.dead || this.watching) return
@@ -3192,7 +3224,7 @@ export class Game {
       this.botKills++
       this.sound('kill')
       this.onOwnKill()
-      this.pushFeed(`you killed ${bot.name}`)
+      this.feedBotKill(bot)
     }
   }
 
@@ -3254,7 +3286,7 @@ export class Game {
       this.botKills++
       this.sound('kill')
       this.onOwnKill()
-      this.pushFeed(`you killed ${bot.name}`)
+      this.feedBotKill(bot)
     }
   }
 
@@ -3319,7 +3351,7 @@ export class Game {
         this.botKills++
         this.sound('kill')
         this.onOwnKill()
-        this.pushFeed(`you killed ${bot.name}`)
+        this.feedBotKill(bot)
       }
     }
   }
@@ -3408,7 +3440,7 @@ export class Game {
         this.botKills++
         this.sound('kill')
         this.onOwnKill()
-        this.pushFeed(`you killed ${bot.name}`)
+        this.feedBotKill(bot)
       }
     }
   }
@@ -3465,7 +3497,7 @@ export class Game {
         this.botKills++
         this.sound('kill')
         this.onOwnKill()
-        this.pushFeed(`you killed ${bot.name}`)
+        this.feedBotKill(bot)
       }
       return true
     }
@@ -3573,6 +3605,35 @@ export class Game {
   pushFeed(text: string, icon?: string): void {
     this.feed.push({ text, at: performance.now(), icon })
     if (this.feed.length > 6) this.feed.shift()
+  }
+
+  /**
+   * A kill in the feed — Puzz's ask, verbatim: "skull emojis and player
+   * profile picture with player who killed them profile pictures as a kill
+   * notification." The parties ride the entry so the painter can render
+   * killer 💀 victim with faces; the text keeps the plain sentence.
+   */
+  pushKill(killer: FeedParty, victim: FeedParty): void {
+    this.feed.push({
+      text: `${killer.name} killed ${victim.name}`,
+      at: performance.now(),
+      kill: { killer, victim },
+    })
+    if (this.feed.length > 6) this.feed.shift()
+  }
+
+  /** This client, as one side of a kill line. */
+  private meParty(): FeedParty {
+    return {
+      name: this.name,
+      pubkey: this.identity.isGuest ? null : this.identity.pubkey,
+      hue: this.displayColor,
+    }
+  }
+
+  /** A practice-tank kill by this client, as a card like any other kill. */
+  private feedBotKill(bot: Bot): void {
+    this.pushKill(this.meParty(), { name: bot.name, pubkey: null, hue: bot.color })
   }
 
   // ----------------------------------------------------------------- update

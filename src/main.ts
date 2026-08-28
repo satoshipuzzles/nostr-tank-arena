@@ -8,7 +8,7 @@ import { Sfx } from './audio'
 import { BlockClock } from './blocks'
 import { BOT_COUNT, MAX_BOTS } from './bots'
 import { Game, KILLCAM_MS, NUKE_FLASH_MS, STRIKE_GAP, STRIKE_RADIUS, bombsFor, LOADOUT_TIERS, TIER_LABELS, DEFAULT_LOADOUT, parseLoadout, rewardsForTier } from './game'
-import type { Loadout } from './game'
+import type { FeedParty, Loadout } from './game'
 import { Input, PLAYER_TWO, SOLO, type Scheme } from './input'
 import { TouchSticks } from './touch'
 
@@ -2936,6 +2936,9 @@ const BUFF_TIMERS: Partial<Record<PickupKind, keyof Buffs>> = {
   siege: 'siegeUntil',
 }
 
+/** What the feed last painted, so per-frame paints only touch the DOM on change. */
+let lastFeedHtml = ''
+
 function drawHud(game: Game): void {
   const now = performance.now()
   if (now - hudAt < 120) return
@@ -3097,10 +3100,31 @@ function drawHud(game: Game): void {
 
   // The icon is resolved here from the entry's *id* — the feed model stays
   // text-plus-id and `escapeHtml` keeps guarding the text, which carries
-  // player names off the wire.
-  $('feed').innerHTML = game.feed
-    .map((f) => `<div>${f.icon ? anyIcon(f.icon, 'ricon feed-ico') : ''}${escapeHtml(f.text)}</div>`)
+  // player names off the wire. Kill lines resolve their pictures the same
+  // way, from the profiles cache at paint time, so a face that arrives after
+  // the kill still lands on the line.
+  const feedPic = (p: FeedParty) =>
+    avatar(p.pubkey ? (running?.profiles.get(p.pubkey) ?? null) : null, p.name, p.hue, 16)
+  const feedHtml = game.feed
+    .map((f) => {
+      if (f.kill)
+        return (
+          `<div class="feed-kill">${feedPic(f.kill.killer)}` +
+          `<span class="feed-name">${escapeHtml(f.kill.killer.name)}</span>` +
+          `<span class="feed-skull">💀</span>` +
+          `<span class="feed-name">${escapeHtml(f.kill.victim.name)}</span>` +
+          `${feedPic(f.kill.victim)}</div>`
+        )
+      return `<div>${f.icon ? anyIcon(f.icon, 'ricon feed-ico') : ''}${escapeHtml(f.text)}</div>`
+    })
     .join('')
+  // Assigned only on change: this paints every frame, and recreating an <img>
+  // sixty times a second re-runs `onerror` fallbacks against dead picture
+  // URLs forever. A string compare is cheaper than the DOM churn it prevents.
+  if (feedHtml !== lastFeedHtml) {
+    lastFeedHtml = feedHtml
+    $('feed').innerHTML = feedHtml
+  }
 
   drawNotice(game, now)
   drawDoomsday(game, now)

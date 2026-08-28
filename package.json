@@ -60,7 +60,8 @@
     "test:cards": "node test/cards.mjs",
     "test:killcam": "node test/killcam.mjs",
     "test:covermask": "node test/covermask.mjs",
-    "test:stickers": "node test/stickers.mjs"
+    "test:stickers": "node test/stickers.mjs",
+    "test:killfeed": "node test/killfeed.mjs"
   },
   "dependencies": {
     "nostr-tools": "^2.10.4",
