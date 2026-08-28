@@ -10,7 +10,7 @@
 
 import type { Event } from 'nostr-tools'
 import type { PublishOutcome } from './nostr'
-import { ARENA_H, ARENA_W, SPAWNS, hasLineOfSight } from './arena'
+import { ARENA_H, ARENA_W, SPAWNS, arenaEdgeless, hasLineOfSight } from './arena'
 import {
   PICKUPS,
   PICKUP_RADIUS,
@@ -1658,7 +1658,11 @@ export class Game {
           : null
 
     victim.streak = 0
-    this.sound('death', { at: { x: p.x, y: p.y } })
+    // A fall gets its own telling everywhere at once: the scream instead of
+    // the blast, and the tumble the renderer reads out of `falls`. Scoring is
+    // untouched — `k` carries the credit exactly as it does for a shell.
+    if (p.f) this.pushFall(p.x, p.y, victim.view.hull, victim.displayColor)
+    this.sound(p.f ? 'fall' : 'death', { at: { x: p.x, y: p.y } })
     if (p.k === this.identity.sessionPubkey) {
       // The streak, the sound and the feed line are the half that makes a bot
       // feel like an opponent, and they stay. The tally is the half that would
@@ -1692,7 +1696,7 @@ export class Game {
         hue: victim.displayColor,
       })
     } else {
-      this.pushFeed(`${victim.name} self-destructed`)
+      this.pushFeed(p.f ? `${victim.name} drove off the board` : `${victim.name} self-destructed`)
     }
   }
 
@@ -2419,6 +2423,7 @@ export class Game {
         this.popShield()
         continue
       }
+      this.hitBy(s.owner, now)
       this.tank.hp -= s.damage
       if (this.tank.hp > 0) this.sound('hit')
       if (this.tank.hp <= 0) this.die(s.owner)
@@ -2477,6 +2482,7 @@ export class Game {
           this.sound('shield')
           continue
         }
+        this.hitBy(strike.owner, now)
         this.tank.hp -= strike.damage
         this.sound('hit')
         if (this.tank.hp <= 0) this.die(strike.owner)
@@ -3383,6 +3389,7 @@ export class Game {
       this.popShield()
       return
     }
+    this.hitBy(owner === this.identity.sessionPubkey ? null : owner)
     this.tank.hp -= 1
     if (this.tank.hp > 0) this.sound('hit')
     // Credited to whoever shot the barrel, including ourselves — a player who
@@ -3620,6 +3627,7 @@ export class Game {
         this.popShield()
         continue
       }
+      this.hitBy(peer.session, now)
       this.tank.hp -= SUIT_DAMAGE
       if (this.tank.hp > 0) this.sound('hit')
       if (this.tank.hp <= 0) {
@@ -3680,6 +3688,7 @@ export class Game {
         this.popShield()
         continue
       }
+      this.hitBy(peer.session, now)
       this.tank.hp -= CHOPPER_DAMAGE
       if (this.tank.hp > 0) this.sound('hit')
       if (this.tank.hp <= 0) {
@@ -4007,6 +4016,21 @@ export class Game {
         this.modifier.speed *
         groundSpeed(this.tank.x, this.tank.y)
       stepTank(this.tank, controls.throttle, controls.steer, controls.aim, dt, boost)
+      // The rim. On an edgeless board `stepTank` no longer clamps, so a hull
+      // driven past the line is a hull with nothing under its centre — it goes
+      // over, and everything after that is a death like any other. Checked
+      // here rather than in the sim because falling is a *ruling* (credit,
+      // wire, feed), and the sim only moves things. The return ends the whole
+      // update early — one frame of shells and interpolation traded for not
+      // letting a tank that just went over the edge fire, reload or sweep a
+      // pad on the way down.
+      if (
+        arenaEdgeless &&
+        (this.tank.x < 0 || this.tank.x > ARENA_W || this.tank.y < 0 || this.tank.y > ARENA_H)
+      ) {
+        this.fallOffBoard(now)
+        return
+      }
       this.stepMagazine(now, controls.reload)
       const armed = this.tank.ammo > 0 && !this.tank.reloadingUntil && now >= this.tank.reloadAt
       // In the suit the gun is not a shell gun: no magazine, no reload, no lob,
@@ -4111,6 +4135,17 @@ export class Game {
    * standing together both take it.
    */
   private detonate(shell: Shell): void {
+    // A lob thrown past the rim of an edgeless board never lands: there is no
+    // ground where it comes down, so no blast, no crater, no damage — it just
+    // goes. Deterministic on every client because the landing point is a pure
+    // function of the fire event and the board. The check is on the landing
+    // point alone; a crater on the board still catches a tank at the rim.
+    if (
+      arenaEdgeless &&
+      (shell.x < 0 || shell.x > ARENA_W || shell.y < 0 || shell.y > ARENA_H)
+    ) {
+      return
+    }
     this.sound('blast', { at: { x: shell.x, y: shell.y } })
     // Bots are inside the blast like anybody else. Separately from the branch
     // below, not instead of it: a lob is an area weapon, so one crater can take
@@ -4125,6 +4160,7 @@ export class Game {
       this.popShield()
       return
     }
+    this.hitBy(shell.owner)
     this.tank.hp -= shell.damage
     if (this.tank.hp > 0) this.sound('hit')
     if (this.tank.hp <= 0) this.die(shell.owner)
@@ -4159,6 +4195,7 @@ export class Game {
         this.popShield()
         return
       }
+      this.hitBy(shell.owner)
       this.tank.hp -= shell.damage
       if (this.tank.hp > 0) this.sound('hit')
       if (this.tank.hp <= 0) this.die(shell.owner)
@@ -4311,6 +4348,30 @@ export class Game {
    * the card is up: the killer keeps playing, and a card that quietly updated
    * their streak while the victim read it would be describing the wrong moment.
    */
+  /**
+   * Recent tumbles off an edgeless board, for the renderer to animate.
+   *
+   * One entry per fall, ours and everybody else's, pruned as they age out.
+   * The renderer owns the tumble itself; the game only says where a tank left
+   * the board, which way it was pointing, and what colour it was.
+   */
+  falls: { x: number; y: number; hull: number; hue: number; at: number }[] = []
+
+  /**
+   * The last tank to take a point off our hull, for crediting a fall.
+   *
+   * A fall is self-inflicted mechanically — nothing pushes in this game — but
+   * a tank that backs off the rim under fire was killed by the fire in every
+   * sense that matters, and the feed blaming "nobody" for a duel everybody
+   * watched would be wrong. Within `FALL_CREDIT_MS` of a hit, the fall is
+   * theirs; after that it is yours alone.
+   */
+  private lastAggressor: { who: string | null; at: number } | null = null
+
+  private hitBy(who: string | null, at = performance.now()): void {
+    this.lastAggressor = { who, at }
+  }
+
   lastDeath: {
     at: number
     /** Session key of whoever did it, or null for a self-destruct. */
@@ -4328,9 +4389,38 @@ export class Game {
     bot: boolean
     /** The calling card they claim. Cosmetic; see `src/cards.ts`. */
     card: CardId
+    /** Off the rim of an edgeless board, rather than shot to zero. */
+    fell: boolean
   } | null = null
 
-  private die(killer: string | null): void {
+  /**
+   * Over the rim of an edgeless board. A death like any other, with the
+   * telling that matches — and the credit decided here: a tank that went over
+   * within a few seconds of taking a hit was pushed in every sense that
+   * matters, so the hit's owner gets the kill, exactly as they would have if
+   * the third shell had landed. An unforced fall is yours alone, like a
+   * barrel you shot yourself.
+   */
+  private fallOffBoard(now: number): void {
+    // Four seconds: SHELL_LIFETIME, the longest anything you fired can still
+    // be someone else's problem, and long enough to cover the panicked
+    // reverse a hit actually causes without crediting a hit from a fight that
+    // ended a while ago.
+    const credited =
+      this.lastAggressor && now - this.lastAggressor.at < 4000 ? this.lastAggressor.who : null
+    this.pushFall(this.tank.x, this.tank.y, this.tank.hull, this.displayColor)
+    this.die(credited, true)
+  }
+
+  private pushFall(x: number, y: number, hull: number, hue: number): void {
+    const now = performance.now()
+    // Pruned here rather than per frame: falls are rare, and 2.5s is past the
+    // end of the longest tumble the renderer animates.
+    this.falls = this.falls.filter((f) => now - f.at < 2500)
+    this.falls.push({ x, y, hull, hue, at: now })
+  }
+
+  private die(killer: string | null, fell = false): void {
     this.tank.dead = true
     this.tank.hp = 0
     this.streak = 0
@@ -4374,10 +4464,11 @@ export class Game {
         k: killer,
         x: this.tank.x,
         y: this.tank.y,
+        ...(fell ? { f: 1 as const } : {}),
       }
       this.publishAsSession(KIND_DEATH, payload)
     }
-    this.sound('death')
+    this.sound(fell ? 'fall' : 'death')
     const peer = killer ? this.peers.get(killer) : undefined
     const killerName = killer ? (peer?.name ?? 'someone') : null
     this.lastDeath = {
@@ -4397,6 +4488,7 @@ export class Game {
       deaths: peer?.claimed?.deaths ?? peer?.deaths ?? 0,
       bot: fromBot,
       card: peer?.card ?? DEFAULT_CARD,
+      fell,
     }
     // The kill cam. Only for a death somebody else caused — a self-destruct
     // has no camera to sit behind, and watching your own mistake from your own
@@ -4414,7 +4506,9 @@ export class Game {
       killer && !fromBot && this.tape.length >= 2
         ? { from: performance.now(), killer, frames: this.tape.slice() }
         : null
-    this.pushFeed(killerName ? `${killerName} killed you` : 'you self-destructed')
+    this.pushFeed(
+      killerName ? `${killerName} killed you` : fell ? 'you drove off the board' : 'you self-destructed',
+    )
   }
 
   /** Spawn as far from live opponents as possible, preferring no line of sight. */
@@ -4474,6 +4568,8 @@ export class Game {
     this.tank.y = pad.y
     this.tank.hp = this.maxHp
     this.tank.dead = false
+    // Last life's last hit must not credit this life's fall.
+    this.lastAggressor = null
     // Full magazine and no reload in progress. Respawning into the two seconds
     // that were left on a reload you died during is a punishment for dying that
     // the respawn delay has already handed out.

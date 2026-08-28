@@ -6,6 +6,7 @@ import {
   ARENA_H,
   ARENA_W,
   WALLS,
+  arenaEdgeless,
   arenaGravity,
   elevationAt,
   pointInShellWall,
@@ -23,6 +24,8 @@ export const SHELL_SPEED = 430 // px/s
 export const SHELL_RADIUS = 5
 export const SHELL_LIFETIME = 4.0 // seconds
 export const SHELL_BOUNCES = 1
+/** How far past an edgeless board's rim a flat shell flies before it is gone. */
+export const RIM_SHELL_MARGIN = 80
 
 /**
  * Lobbed shots — hold Q, let go, and the shell goes *over* the wall.
@@ -308,6 +311,22 @@ export function stepShell(s: Shell, dt: number): void {
       s.dead = true
       return
     }
+    // Off the rim of an edgeless board. Dead at a margin rather than at the
+    // line so a shot skimming the rim visibly leaves rather than blinking out
+    // at the edge, and deterministic on every client for the same reason the
+    // rest of this function is: the trajectory and the board are shared
+    // inputs. Without this a flat shell fired into the void would fly its
+    // whole four seconds a kilometre off the board.
+    if (
+      arenaEdgeless &&
+      (s.x < -RIM_SHELL_MARGIN ||
+        s.x > ARENA_W + RIM_SHELL_MARGIN ||
+        s.y < -RIM_SHELL_MARGIN ||
+        s.y > ARENA_H + RIM_SHELL_MARGIN)
+    ) {
+      s.dead = true
+      return
+    }
 
     const nx = s.x + s.vx * step
     const ny = s.y + s.vy * step
@@ -468,8 +487,14 @@ export function stepTank(
   t.y += Math.sin(t.hull) * speed * dt
 
   resolveCircle(t, TANK_RADIUS)
-  t.x = Math.max(TANK_RADIUS, Math.min(ARENA_W - TANK_RADIUS, t.x))
-  t.y = Math.max(TANK_RADIUS, Math.min(ARENA_H - TANK_RADIUS, t.y))
+  // On a walled board the clamp is redundant with the fence and exists as a
+  // belt for the braces. On an edgeless board it would be the wall the board
+  // says it does not have: the rim is open, driving past it is allowed, and
+  // what happens next is `Game`'s to decide — the sim only moves the hull.
+  if (!arenaEdgeless) {
+    t.x = Math.max(TANK_RADIUS, Math.min(ARENA_W - TANK_RADIUS, t.x))
+    t.y = Math.max(TANK_RADIUS, Math.min(ARENA_H - TANK_RADIUS, t.y))
+  }
 }
 
 /** Exported so the renderer can draw the same geometry the sim collides against. */

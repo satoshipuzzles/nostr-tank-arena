@@ -2468,6 +2468,9 @@ class Plumes {
 
 // ---------------------------------------------------------------- renderer
 
+/** How long a tank tumbles before the void has it, in ms. */
+const FALL_TUMBLE_MS = 1300
+
 export class Renderer {
   private renderer: THREE.WebGLRenderer
   private scene = new THREE.Scene()
@@ -2477,6 +2480,19 @@ export class Renderer {
 
   private rigs = new Map<string, TankRig>()
   private you = makeTank()
+
+  /**
+   * Tanks going over the rim of an edgeless board, from `game.falls`.
+   *
+   * A pool of two rather than per-fall allocation, per the house rule about
+   * geometry in the frame it is needed. Two, because a tumble lasts just over
+   * a second and a third simultaneous fall inside that window is a highlight
+   * reel, not a rendering requirement — the oldest simply stops animating.
+   * A cut-down silhouette (hull, dome, treads) rather than a full `makeTank`
+   * rig: a name plate and health pips on a tank that is leaving are the two
+   * things nobody should be reading on the way down.
+   */
+  private fallRigs: { root: THREE.Group; body: THREE.MeshStandardMaterial }[] = []
 
   /**
    * Whether this client's own tank is on screen.
@@ -2785,6 +2801,25 @@ export class Renderer {
     }
     this.scene.add(this.lobRing)
     this.scene.add(this.lobShadow)
+
+    for (let i = 0; i < 2; i++) {
+      const body = toy(0xffffff)
+      const trim = toy(0x333a48, { roughness: 0.85 })
+      const root = new THREE.Group()
+      const hull = new THREE.Mesh(HULL_GEO, body)
+      hull.position.y = 16
+      const dome = new THREE.Mesh(DOME_GEO, body)
+      dome.position.y = 30
+      root.add(hull, dome)
+      for (const side of [-1, 1]) {
+        const tread = new THREE.Mesh(TREAD_GEO, trim)
+        tread.position.set(0, 7, side * 17)
+        root.add(tread)
+      }
+      root.visible = false
+      this.scene.add(root)
+      this.fallRigs.push({ root, body })
+    }
 
     this.resize()
     window.addEventListener('resize', this.resize)
@@ -3412,6 +3447,7 @@ export class Renderer {
     this.strikes(game, now)
     this.nuke(game, now)
     this.suits(game, now)
+    this.syncFalls(game, now)
     this.syncShells(game)
     this.syncLobAim(game)
     this.syncPickups(game, now)
@@ -4699,6 +4735,50 @@ export class Renderer {
     for (let i = n; i < this.suitTracers.length; i++) {
       this.suitTracers[i].visible = false
       this.suitSplashes[i].visible = false
+    }
+  }
+
+  /**
+   * The tumble off an edgeless board's rim.
+   *
+   * Driven off `game.falls` — position, heading and colour at the moment the
+   * centre crossed the line — and everything after that is this function's
+   * fiction: the drive speed carries the hull clear of the slab, gravity does
+   * the rest, and it tumbles around the axis parallel to the rim it went
+   * over, which is the way a body actually tips off an edge. By the end of
+   * the animation it is over a thousand units below the board and small
+   * enough on screen that hiding it reads as the void winning, not a cut.
+   */
+  private syncFalls(game: Game, now: number): void {
+    const active = game.falls.filter((f) => now - f.at < FALL_TUMBLE_MS).slice(-this.fallRigs.length)
+    for (const [i, rig] of this.fallRigs.entries()) {
+      const f = active[i]
+      if (!f) {
+        rig.root.visible = false
+        continue
+      }
+      const s = (now - f.at) / 1000
+      // Which rim it went over: the nearest edge to where the game said the
+      // tank left. The fall point is on (or just past) the line it crossed,
+      // so the nearest edge IS that line.
+      const edges = [
+        { d: f.x, vx: -1, vz: 0 },
+        { d: ARENA_W - f.x, vx: 1, vz: 0 },
+        { d: f.y, vx: 0, vz: -1 },
+        { d: ARENA_H - f.y, vx: 0, vz: 1 },
+      ]
+      let edge = edges[0]
+      for (const e of edges) if (e.d < edge.d) edge = e
+      rig.body.color.setHSL(((f.hue % 360) + 360) % 360 / 360, 0.62, 0.54)
+      rig.root.visible = true
+      rig.root.position.set(
+        f.x + edge.vx * 110 * s,
+        GROUND_Y + 10 - 620 * s * s,
+        f.y + edge.vz * 110 * s,
+      )
+      // Yaw is the heading it drove off with; the tumble is pitch around the
+      // rim-parallel axis, accelerating as it goes.
+      rig.root.rotation.set(edge.vz * s * s * 3.6, -f.hull, -edge.vx * s * s * 3.6)
     }
   }
 

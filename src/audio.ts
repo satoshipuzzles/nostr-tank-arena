@@ -40,6 +40,7 @@ export type Sound =
   | 'siren'
   | 'blast'
   | 'rattle'
+  | 'fall'
 
 export interface PlayOpts {
   /** Where it happened, in arena pixels. Omit for something that happened to you. */
@@ -247,6 +248,15 @@ export class Sfx {
         // the rhythm is the machinegun, not any single report.
         this.noise(ctx, out, t, { dur: 0.045, gain: 0.34 * volume, from: 5200, to: 1000 })
         this.tone(ctx, out, t, { type: 'square', from: 230, to: 120, dur: 0.05, gain: 0.1 * volume })
+        break
+      case 'fall':
+        // Off the rim of an edgeless board. A long dive — the pitch falls for
+        // over a second, which is what sells distance — and a soft, late thud
+        // from somewhere far below. Distinct from 'death' on purpose: no blast,
+        // because nothing exploded; the tank just left.
+        this.tone(ctx, out, t, { type: 'sawtooth', from: 640, to: 60, dur: 1.15, gain: 0.3 * volume })
+        this.tone(ctx, out, t, { type: 'triangle', from: 880, to: 110, dur: 1.0, gain: 0.16 * volume })
+        this.noise(ctx, out, t + 1.15, { dur: 0.3, gain: 0.35 * volume, from: 700, to: 50 })
         break
       case 'reload':
         // Two clacks and a rising note: the magazine going home. The rise is

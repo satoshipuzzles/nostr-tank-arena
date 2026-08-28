@@ -39,7 +39,11 @@ try {
   // is exactly what the first run of this did.
   const seen = new Map()
   let previous = await page.$eval('#hud-map', (el) => el.textContent.trim())
-  for (let i = 0; i < 12; i++) {
+  // The rotation's own length, not a literal. This file said 12 when 12 was
+  // all there were, and the three boards added since were never photographed —
+  // the same stale-literal failure test/rubble.mjs had at eight.
+  const boards = await page.evaluate(() => window.__arena.LAYOUTS.length)
+  for (let i = 0; i < boards; i++) {
     const suffix = '03' + i.toString(16).padStart(2, '0')
     await page.evaluate((sfx) => {
       window.__clock.accept({ height: 999000 + parseInt(sfx.slice(2), 16),
@@ -64,5 +68,5 @@ try {
     seen.set(map, file)
     console.log(suffix, '->', file)
   }
-  console.log(`${seen.size} distinct boards photographed`)
+  console.log(`${seen.size} distinct boards photographed of ${boards} in the rotation`)
 } finally { await browser.close() }

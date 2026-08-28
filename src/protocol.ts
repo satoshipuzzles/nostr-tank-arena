@@ -363,6 +363,17 @@ export interface DeathPayload {
   k: string | null // killer session pubkey, null for self-destruct
   x: number
   y: number
+  /**
+   * The tank fell off an edgeless board rather than being shot to zero.
+   *
+   * Presentation, not scoring: `k` already carries who gets the kill (the last
+   * tank to land a hit, when the fall came under fire), and every receiver
+   * counts it exactly as it counts a shell kill. What this flag changes is the
+   * telling — the tumble animation at (x, y), the feed saying "fell off the
+   * board" instead of "self-destructed", the fall sound instead of the blast.
+   * Optional so a death event from an older bundle parses unchanged.
+   */
+  f?: 1
 }
 
 /**

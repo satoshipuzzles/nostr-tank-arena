@@ -428,6 +428,23 @@ const vaultPad = (w: number): Pt => {
   return { x: x + VAULT_SIDE / 2, y: y + VAULT_SIDE / 2 }
 }
 
+/**
+ * The vault's back rail, for boards with no fence to lean on.
+ *
+ * On every walled board the pocket's fourth side is the border ring itself. An
+ * edgeless board has no ring, which would leave the vault open along the rim —
+ * and worse than open: the gap between the rim and the side walls is 24 units,
+ * which a 22-unit hull squeaks through with two units to spare. A cache with a
+ * secret back door that only pixel-perfect driving finds is not a mechanic,
+ * it is a bug report waiting to be filed. So the two pockets get their own
+ * short rails — the only fence on the board, which also happens to read
+ * correctly: the one railed stretch of rim is the one with something behind it.
+ */
+const vaultRail = (w: number): Rect[] => {
+  const { x } = vaultOrigin(w)
+  return [{ x: x - VAULT_WALL, y: 0, w: VAULT_SIDE + VAULT_WALL * 2, h: BORDER, kind: 'fence' }]
+}
+
 const ring = (w: number, h: number): Rect[] => [
   { x: 0, y: 0, w, h: BORDER, kind: 'fence' },
   { x: 0, y: h - BORDER, w, h: BORDER, kind: 'fence' },
@@ -512,6 +529,28 @@ export interface LayoutSpec {
    * the pitch markings are more recognisable than the green.
    */
   ground?: { base: string; shade: string; blade: string; dark: string; lines?: boolean }
+  /**
+   * No perimeter fence: the board is a platform, and past the rim is the drop.
+   *
+   * This is a rules flag, not a paint job, and it reaches four things at once:
+   * `ring` contributes nothing to `WALLS`, `stepTank` stops clamping the hull
+   * to the board, a flat shell dies once it is clearly past the rim instead of
+   * bouncing home, and a tank whose centre crosses the edge falls — a death
+   * like any other, self-authoritative, credited to whoever hit that tank
+   * last if anybody recently did.
+   *
+   * Safe to derive from for the same reason `gravity` is: the layout is
+   * `blockHash % LAYOUTS.length` and nothing else, so every client agrees on
+   * whether the fence exists. A receiver that disagreed would clamp a tank its
+   * owner has already reported dead at the bottom of a fall.
+   *
+   * The vault keeps its pocket on an edgeless board: `setLayout` closes the
+   * open back with a short rail (`vaultRail`) — the only fence on the board —
+   * because a vault whose fourth wall was the fence stops being sealed the
+   * moment the fence goes, and `test/boardshape.mjs` is right to insist a
+   * cache you can drive into without breaching is a bug, not a variant.
+   */
+  edgeless?: boolean
 }
 
 /**
@@ -540,7 +579,7 @@ const corners = (w: number, h: number): Pt[] => [
 ]
 
 /**
- * Fourteen boards, and the size range is as much of the variety as the shapes are.
+ * Fifteen boards, and the size range is as much of the variety as the shapes are.
  *
  * 1500x1100 is a knife fight with four players in it; 2100x1550 gives you
  * somewhere to go and three seconds to watch somebody come and get you. Every
@@ -978,6 +1017,52 @@ export const LAYOUTS: LayoutSpec[] = [
       { x: 1750, y: 640 },
     ],
   },
+  {
+    name: 'The Drop',
+    w: 1700,
+    h: 1250,
+    // Puzz: "maybe some don't have edges and tanks can fall off." The first
+    // board where the most dangerous thing is not a gun.
+    //
+    // No fence. The rim is open all the way round, and a tank whose centre
+    // crosses it falls — a death like any other, credited to whoever hit that
+    // tank last if anybody recently did, so pressure near the edge is a
+    // weapon. See `LayoutSpec.edgeless` for everything the flag reaches.
+    //
+    // The cover is authored to point the fights outward: everything solid is
+    // in the middle band of the board, and the outer ~250 units are bare. The
+    // safe fight is in the middle where the walls are; the pads that matter
+    // sit toward the rim, so the price of a pickup is playing near the edge
+    // with your reverse gear as the only thing between you and the drop.
+    edgeless: true,
+    // Baked, dusty earth — a slab of ground torn out of the world, which is
+    // what the board's own slab-in-the-sky framing has been claiming all
+    // along. No touchlines: chalk on a platform over a void is a pitch, and a
+    // pitch has a fence.
+    ground: { base: '#a08b60', shade: '#93805a', blade: '#c4ae7e', dark: '#6b5c40', lines: false },
+    cover: () => [
+      // The middle band. A rock anchor and a sandbag line to duel across —
+      // both permanent, so the board never opens up into pure rim.
+      { x: 690, y: 470, w: 140, h: 64, kind: 'rock' },
+      { x: 430, y: 330, w: 250, h: 46, kind: 'sandbag' },
+      // The soft cover. One crate run and one drum pair per half — ten
+      // breakables board-wide with the vault, which exactly fills the first
+      // damage-mask bank. See `coverDamageBits`.
+      { x: 1030, y: 270, w: 210, h: 48, kind: 'crate' },
+      { x: 1210, y: 540, w: 90, h: 90, kind: 'barrel' },
+      // A hedge running toward the south rim: cover that walks you edgeward,
+      // which on this board is an invitation rather than a service.
+      { x: 330, y: 690, w: 48, h: 210, kind: 'hedge' },
+    ],
+    spawns: corners,
+    pads: () => [
+      { x: 860, y: 250 },
+      // 130 units from the west rim, on the centreline's mirror-safe offset:
+      // the bait pad. Reachable at a drive, held at your own risk.
+      { x: 130, y: 610 },
+      { x: 1330, y: 820 },
+    ],
+  },
 ]
 
 /**
@@ -1002,6 +1087,8 @@ export let layoutName = ''
 export let arenaGravity = LAYOUTS[0].gravity ?? 1
 /** This board's ground, when it is not a pitch. See `LayoutSpec.ground`. */
 export let arenaGround = LAYOUTS[0].ground ?? null
+/** Whether this board has a rim you can drive off. See `LayoutSpec.edgeless`. */
+export let arenaEdgeless = LAYOUTS[0].edgeless ?? false
 
 export const WALLS: Rect[] = []
 export const SPAWNS: Pt[] = []
@@ -1072,6 +1159,7 @@ export function setLayout(index: number): void {
   layoutName = spec.name
   arenaGravity = spec.gravity ?? 1
   arenaGround = spec.ground ?? null
+  arenaEdgeless = spec.edgeless ?? false
 
   const half = spec.cover(spec.w, spec.h)
   // The vault goes in next to the border rather than being authored per board,
@@ -1081,9 +1169,13 @@ export function setLayout(index: number): void {
   // remembering to add it. Its mirror is explicit because — unlike `ring` — one
   // vault is not symmetric on its own.
   const vaults = vault(spec.w)
+  // An edgeless board has no ring — the missing fence IS the mechanic — and
+  // its vaults each get a back rail instead, appended with the vault block so
+  // no index that exists on a walled board moves. See `vaultRail`.
+  const rails = spec.edgeless ? vaultRail(spec.w) : []
   WALLS.length = 0
   WALLS.push(
-    ...ring(spec.w, spec.h),
+    ...(spec.edgeless ? [] : ring(spec.w, spec.h)),
     ...half,
     ...half.map((r) => flip(r, spec.w, spec.h)),
     // **Last, not first.** The vault shipped prepended, and prepending shifted
@@ -1098,6 +1190,8 @@ export function setLayout(index: number): void {
     // Found by rainmaker, measured against real geometry.
     ...vaults,
     ...vaults.map((r) => flip(r, spec.w, spec.h)),
+    ...rails,
+    ...rails.map((r) => flip(r, spec.w, spec.h)),
   )
 
   // Stamp identity and hulls. Order is `ring`, the authored half, its mirror,
