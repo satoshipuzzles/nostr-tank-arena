@@ -57,7 +57,7 @@ import {
   suitAim,
   underSuitFire,
 } from './suit'
-import { BOT_COUNT, MAX_BOTS, killBot, makeBot, stepBot } from './bots'
+import { BOT_COUNT, MAX_BOTS, botColorFor, botNameFor, killBot, makeBot, stepBot } from './bots'
 import { FLAG_TEAMS, canScore, canTake, carriers } from './flags'
 import { freshState, holderOn, points, stepPoint } from './domination'
 import type { Occupant, Point, PointState } from './domination'
@@ -479,6 +479,54 @@ const NUKE_LEAD_MS = 5_000
  * each — small enough to keep for every round and long enough that the replay
  * starts before the shot that killed you was fired.
  */
+/**
+ * How long a client is still counted for bot ownership after its last tick.
+ *
+ * Eight seconds, and the number was measured rather than chosen. At two the
+ * ownership *flapped*: two pages under a software rasteriser drop ticks for a
+ * second or two at a time, so the lower-keyed client kept falling out of the
+ * election, the higher-keyed one claimed, and the room oscillated between one
+ * set of tanks and two — traced as `OWN3 --- OWN3 ---` over twenty seconds.
+ *
+ * The trade is deliberately asymmetric. Handing the tanks over late costs a few
+ * seconds with no practice tanks after somebody leaves, which nobody notices.
+ * Handing them over early costs two simulations of the same tanks, which is the
+ * exact problem this change exists to remove. So the timeout is long, and the
+ * *stand-down* half stays instant: an observed stream from a lower key stops
+ * this client stepping on the very next frame.
+ */
+const BOT_OWNER_TTL_MS = 8_000
+/** How stale a remembered bot frame may be and still be worth adopting. */
+const BOT_ADOPT_MS = 8_000
+/**
+ * How long a fresh client listens before it will claim the tanks.
+ *
+ * Joining is the one moment a client knows nothing about the room: no peers
+ * yet, no bot stream yet, so "am I the lowest key here" answers yes for
+ * everybody. Without a pause every arrival spawns a full set and the room has
+ * two owners until the streams cross — which is exactly the phantom-bot problem
+ * this whole change exists to remove, reintroduced for the first few seconds of
+ * every join.
+ *
+ * Three seconds is longer than a subscription takes to answer and shorter than
+ * a player notices. A room that really is empty gets its practice tanks a beat
+ * late; a room that is not never doubles them.
+ */
+const BOT_CLAIM_MS = 3_000
+
+/**
+ * The session key a practice tank wears on the wire.
+ *
+ * Derived from its owner and its index rather than from the counter `makeBot`
+ * uses locally, because every client has to arrive at the same string for the
+ * same tank: the owner signs its shells and deaths with markers pointing here,
+ * and everybody else keys the peer by it. Sixty-four hex characters, opening
+ * `b0` and closing on eight zeros, so `isBot` keeps recognising it — which is
+ * what keeps a bot kill out of everybody's published score.
+ */
+const botIdFor = (owner: string, index: number): string =>
+  'b0' + owner.slice(0, 52) + index.toString(16).padStart(2, '0') + '0'.repeat(8)
+
 const RECORD_MS = 3_000
 const RECORD_STEP_MS = 50
 /** How long the replay runs for, which is the tape minus the lead-in. */
@@ -1502,6 +1550,15 @@ export class Game {
     if (sameRound && typeof p.cd === 'number' && p.cd > 0) applyCoverDamageBits(p.cd)
     if (sameRound && typeof p.cd2 === 'number' && p.cd2 > 0) applyCoverDamageBits(p.cd2, 1)
 
+    // The practice tanks this client is stepping, if it is the one stepping
+    // them. They arrive as peers like anybody else — the renderer, the damage
+    // model and the scoreboard all already know what to do with a peer, which
+    // is the whole reason the tick carries them rather than a bot protocol.
+    if (Array.isArray(p.bt)) {
+      this.botStreamFrom = { session: e.pubkey, at: performance.now() }
+      this.takeBotFrame(e.pubkey, p.bt)
+    }
+
     // Relays deliver out of order often enough to matter; keep the buffer sorted.
     const b = peer.buffer
     let i = b.length
@@ -1532,7 +1589,14 @@ export class Game {
     // the far side of the map or at zero distance under our own tracks.
     const lob =
       typeof p.l === 'number' && p.l > 0 ? Math.min(LOB_MAX, Math.max(LOB_MIN, p.l)) : 0
-    const shell = spawnShell(p.id, e.pubkey, p.x, p.y, p.a, bounces, damage, lob)
+    // Whose shell it is. A bot cannot sign, so its shells come out under its
+    // owner's signature with an index attached — and *who fired it* decides who
+    // it may hit, because a side does not shoot itself.
+    const owner =
+      typeof p.bi === 'number' && p.bi >= 0 && p.bi < MAX_BOTS
+        ? botIdFor(e.pubkey, Math.floor(p.bi))
+        : e.pubkey
+    const shell = spawnShell(p.id, owner, p.x, p.y, p.a, bounces, damage, lob)
     this.sound('fire', { at: { x: p.x, y: p.y } })
     // Fast-forward by however long the event spent in flight, so the shell
     // appears where the shooter already sees it rather than at the muzzle.
@@ -1551,9 +1615,28 @@ export class Game {
     // Relays echo our own publishes straight back. Without this guard we would
     // create a peer for ourselves and count the death twice.
     if (e.pubkey === this.identity.sessionPubkey) return
-    const victim = this.ensurePeer(e.pubkey)
+    // A practice tank's death, published by whoever is stepping it. Without the
+    // index the victim would be read off the signature and the owner would take
+    // the death, the streak reset and the feed line for every bot they lose.
+    const botIndex =
+      typeof p.b === 'number' && p.b >= 0 && p.b < MAX_BOTS ? Math.floor(p.b) : null
+    const victim =
+      botIndex === null ? this.ensurePeer(e.pubkey) : this.ensurePeer(botIdFor(e.pubkey, botIndex))
     victim.lastSeen = performance.now()
-    victim.deaths++
+    if (botIndex !== null) {
+      victim.bot = true
+      victim.name = botNameFor(botIndex)
+      victim.view.dead = true
+    }
+    // **A bot's death is not a score, on any screen.**
+    //
+    // It has never counted locally — `botKills` has always been its own
+    // counter — and putting bots on the wire must not smuggle them into the
+    // record by the back door: `deaths`/`kills` feed the scoreboard and
+    // `autoPublishRound`, so a solo player with a room full of practice tanks
+    // would farm the all-time tables. Receivers enforce it rather than trusting
+    // the publisher, because the victim's key is visibly a bot's.
+    if (botIndex === null) victim.deaths++
 
     const killerName =
       p.k === this.identity.sessionPubkey
@@ -1565,10 +1648,14 @@ export class Game {
     victim.streak = 0
     this.sound('death', { at: { x: p.x, y: p.y } })
     if (p.k === this.identity.sessionPubkey) {
-      this.kills++
+      // The streak, the sound and the feed line are the half that makes a bot
+      // feel like an opponent, and they stay. The tally is the half that would
+      // reach the leaderboard, and it does not.
+      if (botIndex === null) this.kills++
+      else this.botKills++
       this.sound('kill')
       this.onOwnKill()
-    } else if (typeof p.k === 'string' && p.k.length === 64) {
+    } else if (botIndex === null && typeof p.k === 'string' && p.k.length === 64) {
       // `ensurePeer`, not `peers.get`. A killer we have not had a tick from yet
       // is not an unknown player, it is a player whose first event happened to
       // be somebody else's death — guaranteed for a late joiner, and for anyone
@@ -2145,11 +2232,7 @@ export class Game {
     for (const bot of this.bots) {
       if (bot.tank.dead) continue
       if (this.teamOf(bot.session) && this.teamOf(bot.session) === this.teamOf(owner)) continue
-      killBot(bot, now, this.modifier.respawn)
-      if (owner === this.identity.sessionPubkey) {
-        this.botKills++
-        this.onOwnKill()
-      }
+      this.killTheBot(bot, owner, now)
     }
 
     if (this.watching) return
@@ -2304,14 +2387,7 @@ export class Game {
           this.sound('hit', { at: { x: bot.tank.x, y: bot.tank.y } })
           continue
         }
-        killBot(bot, now, this.modifier.respawn)
-        this.sound('death', { at: { x: bot.tank.x, y: bot.tank.y } })
-        if (mine) {
-          this.botKills++
-          this.sound('kill')
-          this.onOwnKill()
-          this.feedBotKill(bot)
-        }
+        this.killTheBot(bot, mine ? this.identity.sessionPubkey : s.owner, now)
       }
       // Ourselves, when it is somebody else's.
       if (mine || this.watching || this.tank.dead || this.flying) continue
@@ -2838,10 +2914,141 @@ export class Game {
    * Checked against peers that are *not* bots, because the bots are
    * themselves in `peers` by the time this runs a second time.
    */
+  /**
+   * The session key a bot wears on the wire.
+   *
+   * Derived from its owner and its index rather than from the local counter
+   * `makeBot` uses, because every client has to arrive at the same string for
+   * the same tank: the owner signs its shells and its deaths with it, and
+   * everybody else keys the peer by it. Sixty-four hex characters, starting
+   * `b0` and ending in eight zeros, so `isBot` keeps recognising it — which is
+   * what keeps a bot kill out of everybody's score.
+   */
+  private wireBotId(index: number): string {
+    return botIdFor(this.identity.sessionPubkey, index)
+  }
+
+  /**
+   * Who is stepping the practice tanks, or null when nobody is.
+   *
+   * The lowest live session key in the room, which every client can compute
+   * from the roster it already has — with one addition that matters more than
+   * the rule itself: **an observed bot stream from a lower key wins.**
+   *
+   * Election by roster alone cannot converge here. Two clients with different
+   * relay visibility compute different rosters, which is the same objection
+   * this game already makes to deriving teams — and two owners means two sets
+   * of tanks. Deferring to a stream settles it in one tick without needing the
+   * rosters to match: whoever is *actually* publishing bots, if their key is
+   * lower than mine, is the owner, and I stand mine down.
+   */
+  private botStreamFrom: { session: string; at: number } | null = null
+  /** When this client started, for the listen-before-claiming window. */
+  private readonly startedAt = performance.now()
+  /**
+   * The last frame of somebody else's bots, by index, for a handover.
+   *
+   * Kept whether or not this client is the owner, because the moment it becomes
+   * one is exactly the moment it needs the previous owner's last word.
+   */
+  private readonly adoptable = new Map<
+    number,
+    { x: number; y: number; hull: number; gun: number; hp: number; dead: boolean; at: number }
+  >()
+
+  get botOwner(): string | null {
+    if (this.watching) return null
+    const now = performance.now()
+    // Not until this client has heard the room. See `BOT_CLAIM_MS`.
+    if (now - this.startedAt < BOT_CLAIM_MS) {
+      const stream = this.botStreamFrom
+      return stream && now - stream.at < BOT_OWNER_TTL_MS ? stream.session : null
+    }
+    let best = this.identity.sessionPubkey
+    for (const [session, peer] of this.peers) {
+      if (peer.bot || this.isBot(session)) continue
+      if (now - peer.lastSeen > BOT_OWNER_TTL_MS) continue
+      if (session < best) best = session
+    }
+    // A stream beats the roster, and only downwards: somebody publishing bots
+    // whose key is *higher* than mine is standing down as soon as they see me.
+    const stream = this.botStreamFrom
+    if (stream && now - stream.at < BOT_OWNER_TTL_MS && stream.session < best) best = stream.session
+    return best
+  }
+
+  /** True while this client is the one stepping the bots. */
+  get ownsBots(): boolean {
+    return this.botOwner === this.identity.sessionPubkey
+  }
+
+  /**
+   * Fold an owner's bot frame into the peer set.
+   *
+   * No interpolation buffer: a practice tank is not worth the render delay that
+   * exists to smooth a *player's* stream, and one owner publishing at the same
+   * rate as everybody else is already as smooth as the room. Straight into the
+   * view, like the local path did before ownership existed.
+   */
+  private takeBotFrame(owner: string, frame: number[][]): void {
+    const now = performance.now()
+    const seen = new Set<string>()
+    for (const row of frame) {
+      if (!Array.isArray(row) || row.length < 6) continue
+      const index = Math.max(0, Math.min(MAX_BOTS - 1, Math.floor(row[0])))
+      const session = botIdFor(owner, index)
+      seen.add(session)
+      const peer = this.ensurePeer(session)
+      // Name and colour are pure functions of the index — see `makeBot` — so
+      // they are derived rather than re-sent ten times a second.
+      peer.name = botNameFor(index)
+      peer.color = botColorFor(index)
+      peer.displayColor = botColorFor(index)
+      peer.bot = true
+      peer.lastSeen = now
+      peer.view.x = row[1]
+      peer.view.y = row[2]
+      peer.view.hull = row[3]
+      peer.view.gun = row[4]
+      peer.view.hp = Math.max(0, Math.min(MAX_HULL, Math.floor(row[5])))
+      peer.view.dead = row[6] === 1
+      peer.view.ammo = MAG_SIZE
+      peer.view.shield = false
+      peer.view.chopperUntil = 0
+      peer.view.chopperAt = null
+      peer.view.suitUntil = 0
+      peer.view.suitAt = null
+      peer.view.team = typeof row[7] === 'number' ? row[7] : 0
+      // Remembered for a handover, whoever the owner is right now.
+      this.adoptable.set(index, {
+        x: row[1],
+        y: row[2],
+        hull: row[3],
+        gun: row[4],
+        hp: peer.view.hp,
+        dead: peer.view.dead,
+        at: now,
+      })
+    }
+    // A tank the owner has stood down goes with it, rather than waiting out the
+    // peer timeout as a statue somebody can still shoot at.
+    for (const [session, peer] of this.peers) {
+      if (!peer.bot || !session.startsWith('b0' + owner.slice(0, 52))) continue
+      if (!seen.has(session)) this.peers.delete(session)
+    }
+  }
+
   private syncBots(dt: number, now: number): void {
     const humans = [...this.peers.keys()].filter((k) => !this.isBot(k))
     const asked = Math.max(0, Math.min(MAX_BOTS, Math.floor(this.botsWanted)))
-    const wanted = humans.length === 0 && !this.watching ? asked : 0
+    // **Only one client steps them, and the seat rule is arithmetic again.**
+    //
+    // Puzz: "if there are 5 bots and 1 player then replace 1 bot with the new
+    // player". That rule was reverted because with every client keeping its own
+    // private set, two people in a room saw two different boards — the phantom
+    // problem. With one owner publishing the tanks, `wanted` is a subtraction
+    // again and there is exactly one simulation to disagree about.
+    const wanted = this.ownsBots && !this.watching ? Math.max(0, asked - humans.length) : 0
 
     if (this.bots.length > wanted) {
       // Retire from the end rather than clearing the lot. Dropping one bot used
@@ -2859,8 +3066,44 @@ export class Game {
         )
       }
     }
+    // Somebody else's practice tanks, from before they stood down or left.
+    // `takeBotFrame` prunes a frame against itself, but a client that stops
+    // sending frames altogether leaves its last set behind — a statue other
+    // people can still shoot at until the peer timeout. The owner is the only
+    // client whose bots are real, so anybody else's go.
+    const owner = this.botOwner
+    for (const [session, peer] of this.peers) {
+      if (!peer.bot) continue
+      if (owner && session.startsWith('b0' + owner.slice(0, 52))) continue
+      if (this.bots.some((b) => b.session === session)) continue
+      this.peers.delete(session)
+    }
+
     this.lastHumans = humans.length
-    while (this.bots.length < wanted) this.bots.push(makeBot(this.bots.length, now))
+    while (this.bots.length < wanted) {
+      const index = this.bots.length
+      const bot = makeBot(index, now)
+      // The wire id, not the local counter's: this tank is about to appear on
+      // other people's screens and its shells and its death have to name it.
+      bot.session = this.wireBotId(index)
+      // **Adopted rather than spawned, when there is a frame to adopt from.**
+      //
+      // Ownership moves when the owner leaves, and a new owner that started its
+      // tanks fresh would teleport and full-heal every bot mid-fight. The last
+      // frame this client saw is the honest place to continue from: positions
+      // and hull as they were, and only the ones the frame says were dead come
+      // back on a respawn.
+      const seen = this.adoptable.get(index)
+      if (seen && now - seen.at < BOT_ADOPT_MS) {
+        bot.tank.x = seen.x
+        bot.tank.y = seen.y
+        bot.tank.hull = seen.hull
+        bot.tank.gun = seen.gun
+        bot.tank.hp = Math.max(1, Math.min(this.maxHp, seen.hp))
+        if (seen.dead) killBot(bot, now, this.modifier.respawn)
+      }
+      this.bots.push(bot)
+    }
     if (!this.bots.length) return
 
     // Velocity for the lead, measured rather than read off the controls: what a
@@ -2933,13 +3176,73 @@ export class Game {
   /** Humans seen last frame, so a retire can tell an arrival from the stepper. */
   private lastHumans = 0
 
+  /**
+   * A practice tank dies, once, wherever the shot came from.
+   *
+   * Every path that could kill one — a shell, a barrel, a strike, the suit, the
+   * chopper, the nuke — goes through here, because a bot death is now an event
+   * other people have to hear about and six copies of "publish it too" is six
+   * chances to forget.
+   *
+   * **The death rides the ordinary death kind with an index attached.** A bot
+   * has no key, so the event is signed by this client; without the index every
+   * receiver would read the victim off the signature and hand *this* client the
+   * death, the streak reset and the feed line.
+   *
+   * **A bot kill counts in the round and not in the record.** It feeds the
+   * feed, the streak and the sound — they are meant to feel like opponents —
+   * and it never reaches `kills`, so it cannot reach `autoPublishRound` and the
+   * all-time tables. A solo player with a room full of practice tanks would
+   * otherwise farm the leaderboard, which is the same reasoning that has always
+   * kept `botKills` a separate counter. The rule is enforceable by receivers
+   * rather than trusted, because the victim's key is visibly a bot's.
+   */
+  private killTheBot(bot: Bot, killer: string | null, now: number): void {
+    killBot(bot, now, this.modifier.respawn)
+    this.sound('death', { at: { x: bot.tank.x, y: bot.tank.y } })
+    const index = this.bots.indexOf(bot)
+    if (index >= 0) {
+      const payload: DeathPayload = { t: now, k: killer, x: bot.tank.x, y: bot.tank.y, b: index }
+      this.publishAsSession(KIND_DEATH, payload)
+    }
+    if (killer === this.identity.sessionPubkey) {
+      this.botKills++
+      this.sound('kill')
+      this.onOwnKill()
+      // The kill feed's own line, not a plain feed entry: bots go through the
+      // same styling every other kill does — main grew `feedBotKill` while this
+      // was in flight and every call site it touched now lands here.
+      this.feedBotKill(bot)
+    }
+  }
+
   /** A bot pulls its trigger. Same shell everybody else fires, different owner. */
   private fireBot(bot: Bot, angle: number): void {
     const x = bot.tank.x + Math.cos(angle) * MUZZLE_OFFSET
     const y = bot.tank.y + Math.sin(angle) * MUZZLE_OFFSET
-    const shell = spawnShell(randomId(), bot.session, x, y, angle, this.modifier.bounces, 1, 0)
+    const id = randomId()
+    const shell = spawnShell(id, bot.session, x, y, angle, this.modifier.bounces, 1, 0)
     this.shells.set(shell.id, shell)
     this.sound('fire', { at: { x, y } })
+    // On the wire like anybody else's, with the index saying who really fired
+    // it — the signature is this client's, and a bot's shell credited to its
+    // owner would be a shell that cannot hit the owner's teammates and can hit
+    // the bot's own side. About one event every two seconds per bot, which is
+    // the price of the tanks being real to everybody rather than to one screen.
+    const index = this.bots.indexOf(bot)
+    if (index >= 0) {
+      const payload: ShellPayload = {
+        id,
+        t0: performance.now(),
+        x,
+        y,
+        a: angle,
+        b: this.modifier.bounces,
+        d: 1,
+        bi: index,
+      }
+      this.publishAsSession(KIND_SHELL, payload)
+    }
   }
 
   /**
@@ -3035,13 +3338,7 @@ export class Game {
       if ((bot.tank.x - x) ** 2 + (bot.tank.y - y) ** 2 > r * r) continue
       bot.tank.hp -= 1
       if (bot.tank.hp > 0) continue
-      killBot(bot, performance.now(), this.modifier.respawn)
-      this.sound('death', { at: { x: bot.tank.x, y: bot.tank.y } })
-      if (owner === this.identity.sessionPubkey) {
-        this.botKills++
-        this.onOwnKill()
-        this.feedBotKill(bot)
-      }
+      this.killTheBot(bot, owner, performance.now())
     }
     if (this.tank.dead || this.watching) return
     // A barrel a teammate shot still does not hurt us, which is the same rule
@@ -3220,11 +3517,7 @@ export class Game {
         this.sound('hit', { at: { x: bot.tank.x, y: bot.tank.y } })
         continue
       }
-      killBot(bot, now, this.modifier.respawn)
-      this.botKills++
-      this.sound('kill')
-      this.onOwnKill()
-      this.feedBotKill(bot)
+      this.killTheBot(bot, this.identity.sessionPubkey, now)
     }
   }
 
@@ -3282,11 +3575,7 @@ export class Game {
         this.sound('hit', { at: { x: bot.tank.x, y: bot.tank.y } })
         continue
       }
-      killBot(bot, now, this.modifier.respawn)
-      this.botKills++
-      this.sound('kill')
-      this.onOwnKill()
-      this.feedBotKill(bot)
+      this.killTheBot(bot, this.identity.sessionPubkey, now)
     }
   }
 
@@ -3345,14 +3634,7 @@ export class Game {
         this.sound('hit', { at: { x: bot.tank.x, y: bot.tank.y } })
         continue
       }
-      killBot(bot, performance.now(), this.modifier.respawn)
-      this.sound('death', { at: { x: bot.tank.x, y: bot.tank.y } })
-      if (owner === this.identity.sessionPubkey) {
-        this.botKills++
-        this.sound('kill')
-        this.onOwnKill()
-        this.feedBotKill(bot)
-      }
+      this.killTheBot(bot, owner, performance.now())
     }
   }
 
@@ -3434,14 +3716,7 @@ export class Game {
       if ((bot.tank.x - shell.x) ** 2 + (bot.tank.y - shell.y) ** 2 > r * r) continue
       bot.tank.hp -= shell.damage
       if (bot.tank.hp > 0) continue
-      killBot(bot, performance.now(), this.modifier.respawn)
-      this.sound('death', { at: { x: bot.tank.x, y: bot.tank.y } })
-      if (shell.owner === this.identity.sessionPubkey) {
-        this.botKills++
-        this.sound('kill')
-        this.onOwnKill()
-        this.feedBotKill(bot)
-      }
+      this.killTheBot(bot, shell.owner, performance.now())
     }
   }
 
@@ -3491,14 +3766,7 @@ export class Game {
         this.sound('hit', { at: { x: bot.tank.x, y: bot.tank.y } })
         return true
       }
-      killBot(bot, performance.now(), this.modifier.respawn)
-      this.sound('death', { at: { x: bot.tank.x, y: bot.tank.y } })
-      if (shell.owner === this.identity.sessionPubkey) {
-        this.botKills++
-        this.sound('kill')
-        this.onOwnKill()
-        this.feedBotKill(bot)
-      }
+      this.killTheBot(bot, shell.owner, performance.now())
       return true
     }
     return false
@@ -4306,6 +4574,24 @@ export class Game {
       // is the point: this costs nothing on a board that never outgrew one
       // bank, and an older client simply does not see the field.
       ...(coverDamageBits(1) ? { cd2: coverDamageBits(1) } : {}),
+      // The practice tanks, when this is the client stepping them. Six numbers
+      // each plus a side, on a tick that was going out anyway — see
+      // `StatePayload.bt` for why this is a field and not thirty events a
+      // second.
+      ...(this.bots.length
+        ? {
+            bt: this.bots.map((b, i) => [
+              i,
+              Math.round(b.tank.x * 10) / 10,
+              Math.round(b.tank.y * 10) / 10,
+              Math.round(b.tank.hull * 1000) / 1000,
+              Math.round(b.tank.gun * 1000) / 1000,
+              b.tank.hp,
+              b.tank.dead ? 1 : 0,
+              this.team ? this.botTeam(b) : 0,
+            ]),
+          }
+        : {}),
       // Absent in a free-for-all, which is most rounds, so the common tick is
       // the size it was before teams existed.
       ...(this.team ? { tm: this.team } : {}),

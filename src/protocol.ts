@@ -161,6 +161,24 @@ export interface StatePayload {
    */
   cd2?: number
   /**
+   * The practice tanks this client is stepping, when it is the one stepping them.
+   *
+   * `[index, x, y, hull, gun, hp, dead]` per bot, on the tick that was going out
+   * anyway. One owning client simulates the bots and everybody else renders and
+   * shoots them off the wire, which is what makes a room with two people in it
+   * agree about how many tanks are on the board — before this, every client kept
+   * its own private set and no two screens matched.
+   *
+   * A field rather than an event per bot, and the arithmetic is the argument:
+   * three bots at ten ticks a second is thirty extra events a second from one
+   * client, which is past what these relays accept. As a field on an existing
+   * tick it costs bytes.
+   *
+   * Name and colour are pure functions of the index — see `makeBot` — so they
+   * are derived by every receiver rather than sent ten times a second.
+   */
+  bt?: number[][]
+  /**
    * Milliseconds of chopper time this client has left, when it is flying one.
    *
    * The whole gunship rides on this tick rather than on events of its own. A
@@ -300,6 +318,15 @@ export interface StatePayload {
  * times on everybody else's for as long as the boundary took to settle.
  */
 export interface ShellPayload {
+  /**
+   * The index of the practice tank that fired, when the shooter is one.
+   *
+   * Same reason as `DeathPayload.b`: the shooter is otherwise read off the
+   * signature, and a bot's shell would be credited to the client stepping it —
+   * which decides who it is allowed to hit, because teammates do not shoot each
+   * other.
+   */
+  bi?: number
   id: string
   t0: number // sender clock at spawn, ms
   x: number
@@ -322,6 +349,16 @@ export interface ShellPayload {
 
 /** Victim-authoritative death report. `k` is the session pubkey of the killer. */
 export interface DeathPayload {
+  /**
+   * The index of the practice tank that died, when the victim is one.
+   *
+   * A bot has no key of its own, so its death is signed by the client stepping
+   * it — which means a receiver reading the victim off the signature would give
+   * the *owner* the death, the streak reset and the feed line every time one of
+   * their bots was shot. This says whose death it actually is; the victim's
+   * wire key is derived from the signer and this index.
+   */
+  b?: number
   t: number
   k: string | null // killer session pubkey, null for self-destruct
   x: number

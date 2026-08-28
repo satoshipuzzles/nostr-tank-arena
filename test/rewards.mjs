@@ -47,6 +47,15 @@ const check = (name, ok, detail = '') => {
   if (!ok) failures.push(name)
 }
 const wait = (ms) => new Promise((r) => setTimeout(r, ms))
+async function until(fn, ms = 12_000) {
+  const deadline = Date.now() + ms
+  while (Date.now() < deadline) {
+    const v = await fn()
+    if (v) return v
+    await wait(100)
+  }
+  return null
+}
 
 const HASH = 'ab'.repeat(30) + '0300'
 
@@ -77,7 +86,14 @@ try {
   }, HASH)
   await wait(1200)
 
-  const spawned = await page.evaluate(() => window.__game.botCount)
+  // Polled: the practice tanks have an owner now, and a client waits a few
+  // seconds after joining before claiming them — otherwise every arrival spawns
+  // a set before it has heard the room and there are two. So they turn up a
+  // beat later than they used to, for a player as well as for this suite.
+  const spawned = await until(async () => {
+    const n = await page.evaluate(() => window.__game.botCount)
+    return n === 3 ? n : null
+  }, 12_000)
   check('three bots are on the board to shoot at', spawned === 3, `botCount=${spawned}`)
 
   // --------------------------------------------------- the strike kills bots

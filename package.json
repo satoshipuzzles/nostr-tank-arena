@@ -61,7 +61,8 @@
     "test:killcam": "node test/killcam.mjs",
     "test:covermask": "node test/covermask.mjs",
     "test:stickers": "node test/stickers.mjs",
-    "test:killfeed": "node test/killfeed.mjs"
+    "test:killfeed": "node test/killfeed.mjs",
+    "test:botauthority": "node test/botauthority.mjs"
   },
   "dependencies": {
     "nostr-tools": "^2.10.4",
