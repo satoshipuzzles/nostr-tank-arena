@@ -86,6 +86,29 @@ try {
   const label = () => page.evaluate(() => document.getElementById('autopublish-toggle').textContent)
   check('and the toggle says so', (await label()) === 'Auto-publish: on', await label())
 
+  // **Put the client in the round this suite is about to close.**
+  //
+  // It never did, and that is the whole of the failure P.F. Chang reported: the
+  // page joins a *real* round off the live chain, and closing a fictional block
+  // 900001 on a client sitting in block 964364 publishes 964364 — which is the
+  // honest answer to the question that was asked. `endRound` carries the round
+  // that was played, not the height it is handed, and that is exactly the
+  // behaviour anybody would want.
+  //
+  // So the pin is the fix, and it is two halves: begin the round the closes
+  // below assume, and stop the live poller from moving it again. Without the
+  // second half a real tip landing mid-suite walks the round forward under the
+  // checks — the same trap this repo's other suites pin against.
+  const pinned = await page.evaluate((hash) => {
+    const g = window.__game
+    window.__clock.accept = () => {}
+    for (const p of window.__players ?? [{ game: g }]) p.game.beginRound(900000, hash)
+    return g.round
+  }, 'ab'.repeat(30) + '0300')
+  // Asserted rather than assumed: if the pin ever stops taking, this file says
+  // *that* instead of reporting that the wrong block was published.
+  check('the client is in the round this suite is about to close', pinned === 900000, String(pinned))
+
   /**
    * Close a block, the way the clock does.
    *
@@ -204,6 +227,59 @@ try {
     /automatically/i.test(podium.note ?? ''), JSON.stringify(podium.note))
   check('and the manual button is still there, relabelled',
     /again/i.test(podium.button ?? ''), JSON.stringify(podium.button))
+
+  // ------------------------------- tips arriving together still land straight
+  //
+  // The question behind the failure that started this: can a real client
+  // publish a round under the wrong block when two tips arrive close together?
+  //
+  // No, and this is the check that says so rather than the reasoning. Close two
+  // blocks back to back with a score in each and require the two published
+  // heights to be the two rounds that were actually played. `endRound` carries
+  // `this.round` — the round being closed — and `closeBlock` ends and begins
+  // synchronously, so a second tip cannot interleave. If either of those ever
+  // changes, the second publish here starts wearing the first's height.
+  // Set it, do not toggle it: whether the earlier sections left it on or off is
+  // their business, and a blind click makes this section depend on how many
+  // times somebody else pressed the button.
+  for (let i = 0; i < 2 && (await label()) !== 'Auto-publish: on'; i++) {
+    await page.evaluate(() => document.getElementById('autopublish-toggle').click())
+    await wait(150)
+  }
+  await page.evaluate((hash) => {
+    const g = window.__game
+    // Start from a known round. The sections above closed blocks of their own,
+    // and `endRound` carries the round being *closed* — so without this the
+    // first publish here wears whatever height the last section left behind,
+    // which is a fact about the suite's order rather than about attribution.
+    for (const p of window.__players ?? [{ game: g }]) p.game.beginRound(900001, hash)
+    window.__signed = []
+    window.__all = []
+    const real = g.identity.signAsSelf.bind(g.identity)
+    g.identity.signAsSelf = async (draft) => {
+      const ev = await real(draft)
+      window.__all.push(ev)
+      return ev
+    }
+    g.kills = 2
+    g.deaths = 0
+  }, 'ab'.repeat(30) + '0303')
+  const onAgain = await label()
+  check('the toggle is back on for the run-together case', onAgain === 'Auto-publish: on', onAgain)
+  await page.evaluate((hash) => window.__closeBlock(900002, hash), 'ab'.repeat(30) + '0304')
+  await page.evaluate(() => { window.__game.kills = 3 })
+  // No wait between them on purpose: this is two tips landing in the same beat.
+  await page.evaluate((hash) => window.__closeBlock(900003, hash), 'ab'.repeat(30) + '0306')
+  await wait(1200)
+  const pair = await page.evaluate(() =>
+    (window.__all ?? [])
+      .filter((e) => e.kind === 30078)
+      .map((e) => JSON.parse(e.content).block))
+  check(
+    'two blocks closing back to back publish the two rounds that were played',
+    pair.length === 2 && pair[0] === 900001 && pair[1] === 900002,
+    JSON.stringify(pair),
+  )
 
   check('no page errors', pageErrors.length === 0, pageErrors.join(' | '))
 } finally {
