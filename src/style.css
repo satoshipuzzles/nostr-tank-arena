@@ -305,6 +305,26 @@ summary { cursor: pointer; color: var(--dim); font-size: 13px; }
   padding: 4px 12px;
 }
 
+/* A kill line: killer's face, killer, skull, victim, victim's face. The
+   avatars reuse the scoreboard's .avatar sizing (--av) and initial fallback,
+   so a guest or a practice tank gets the same coloured initial it has on the
+   scoreboard rather than a broken image. */
+.feed-kill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.feed-kill .feed-skull {
+  font-size: 14px;
+  line-height: 1;
+}
+.feed-kill .feed-name {
+  max-width: 12ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* The line's icon, when the entry carried one — feed-text sized, so a line
    with a medal on it is still one line. */
 .feed-ico {
