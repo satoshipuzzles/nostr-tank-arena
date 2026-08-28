@@ -15,6 +15,11 @@
 //   4. Somebody else's chopper takes your hull — applied by you, on their tick,
 //      at the rate the constant says and not faster.
 //   5. It ends, and you come back.
+//   6. The gun is rounds, not a laser: tracer slugs that actually march down
+//      the gun line, and a rattle out of the sound sink while they do. The
+//      cone this replaced sat still and read as a beam — the exact complaint
+//      in the issue that removed it — so "the tracers move between frames" is
+//      the check, not "a mesh exists".
 //
 //   npm run build && npx vite preview --port 4202 &
 //   npm run test:chopper-browser
@@ -188,6 +193,110 @@ try {
     Math.abs(flown.tick.x - flown.moved.x) < 2 && Math.abs(flown.tick.x - flown.tank.x) > 20,
     JSON.stringify({ tick: flown.tick.x, chopper: Math.round(flown.moved.x), tank: Math.round(flown.tank.x) }),
   )
+
+  /** One tick from a stranger flying a gunship, gun running, aimed as told. */
+  const theirGun = (aimX, aimY) => page.evaluate(({ PEER, aimX, aimY }) => {
+    window.__game.onEvent({
+      id: 'a' + Math.random().toString(16).slice(2),
+      pubkey: PEER, kind: 21000, created_at: Math.floor(Date.now() / 1000), tags: [], sig: '0'.repeat(128),
+      content: JSON.stringify({
+        t: Date.now(), x: 700, y: 300, h: 0, g: 0, hp: 3, d: false,
+        ks: 0, ds: 0, r: window.__game.round,
+        c: 8000, cx: aimX, cy: aimY,
+      }),
+    }, false)
+  }, { PEER, aimX, aimY })
+
+  // ------------------------------- 3½. the rounds are rounds, not a laser
+
+  // Ours lands first: the claims below are about a rig the page's own loop
+  // renders on its own, so a peer's chopper is the honest subject — no manual
+  // update() calls holding the trigger for it.
+  await page.evaluate(() => { window.__game.chopperUntil = 0 })
+  await page.evaluate(() => {
+    const g = window.__game
+    g.sfx = (name, opts) => {
+      window.__sfxLog = window.__sfxLog ?? []
+      window.__sfxLog.push({ name, at: opts?.at ?? null })
+    }
+  })
+  // A stranger flying and firing. Aimed at (200,1000) from (700,300): the
+  // reach clamp lands it around (409,707), well clear of our tank — what is
+  // being measured here is the picture and the sound, not the damage.
+  await theirGun(200, 1000)
+  const rigUp = await until(async () => page.evaluate((PEER) => {
+    const rig = window.__renderer.chopperRigAt(PEER)
+    if (!rig || !rig.tracers.visible) return null
+    return {
+      count: rig.tracers.count,
+      coneGone: !('beam' in rig),
+      flash: rig.flash.visible,
+    }
+  }, PEER))
+  check('a firing chopper shows tracer rounds, not the old cone',
+    !!rigUp && rigUp.count >= 6 && rigUp.coneGone, JSON.stringify(rigUp))
+  check('and a muzzle flash under the hull', rigUp?.flash === true, String(rigUp?.flash))
+
+  const tracerPos = () => page.evaluate((PEER) => {
+    const rig = window.__renderer.chopperRigAt(PEER)
+    if (!rig || !rig.tracers.visible) return null
+    const m = rig.tracers.instanceMatrix.array
+    // Local-space instance positions: elements 12..14 of each 4x4.
+    return [0, 1, 2].map((i) => ({
+      x: Math.round(m[i * 16 + 12]), y: Math.round(m[i * 16 + 13]), z: Math.round(m[i * 16 + 14]),
+    }))
+  }, PEER)
+  const before = await tracerPos()
+  const moved = await until(async () => {
+    const nowPos = await tracerPos()
+    if (!before || !nowPos) return null
+    const d = nowPos.map((p, i) =>
+      Math.hypot(p.x - before[i].x, p.y - before[i].y, p.z - before[i].z))
+    return Math.max(...d) > 15 ? { d } : null
+  })
+  check('and the rounds march between frames — a static chain is still a laser',
+    !!moved, JSON.stringify({ before, moved }))
+  check('while staying on the gun line, above the felt and below the gun',
+    !!before && before.every((p) => p.y <= 0 && p.y > -320), JSON.stringify(before))
+
+  // The rattle: the sound sink hears the gun at the machine-gun cadence while
+  // it fires, positioned at the chopper — and goes quiet the tick it stops.
+  await wait(900)
+  const heard = await page.evaluate(() =>
+    (window.__sfxLog ?? []).filter((e) => e.name === 'rattle'))
+  check('the gun rattles out of the sound sink while it fires',
+    heard.length >= 2, `${heard.length} rattles in 900ms`)
+  check('positioned at the chopper, so distance can fade it',
+    heard.length > 0 && heard.every((e) => e.at && Math.abs(e.at.x - 700) < 40 && Math.abs(e.at.y - 300) < 40),
+    JSON.stringify(heard[0]?.at))
+  // A tick with no `c`: the gun is down, and the room goes quiet.
+  await page.evaluate((PEER) => {
+    window.__game.onEvent({
+      id: 'a' + Math.random().toString(16).slice(2),
+      pubkey: PEER, kind: 21000, created_at: Math.floor(Date.now() / 1000), tags: [], sig: '0'.repeat(128),
+      content: JSON.stringify({
+        t: Date.now(), x: 700, y: 300, h: 0, g: 0, hp: 3, d: false,
+        ks: 0, ds: 0, r: window.__game.round,
+      }),
+    }, false)
+  }, PEER)
+  // The stop tick reaches the view through the interpolation tape, the same
+  // beat behind the wire as the tracers — so the claim is "quiet once the
+  // tape has drained", not "quiet the same millisecond the event lands".
+  await wait(600)
+  const quietFrom = await page.evaluate(() =>
+    (window.__sfxLog ?? []).filter((e) => e.name === 'rattle').length)
+  await wait(500)
+  const stillQuiet = await page.evaluate(() =>
+    (window.__sfxLog ?? []).filter((e) => e.name === 'rattle').length)
+  check('and goes quiet once the gun stops',
+    stillQuiet === quietFrom, `${stillQuiet - quietFrom} rattles after it stopped`)
+  if (process.env.TANK_SHOT) {
+    await theirGun(200, 1000)
+    await wait(400)
+    await page.screenshot({ path: process.env.TANK_SHOT })
+  }
+  await page.evaluate(() => { window.__game.sfx = () => {} })
 
   // ------------------------------------------- 4. somebody else's chopper hurts
 

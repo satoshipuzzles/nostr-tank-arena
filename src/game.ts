@@ -79,6 +79,7 @@ import {
   CHOPPER_DAMAGE,
   CHOPPER_HIT_MS,
   CHOPPER_MS,
+  CHOPPER_RATTLE_MS,
   chopperAim,
   stepChopper,
   underFire,
@@ -3376,6 +3377,32 @@ export class Game {
   /** When each victim may next be hit, keyed by chopper owner then victim. */
   private chopperHitAt = new Map<string, number>()
 
+  /** When each gun next rattles, keyed by chopper owner. Cosmetic — see below. */
+  private chopperRattleAt = new Map<string, number>()
+
+  /**
+   * The guns you can hear: one rattle per firing chopper per interval.
+   *
+   * Purely cosmetic and deliberately separate from `takeChopperFire` — that
+   * runs at the damage cadence and only for choppers that can hurt *us*, and a
+   * teammate's gun hammering the far corner should still be audible. Our own
+   * plays unpositioned (we are in it); everybody else's carries the chopper's
+   * position and fades with distance like any other peer sound.
+   */
+  private rattleChoppers(now: number): void {
+    if (this.flying && this.chopperAt) this.rattle(this.identity.sessionPubkey, now)
+    for (const peer of this.peers.values()) {
+      if (peer.view.chopperUntil <= now || !peer.view.chopperAt) continue
+      this.rattle(peer.session, now, { x: peer.view.x, y: peer.view.y })
+    }
+  }
+
+  private rattle(owner: string, now: number, at?: { x: number; y: number }): void {
+    if (now < (this.chopperRattleAt.get(owner) ?? 0)) return
+    this.chopperRattleAt.set(owner, now + CHOPPER_RATTLE_MS)
+    this.sound('rattle', at ? { at } : { gain: 0.75 })
+  }
+
   /** Are we flying? Read by the renderer, the HUD and the input router. */
   get flying(): boolean {
     return this.chopperUntil > performance.now()
@@ -3961,6 +3988,7 @@ export class Game {
     // And everybody else's juggernauts, for the same reason and in the same
     // place: continuous fire that lands before the shells do.
     this.takeSuitFire(now)
+    this.rattleChoppers(now)
     this.record(now)
     this.stepRewards(now)
     this.stepNuke(now)
