@@ -2680,9 +2680,55 @@ export class Game {
   /** Every live claim we know about, ours included, keyed by session. */
   private claims = new Map<string, Claim>()
 
-  /** Who is carrying which flag right now, as everybody else computes it too. */
+  /**
+   * The sides that actually have somebody on them, capped at `FLAG_TEAMS`.
+   *
+   * There are always four bases because `baseFor` is a pure function of the
+   * layout, which is what lets every client agree on where a flag stands
+   * without a word on the wire. But "four bases exist" is not "four sides are
+   * playing", and conflating the two is the bug this exists to close: with two
+   * players on sides one and two, flags three and four still stood at their
+   * corners, and `canTake` — which only asks "is this flag mine, and is anybody
+   * carrying it" — handed them over. The carrier then ran around holding a
+   * colour belonging to nobody in the room, and could walk it home for a free
+   * capture nobody was defending, which is not a capture-the-flag game.
+   *
+   * The renderer had this right and the rules did not. `syncFlags` has always
+   * built exactly this set to decide which poles to draw, so the two disagreed:
+   * the pole for an empty side was not drawn, and the flag on it was still
+   * takeable from a base the player could not see. That is why this is a method
+   * on `Game` rather than a second copy in the renderer — one definition, read
+   * by the rules and by the drawing, so they cannot drift apart again.
+   *
+   * Sides come off the same state ticks everything else reads, so a client that
+   * has not heard from somebody yet may briefly see a smaller room. That costs
+   * a refused pickup for a moment, which is the safe direction to be wrong in:
+   * the alternative is handing out a flag that the rest of the room does not
+   * believe exists.
+   */
+  sidesInPlay(): Set<number> {
+    const sides = new Set<number>()
+    if (this.team && this.team <= FLAG_TEAMS) sides.add(this.team)
+    for (const peer of this.peers.values()) {
+      if (peer.view.team && peer.view.team <= FLAG_TEAMS) sides.add(peer.view.team)
+    }
+    return sides
+  }
+
+  /**
+   * Who is carrying which flag right now, as everybody else computes it too.
+   *
+   * Filtered to the sides in play, so a claim on an empty side's flag is
+   * ignored rather than drawn. That covers the claim we might still be holding
+   * from before the side emptied out, and a claim from a client old enough to
+   * predate the rule — neither should put a colour on the board that belongs to
+   * nobody standing on it.
+   */
   flagCarriers(now = performance.now()): Map<number, string> {
-    return carriers(this.claims.values(), now)
+    const held = carriers(this.claims.values(), now)
+    const sides = this.sidesInPlay()
+    for (const flag of [...held.keys()]) if (!sides.has(flag)) held.delete(flag)
+    return held
   }
 
   /**
@@ -2747,7 +2793,15 @@ export class Game {
     }
 
     if (this.carrying) return
+    // Counted up rather than iterated off the set: `sidesInPlay` is insertion
+    // ordered and its order differs per client, and a fixed order here keeps
+    // the tie — two bases close enough to reach at once — resolved the same way
+    // everywhere. In practice the bases are far apart and only one can ever
+    // pass `canTake`, which is exactly why the order should not be the thing
+    // holding that up.
+    const sides = this.sidesInPlay()
     for (let flag = 1; flag <= FLAG_TEAMS; flag++) {
+      if (!sides.has(flag)) continue
       if (!canTake(this.team, flag, this.tank.x, this.tank.y, carried)) continue
       this.carrying = flag
       this.claims.set(this.identity.sessionPubkey, {

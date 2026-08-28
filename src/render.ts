@@ -40,7 +40,7 @@ import {
 import { CHOPPER_ALT, CHOPPER_SPREAD } from './chopper'
 import { SUIT_MUZZLE, SUIT_SPREAD } from './suit'
 import { SPITFIRE_ALT, SPITFIRE_SPREAD, spitfirePos } from './spitfire'
-import { FLAG_REACH, FLAG_TEAMS, baseFor } from './flags'
+import { FLAG_REACH, baseFor } from './flags'
 import { CAPTURE_S, POINT_RADIUS } from './domination'
 
 /**
@@ -4000,10 +4000,12 @@ export class Renderer {
       }
       return
     }
-    if (game.team && game.team <= FLAG_TEAMS) teams.add(game.team)
-    for (const peer of game.peers.values()) {
-      if (peer.view.team && peer.view.team <= FLAG_TEAMS) teams.add(peer.view.team)
-    }
+    // The rules' own answer, not a second copy of the question. These were two
+    // separate reckonings of "which sides are here" and they disagreed: this
+    // one skipped the pole for an empty side while `canTake` still handed out
+    // its flag, so the flag came off a base that was never drawn and wore a
+    // colour nobody in the room was playing. See `Game.sidesInPlay`.
+    for (const team of game.sidesInPlay()) teams.add(team)
 
     for (const [team, rig] of this.flagPoles) {
       if (teams.has(team)) continue
