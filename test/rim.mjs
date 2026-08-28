@@ -49,7 +49,10 @@ const {
 
 const drop = LAYOUTS.findIndex((l) => l.name === 'The Drop')
 check('The Drop is in the rotation', drop >= 0, `${LAYOUTS.length} boards`)
-check('fifteen boards', LAYOUTS.length === 15, `${LAYOUTS.length}`)
+// Not pinned to a count: boards keep landing, and a rotation that shrank is
+// the only thing this canary exists to catch. The rubble sweep learned the
+// same lesson about a hardcoded eight.
+check('the rotation did not shrink', LAYOUTS.length >= 15, `${LAYOUTS.length}`)
 check('it is the only edgeless board', LAYOUTS.filter((l) => l.edgeless).length === 1)
 
 setLayout(drop)
