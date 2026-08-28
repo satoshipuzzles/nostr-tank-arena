@@ -47,6 +47,15 @@ const check = (name, ok, detail = '') => {
   if (!ok) failures.push(name)
 }
 const wait = (ms) => new Promise((r) => setTimeout(r, ms))
+async function until(fn, ms = 8000) {
+  const deadline = Date.now() + ms
+  while (Date.now() < deadline) {
+    const v = await fn()
+    if (v) return v
+    await wait(80)
+  }
+  return null
+}
 
 const MATE = 'aa'.repeat(32)
 const FOE = 'bb'.repeat(32)
@@ -167,8 +176,18 @@ try {
   // Put a friend and a stranger in the room, both on record.
   await tick(MATE, 1, 700, 300)
   await tick(FOE, 2, 700, 900)
-  await wait(300)
-  const roster = await page.evaluate(() => {
+  // Polled, not slept. A tick's declared side reaches `view.team` through the
+  // interpolation step, which runs on the next frame — so a fixed 300ms was
+  // sitting exactly on the boundary, and on a busy box it read both sides as
+  // 0 and failed five checks in a row. Measured the same on main: the wait was
+  // always marginal, it simply had not tipped over yet.
+  const roster = await until(async () => {
+    const r = await page.evaluate(() => {
+      const g = window.__game
+      return [...g.peers.values()].map((p) => ({ k: p.session.slice(0, 2), team: p.view.team }))
+    })
+    return r.length === 2 && r.every((x) => x.team > 0) ? r : null
+  }, 8000) ?? await page.evaluate(() => {
     const g = window.__game
     return [...g.peers.values()].map((p) => ({ k: p.session.slice(0, 2), team: p.view.team }))
   })

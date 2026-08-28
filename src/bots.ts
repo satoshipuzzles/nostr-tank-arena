@@ -150,6 +150,17 @@ export interface Bot {
 
 let seq = 0
 
+/**
+ * A bot's name and colour, by index.
+ *
+ * Pure functions, and exported because the wire relies on it: the owner sends
+ * six numbers a tank and every other client derives the identity from the
+ * index rather than being told it ten times a second. `makeBot` reads them too,
+ * so there is one table and no way for the two sides to disagree.
+ */
+export const botNameFor = (index: number): string => NAMES[index % NAMES.length]
+export const botColorFor = (index: number): number => (35 + index * 97) % 360
+
 export function makeBot(index: number, now: number): Bot {
   seq++
   // Deterministic in shape, unique in value. The suffix is a counter rather
@@ -159,9 +170,9 @@ export function makeBot(index: number, now: number): Bot {
   const spot = SPAWNS[(index * 3 + 1) % Math.max(1, SPAWNS.length)] ?? { x: 400, y: 400 }
   return {
     session,
-    name: NAMES[index % NAMES.length],
+    name: botNameFor(index),
     // Spread around the wheel away from the usual player hues.
-    color: (35 + index * 97) % 360,
+    color: botColorFor(index),
     tank: {
       x: spot.x,
       y: spot.y,

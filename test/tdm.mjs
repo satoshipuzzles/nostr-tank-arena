@@ -142,7 +142,14 @@ try {
   // ------------------------------- 2. a side made only of practice tanks is not a side
 
   await page.evaluate(() => { window.__game.team = 1 })
-  await peer('b0' + '1'.repeat(54) + '0'.repeat(8), 2, 0, 0, true)
+  // A practice tank belonging to *this* client, which is the owner in a room
+  // of one. Bots have an owner now — one client steps them and everybody else
+  // renders them — and a tank whose id belongs to nobody in the room is pruned
+  // on the next frame, which is the cleanup working rather than a bug.
+  const botId = await page.evaluate(
+    () => 'b0' + window.__game.identity.sessionPubkey.slice(0, 52) + '000' + '0'.repeat(7),
+  )
+  await peer(botId, 2, 0, 0, true)
   const botOnly = await until(async () => {
     const s = await strip()
     return s.hidden === true ? s : null
