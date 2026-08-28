@@ -3357,6 +3357,17 @@ export class Renderer {
       this.camera.fov = cockpit ? COCKPIT_FOV : BOARD_FOV
       this.camera.near = cockpit ? 3 : 60
       this.camera.updateProjectionMatrix()
+      // The orientation has to come back too. `applyShake` copies the board
+      // camera's *position* home every frame but only re-aims it in cockpit —
+      // the overhead camera is aimed once and never again — so without this
+      // the camera returns to altitude still pointed where the replay left
+      // it, at the horizon over the killer's shoulder: sky, no board, until
+      // something shakes or the view is toggled. The cockpit rig needs
+      // nothing here; it is re-aimed per frame.
+      if (!cockpit) {
+        this.camera.position.copy(this.home)
+        this.camera.lookAt(this.target)
+      }
       for (const mesh of this.shells.values()) mesh.visible = true
     }
 
