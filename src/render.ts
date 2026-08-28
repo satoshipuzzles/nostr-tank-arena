@@ -24,6 +24,7 @@ import * as THREE from 'three'
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import {
+  arenaGround,
   ARENA_H,
   ARENA_W,
   DAMAGE_TIERS,
@@ -64,7 +65,7 @@ const MAX_SUITS = 3
 import type { CoverKind, Rect } from './arena'
 import { NUKE_FLASH_MS } from './game'
 import type { Game, Peer } from './game'
-import { LOB_APEX, LOB_BLAST, MAX_HP, RELOAD, TANK_RADIUS, shellHeight } from './sim'
+import { LOB_BLAST, MAX_HP, RELOAD, TANK_RADIUS, apexOf, shellHeight } from './sim'
 import { ICON_POLYS, PICKUPS, hasBuff } from './pickups'
 import type { PickupKind } from './pickups'
 import { Avatar } from './avatars'
@@ -209,7 +210,22 @@ function noise(seed: number): () => number {
  * as the material's bump map, so the sun actually catches the texture instead
  * of it being a flat picture of texture.
  */
-function feltTexture(): THREE.Texture {
+/**
+ * The pitch, and the default everywhere but the moon. These are the exact
+ * values this texture shipped with, moved into a record so a board can name a
+ * different set without either of them being a special case.
+ */
+const GRASS = { base: '#6f9455', shade: '#65894c', blade: '#c9d99a', dark: '#3f5c30' }
+
+/**
+ * The ground. Grass by default; whatever `LayoutSpec.ground` says otherwise.
+ *
+ * Parameterised rather than duplicated so the moon gets the same mow lines,
+ * the same grain strokes and the same worn patches — everything that stops a
+ * 256px tile reading as a tile — in a different set of colours. A second copy
+ * of this function would have drifted from the first by the second board.
+ */
+function feltTexture(pal = GRASS): THREE.Texture {
   const canvas = document.createElement('canvas')
   canvas.width = canvas.height = 256
   const ctx = canvas.getContext('2d')!
@@ -219,9 +235,9 @@ function feltTexture(): THREE.Texture {
   // mat, several steps more saturated than any lawn, and close enough in hue
   // to the green player tank that the two competed. Real turf is darker, much
   // less saturated, and slightly yellow.
-  ctx.fillStyle = '#6f9455'
+  ctx.fillStyle = pal.base
   ctx.fillRect(0, 0, 256, 256)
-  ctx.fillStyle = '#65894c'
+  ctx.fillStyle = pal.shade
   ctx.fillRect(0, 0, 128, 128)
   ctx.fillRect(128, 128, 128, 128)
 
@@ -246,7 +262,7 @@ function feltTexture(): THREE.Texture {
     const y = rnd() * 256
     // Highlight is a pale yellow-green rather than white: white blades on
     // green read as frost, and the sun on this board is warm.
-    ctx.strokeStyle = rnd() > 0.5 ? '#c9d99a' : '#3f5c30'
+    ctx.strokeStyle = rnd() > 0.5 ? pal.blade : pal.dark
     ctx.lineWidth = 1
     ctx.beginPath()
     ctx.moveTo(x, y)
@@ -1087,6 +1103,11 @@ function coverMaterials(): Record<CoverKind, THREE.MeshStandardMaterial> {
     // from the board camera's angle, and a river you read by glare alone is a
     // river half the board cannot see.
     water: new THREE.MeshStandardMaterial({ map: waterTexture(), color: 0x86aec4, roughness: 0.6, metalness: 0 }),
+    // A solar panel. Dark blue glass with real metalness and a low roughness,
+    // because this is the one thing on the board that is *supposed* to look
+    // like it reflects — the shell rule is invisible otherwise, and a player
+    // who cannot tell a panel from a hedge cannot plan a ricochet off it.
+    mirror: new THREE.MeshStandardMaterial({ color: 0x2f4f86, roughness: 0.14, metalness: 0.85 }),
     // The mesa's retaining wall: the same granite as the boulders, sunburnt.
     cliff: new THREE.MeshStandardMaterial({ map: stone, bumpMap: stone, bumpScale: 1.4, color: 0xa08d6d, roughness: 0.95 }),
   }
@@ -1374,6 +1395,34 @@ function cliffParts(r: Rect, rnd: () => number, bag: ReturnType<typeof partBag>)
   }
 }
 
+/**
+ * A row of solar panels: a raked glass face on a low frame, in segments.
+ *
+ * Raked rather than flat because a panel lying down is a blue rectangle on the
+ * felt, and the whole point is that it is a *wall* a shell comes off. The tilt
+ * is the read from the board camera, and the frame under it is what stops the
+ * silhouette being a floating pane.
+ */
+function mirrorParts(r: Rect, rnd: () => number, bag: ReturnType<typeof partBag>): void {
+  const { long, short } = longAxis(r)
+  const hgt = WALL_H * 0.78
+  const n = Math.max(1, Math.round(long / 96))
+  const seg = long / n
+  for (let i = 0; i < n; i++) {
+    const x = (i + 0.5) * seg - long / 2
+    // The glass. Tilted about its long edge, which on a rect this thin means
+    // it still fills the footprint a shell is tested against.
+    const glass = new THREE.BoxGeometry(seg * 0.94, hgt * 0.82, Math.max(6, short * 0.5))
+    glass.rotateX(0.34 + (rnd() - 0.5) * 0.05)
+    glass.translate(x, hgt * 0.62, 0)
+    bag.put(glass)
+    // The stand.
+    const post = new THREE.BoxGeometry(seg * 0.12, hgt * 0.5, Math.max(5, short * 0.35))
+    post.translate(x, hgt * 0.25, 0)
+    bag.put(post)
+  }
+}
+
 const SCENERY: Record<CoverKind, (r: Rect, rnd: () => number, bag: ReturnType<typeof partBag>) => void> = {
   rock: rockParts,
   crate: crateParts,
@@ -1387,6 +1436,7 @@ const SCENERY: Record<CoverKind, (r: Rect, rnd: () => number, bag: ReturnType<ty
   breach: fenceParts,
   water: waterParts,
   cliff: cliffParts,
+  mirror: mirrorParts,
 }
 
 /**
@@ -2775,7 +2825,7 @@ export class Renderer {
     base.receiveShadow = true
     this.board.add(base)
 
-    const turf = feltTexture()
+    const turf = feltTexture(arenaGround ?? undefined)
     const felt = new THREE.Mesh(
       new THREE.PlaneGeometry(ARENA_W, ARENA_H),
       // The same canvas as the bump map, so the grain is lit rather than
@@ -2788,18 +2838,23 @@ export class Renderer {
     this.board.add(felt)
 
     // Chalk sits between the felt and everything else that lies flat, so a
-    // pickup ring still draws over a touchline rather than fighting it.
-    const chalk = new THREE.Mesh(
-      new THREE.PlaneGeometry(ARENA_W, ARENA_H),
-      new THREE.MeshBasicMaterial({
-        map: chalkTexture(),
-        transparent: true,
-        depthWrite: false,
-      }),
-    )
-    chalk.rotation.x = -Math.PI / 2
-    chalk.position.set(ARENA_W / 2, GROUND_Y + DECAL_LIFT * 0.4, ARENA_H / 2)
-    this.board.add(chalk)
+    // pickup ring still draws over a touchline rather than fighting it. A
+    // board that has declared it is not a pitch does not get any: the
+    // markings are the most recognisable half of the grass, and a centre
+    // circle on the moon undoes the rest of the palette on its own.
+    if (arenaGround?.lines !== false) {
+      const chalk = new THREE.Mesh(
+        new THREE.PlaneGeometry(ARENA_W, ARENA_H),
+        new THREE.MeshBasicMaterial({
+          map: chalkTexture(),
+          transparent: true,
+          depthWrite: false,
+        }),
+      )
+      chalk.rotation.x = -Math.PI / 2
+      chalk.position.set(ARENA_W / 2, GROUND_Y + DECAL_LIFT * 0.4, ARENA_H / 2)
+      this.board.add(chalk)
+    }
 
     // Cover is what it is made of, and `arena.ts` says which. The board used to
     // decide here, by measuring a rect: near the middle meant the pink cross,
@@ -4342,7 +4397,10 @@ export class Renderer {
         // Keyed to height rather than to a constant, so the thing is largest at
         // the top of its arc, which is both when it is furthest from the camera
         // and when there is most time left to react to it.
-        mesh.scale.setScalar(1 + (height / LOB_APEX) * 1.3)
+        // Against this shell's own apex, not the constant: a Moon Base lob
+        // arcs to 300 and would otherwise reach twice the scale and read as a
+        // beach ball, and its shadow would go inside out on the way down.
+        mesh.scale.setScalar(1 + (height / apexOf(shell)) * 1.3)
         // One shadow, under whichever lob is highest. Two lobs at once is rare
         // enough that a second mesh is not worth the allocation, and the one in
         // the air is the one you need to walk away from.
@@ -4353,7 +4411,7 @@ export class Renderer {
         // is *where*, and it should be at its most precise the moment before it
         // matters. Read the height once, above — calling `shellHeight` a second
         // time here worked and invited the two to drift apart.
-        const drop = 1 - height / LOB_APEX
+        const drop = 1 - height / apexOf(shell)
         this.lobShadow.scale.setScalar(0.55 + drop * 0.85)
       }
     }

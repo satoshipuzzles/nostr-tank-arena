@@ -2,7 +2,16 @@
 // roughly 2.5x tank speed, so at 150-300ms of relay latency the correct play is
 // to lead your target. Latency becomes a skill instead of a stutter.
 
-import { ARENA_H, ARENA_W, WALLS, elevationAt, pointInShellWall, resolveCircle } from './arena'
+import {
+  ARENA_H,
+  ARENA_W,
+  WALLS,
+  arenaGravity,
+  elevationAt,
+  pointInShellWall,
+  reflects,
+  resolveCircle,
+} from './arena'
 
 export const TANK_RADIUS = 22
 export const MAX_HP = 3
@@ -35,6 +44,25 @@ export const SHELL_BOUNCES = 1
  */
 export const LOB_MIN = 150
 export const LOB_MAX = 620
+
+/**
+ * How far a lob goes for a given charge, on the board we are actually on.
+ *
+ * The one place gravity is read. Half gravity throws twice as far, which is
+ * Moon Base and nothing else — every other layout leaves `arenaGravity` at 1
+ * and this returns exactly what the two constants above always meant.
+ *
+ * It is also the *bound* the receiver clamps an incoming lob against, and that
+ * is the part worth being careful about: the range rides the wire, so if the
+ * shooter could charge to 1240 and the receiver clamped at 620, the crater
+ * would land in two different places and the victim — who is the one who
+ * applies the damage — would be applying the wrong one. Both sides derive the
+ * board from `blockHash % LAYOUTS.length`, so both sides derive the same
+ * bound, which is the same rule every other shared quantity in this game
+ * follows.
+ */
+export const lobRange = (charge: number): number =>
+  (LOB_MIN + (LOB_MAX - LOB_MIN) * Math.max(0, Math.min(1, charge))) / arenaGravity
 /** How long the key is held to go from minimum range to maximum. */
 export const LOB_CHARGE_MS = 900
 /** Travel speed along the ground. Slower than a shell: you can see it coming. */
@@ -196,8 +224,19 @@ export function spawnShell(
 export function shellHeight(s: Shell): number {
   if (s.lob <= 0) return 0
   const u = Math.max(0, Math.min(1, s.travel / s.lob))
-  return LOB_APEX * 4 * u * (1 - u)
+  return apexOf(s) * 4 * u * (1 - u)
 }
+
+/**
+ * How high this particular lob goes.
+ *
+ * Scaled by the shell's own range rather than by the board's gravity, and that
+ * is the point: the range rides the wire, so a client watching somebody else's
+ * mortar draws the arc the shooter actually threw without needing to agree
+ * about anything else. A shell within the ordinary maximum gets exactly
+ * `LOB_APEX`, so nothing outside Moon Base moves by a pixel.
+ */
+export const apexOf = (s: Shell): number => LOB_APEX * Math.max(1, s.lob / LOB_MAX)
 
 /** Is this shell high enough that walls and tanks are beneath it? */
 export function shellAirborne(s: Shell): boolean {
@@ -294,10 +333,16 @@ export function stepShell(s: Shell, dt: number): void {
       s.vx = -s.vx
       s.vy = -s.vy
     }
-    s.bounces++
-    if (s.bounces > s.maxBounces) {
-      s.dead = true
-      return
+    // A mirrored panel does not charge for the ricochet. Everything else does,
+    // and with a budget of one that is the difference between a shot that is
+    // spent on the first wall it finds and a shot that keeps hunting down a
+    // corridor of glass. See `reflects`.
+    if (!reflects(wall)) {
+      s.bounces++
+      if (s.bounces > s.maxBounces) {
+        s.dead = true
+        return
+      }
     }
     s.x += s.vx * step
     s.y += s.vy * step
