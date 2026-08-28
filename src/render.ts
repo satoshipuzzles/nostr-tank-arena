@@ -2962,7 +2962,21 @@ export class Renderer {
     this.camera.fov = COCKPIT_FOV
     this.camera.near = 3
     this.camera.updateProjectionMatrix()
-    this.camera.position.set(anchor.from.x - (dx / d) * 320, 210, anchor.from.y - (dz / d) * 320)
+    // Hold the ANGLE, not the altitude. 210 high was tuned point-blank —
+    // 29 degrees down over the 321 ground units to the subject — but the
+    // height was fixed while the baseline grows with the separation, so a
+    // long-range kill collapsed the depression to 6 degrees: at fov 76 a
+    // third of the frame sat above the horizon and the replay was a
+    // photograph of the weather. Same tangent at every range keeps the
+    // point-blank shot exactly as framed and puts a distant subject in the
+    // same part of the frame. (rainmaker.)
+    const back = 320
+    const drop = (210 - 30) / (back + 1)
+    this.camera.position.set(
+      anchor.from.x - (dx / d) * back,
+      30 + (back + d) * drop,
+      anchor.from.y - (dz / d) * back,
+    )
     this.camera.lookAt(anchor.to.x, 30, anchor.to.y)
     this.confetti.update(dt)
     this.renderer.render(this.scene, this.camera)

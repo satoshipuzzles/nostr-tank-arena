@@ -2289,7 +2289,10 @@ export class Game {
         // them — which is the tell that this was an omission rather than a
         // balance decision.
         this.strikeBots(x, y, strike.damage, strike.owner)
-        if (mine || this.watching || this.tank.dead) continue
+        // `this.flying` for the same reason as the shell in `collide`: the
+        // other four damage paths already had it, and a bomb landing on the
+        // parked hull of a pilot mid-flight stranded a corpse in the air.
+        if (mine || this.watching || this.tank.dead || this.flying) continue
         // A teammate's strike walks over us. The lane is picked away from the
         // caller already; on a team that exemption has to cover the side, or a
         // reward earned by one player is a punishment for their partner.
@@ -3686,6 +3689,11 @@ export class Game {
     if (
       shell.owner !== this.identity.sessionPubkey &&
       !this.tank.dead &&
+      // Four damage paths had this guard; the shell did not. A pilot's tank is
+      // out of play — publishState even sends the gunship's position instead —
+      // so a shell "hitting" the parked hull was damage from a board state no
+      // other client shared. (rainmaker, the stuck-pilot diagnosis.)
+      !this.flying &&
       shellHits(shell, this.tank.x, this.tank.y)
     ) {
       this.shells.delete(shell.id)
@@ -3888,6 +3896,16 @@ export class Game {
     this.suitUntil = 0
     this.suitAt = null
     this.suitHitAt.clear()
+    // The gunship comes down with you. `update` dispatches on `chopperUntil`
+    // before `dead`, so a death that left the clock running would take the
+    // flying branch every frame and never read `respawnAt` — dead, in the
+    // air, staring at the kill cam until the ten seconds ran out. The guards
+    // above make this unreachable from shells and bombs; clearing it here
+    // makes it unreachable from any damage path anyone adds later.
+    // (rainmaker.) Cleared directly rather than via `landChopper`, which
+    // respawns — this tank is dead and owes the respawn clock first.
+    this.chopperUntil = 0
+    this.chopperAt = null
     // Last round's EMP does not darken this round's first seconds.
     this.empUntil = 0
     this.tank.respawnAt = performance.now() + RESPAWN_DELAY * 1000 * this.modifier.respawn
@@ -3967,7 +3985,15 @@ export class Game {
   private respawn(): void {
     this.endKillcam()
     const live = [...this.peers.values()].filter((p) => !p.view.dead)
-    let best = SPAWNS[0]
+    // Ties break at RANDOM, and the tie is the common case, not the corner:
+    // with nobody live to avoid — every trade, and every moment a peer's
+    // ticks are missing — all eight spawns score Infinity, `Infinity >
+    // Infinity` is false, and SPAWNS[0] won unconditionally. Two clients run
+    // this independently, so both halves of a trade respawned on the same
+    // pad, on top of each other, and traded again. Random rather than any
+    // rule that is a pure function of the layout, because a shared rule
+    // sends both to the same corner again. (rainmaker.)
+    let best: (typeof SPAWNS)[number][] = [SPAWNS[0]]
     let bestScore = -Infinity
     for (const s of SPAWNS) {
       let score = Infinity
@@ -3978,11 +4004,14 @@ export class Game {
       }
       if (score > bestScore) {
         bestScore = score
-        best = s
+        best = [s]
+      } else if (score === bestScore) {
+        best.push(s)
       }
     }
-    this.tank.x = best.x
-    this.tank.y = best.y
+    const pad = best[Math.floor(Math.random() * best.length)]
+    this.tank.x = pad.x
+    this.tank.y = pad.y
     this.tank.hp = this.maxHp
     this.tank.dead = false
     // Full magazine and no reload in progress. Respawning into the two seconds
@@ -3992,7 +4021,7 @@ export class Game {
     this.tank.reloadingUntil = 0
     this.tank.reloadAt = 0
     this.sound('respawn')
-    this.tank.hull = Math.atan2(ARENA_H / 2 - best.y, ARENA_W / 2 - best.x)
+    this.tank.hull = Math.atan2(ARENA_H / 2 - pad.y, ARENA_W / 2 - pad.x)
     this.tank.gun = this.tank.hull
   }
 
