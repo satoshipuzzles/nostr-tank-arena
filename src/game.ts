@@ -59,6 +59,7 @@ import { BOT_COUNT, MAX_BOTS, killBot, makeBot, stepBot } from './bots'
 import { FLAG_TEAMS, canScore, canTake, carriers } from './flags'
 import { freshState, holderOn, points, stepPoint } from './domination'
 import type { Occupant, Point, PointState } from './domination'
+import type { RoomMode } from './rooms'
 import type { Claim } from './flags'
 import {
   WALLS,
@@ -745,6 +746,8 @@ export interface RoundResult {
   layout: string
   /** The rules that round played under, banked before the next block changes them. */
   modifier: string
+  /** The mode this round was played under. See `Game.roundMode`. */
+  mode: RoomMode
   standings: Standing[]
   /**
    * Longest streak of the round, banked here because `endRound` resets it.
@@ -4274,11 +4277,26 @@ export class Game {
     }
   }
 
+  /**
+   * The mode this round is being played under, read off the same lobby flags
+   * that decide teams and flags — see `flagsOn` and `pointsOn`. One place for
+   * this so the leaderboard, the podium and the manual publish button agree
+   * with each other and with the room card by construction rather than by
+   * three copies of the same ternary staying in sync.
+   */
+  roundMode(): RoomMode {
+    if (this.flagsOn) return 'ctf'
+    if (this.pointsOn) return 'dom'
+    if (this.team) return 'tdm'
+    return 'dm'
+  }
+
   endRound(height: number, layoutName: string): RoundResult {
     const result: RoundResult = {
       height: this.round || height - 1,
       layout: layoutName,
       modifier: this.modifier.name,
+      mode: this.roundMode(),
       standings: this.scoreboard(),
       bestStreak: this.bestStreak,
       endedAt: Date.now(),

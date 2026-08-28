@@ -454,6 +454,7 @@ function autoPublishRound(result: import('./game').RoundResult): void {
     // streak of zero for every round it has ever published. Broken on purpose
     // to check: test/autopublish.mjs goes red on exactly this line.
     result.bestStreak,
+    result.mode,
   ).catch(() => {})
 }
 
@@ -3674,6 +3675,7 @@ function showPodium(result: import('./game').RoundResult): void {
         // then resets the counter, and `showPodium` runs after it — so this
         // published a streak of 0 for every round it has ever signed.
         result.bestStreak,
+        result.mode,
       )
       publish.textContent = 'Published'
     } catch {
@@ -3760,6 +3762,7 @@ $('publish-score').addEventListener('click', async () => {
       running.clock.tip?.height,
       layoutName,
       game.bestStreak,
+      game.roundMode(),
     )
     btn.textContent = 'Published'
   } catch {
@@ -3848,6 +3851,15 @@ let boardCache:
   | { scope: 'wall'; wall: BlockWall }
   | { scope: 'block' | 'all'; scores: ScoreRow[]; height?: number }
   | null = null
+
+/**
+ * Which mode the table tabs (`block`, `all`) are filtered to, or `null` for
+ * every mode mixed together. Only those two tabs read it — the wall and the
+ * season chain rank blocks as a whole, not by mode, same scope cut the
+ * per-mode leaderboard shipped with.
+ */
+let boardMode: RoomMode | null = null
+let boardScope: 'block' | 'all' | 'wall' | 'seasons' = 'wall'
 
 function paintBoard(): void {
   const rows = $('board-rows')
@@ -4064,10 +4076,12 @@ $('board-rows').addEventListener('click', (e) => {
 
 async function loadBoard(scope: 'block' | 'all' | 'wall' | 'seasons'): Promise<void> {
   const rows = $('board-rows')
+  boardScope = scope
   $('board-tab-seasons').classList.toggle('on', scope === 'seasons')
   $('board-tab-wall').classList.toggle('on', scope === 'wall')
   $('board-tab-block').classList.toggle('on', scope === 'block')
   $('board-tab-all').classList.toggle('on', scope === 'all')
+  $('board-mode-tabs').hidden = scope !== 'block' && scope !== 'all'
   rows.textContent = 'loading…'
   boardCache = null
   if (!running) return
@@ -4104,8 +4118,8 @@ async function loadBoard(scope: 'block' | 'all' | 'wall' | 'seasons'): Promise<v
   try {
     const scores =
       scope === 'block'
-        ? await fetchBlockScores(running.players[0].game.net, height!)
-        : await fetchScores(running.players[0].game.net)
+        ? await fetchBlockScores(running.players[0].game.net, height!, 25, boardMode ?? undefined)
+        : await fetchScores(running.players[0].game.net, 25, boardMode ?? undefined)
     // A signed score is only worth reading if you can tell whose it is. The
     // profile fetch is fire-and-forget: rows render with the npub immediately
     // and upgrade themselves to a face and a NIP-05 when the events land.
@@ -4125,6 +4139,14 @@ $('board-tab-wall').addEventListener('click', () => void loadBoard('wall'))
 $('board-tab-seasons').addEventListener('click', () => void loadBoard('seasons'))
 $('board-tab-block').addEventListener('click', () => void loadBoard('block'))
 $('board-tab-all').addEventListener('click', () => void loadBoard('all'))
+
+$('board-mode-tabs').addEventListener('click', (e) => {
+  const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-mode]')
+  if (!btn) return
+  boardMode = asRoomMode(btn.dataset.mode) ?? null
+  for (const b of $('board-mode-tabs').querySelectorAll('button')) b.classList.toggle('on', b === btn)
+  if (boardScope === 'block' || boardScope === 'all') void loadBoard(boardScope)
+})
 
 $('board-close').addEventListener('click', () => {
   board.hidden = true

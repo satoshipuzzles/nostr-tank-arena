@@ -8,6 +8,7 @@ import type { Identity, Net } from './nostr'
 import type { Career } from './cards'
 import { noCareer } from './cards'
 import { KIND_SCORE, SCORE_D_TAG, blockScoreTag, blockTag, parsePayload } from './protocol'
+import { asRoomMode, type RoomMode } from './rooms'
 
 export interface ScorePayload {
   kills: number
@@ -20,6 +21,10 @@ export interface ScorePayload {
   layout?: string
   /** Best kill streak in the round. */
   streak?: number
+  /** The mode this round was played under. Absent on records signed before
+   *  modes existed, and on those the honest read is deathmatch — it was the
+   *  only mode there was. */
+  mode?: RoomMode
 }
 
 export interface ScoreRow {
@@ -36,6 +41,9 @@ export interface ScoreRow {
   layout?: string
   /** The room it was played in. */
   room?: string
+  /** The mode this round was played under. A record with no mode tag predates
+   *  modes and is read as `'dm'` — see `ScorePayload.mode`. */
+  mode: RoomMode
 }
 
 /**
@@ -59,6 +67,7 @@ export async function publishScore(
   block?: number,
   layout?: string,
   streak?: number,
+  mode?: RoomMode,
 ): Promise<void> {
   const payload: ScorePayload = {
     kills,
@@ -68,6 +77,7 @@ export async function publishScore(
     ...(block ? { block } : {}),
     ...(layout ? { layout } : {}),
     ...(streak ? { streak } : {}),
+    ...(mode ? { mode } : {}),
   }
   const tags = block
     ? [
@@ -89,16 +99,21 @@ export async function publishScore(
 }
 
 /** Everyone's result for one block, newest signature per player. */
-export async function fetchBlockScores(net: Net, height: number, limit = 25): Promise<ScoreRow[]> {
+export async function fetchBlockScores(
+  net: Net,
+  height: number,
+  limit = 25,
+  mode?: RoomMode,
+): Promise<ScoreRow[]> {
   const events: Event[] = await net.list({
     kinds: [KIND_SCORE],
     '#t': [blockTag(height)],
     limit: 200,
   })
-  return rank(events, limit)
+  return rank(events, limit, 'latest', mode)
 }
 
-export async function fetchScores(net: Net, limit = 25): Promise<ScoreRow[]> {
+export async function fetchScores(net: Net, limit = 25, mode?: RoomMode): Promise<ScoreRow[]> {
   // Both shapes: the all-time slot older clients wrote, and every per-block
   // record. A player's best round is what they are ranked on.
   const events: Event[] = await net.list({
@@ -111,7 +126,7 @@ export async function fetchScores(net: Net, limit = 25): Promise<ScoreRow[]> {
     '#d': [SCORE_D_TAG],
     limit: 200,
   })
-  return rank([...events, ...legacy], limit, 'best')
+  return rank([...events, ...legacy], limit, 'best', mode)
 }
 
 /**
@@ -130,27 +145,43 @@ function rowOf(e: Event, p: ScorePayload): ScoreRow {
     streak: typeof p.streak === 'number' ? Math.max(0, Math.floor(p.streak)) : undefined,
     layout: typeof p.layout === 'string' ? p.layout.slice(0, 32) : undefined,
     room: typeof p.room === 'string' ? p.room.slice(0, 32) : undefined,
+    // Deathmatch is the absent value here too, same as the room beacon in
+    // rooms.ts — a record signed before modes existed was playing the only
+    // mode there was.
+    mode: asRoomMode(p.mode) ?? 'dm',
   }
 }
 
 /**
  * Turn signed records into a table.
  *
- * `mode` decides what to do when one pubkey appears more than once: the
+ * `strategy` decides what to do when one pubkey appears more than once: the
  * per-block board keeps their latest signature for that block, and the all-time
  * board keeps their best round. Neither is a defence against anything — every
  * number here was chosen by the player who signed it, which the UI says out
  * loud.
+ *
+ * `filterMode`, when given, keeps only records for that mode — and applies
+ * *before* the per-pubkey dedup, not after. A player's best deathmatch round
+ * and their best team-deathmatch round are two different numbers; picking
+ * their single best row across every mode and then filtering it out would
+ * silently drop them from a leaderboard they actually have a result on.
  */
-function rank(events: Event[], limit: number, mode: 'latest' | 'best' = 'latest'): ScoreRow[] {
+function rank(
+  events: Event[],
+  limit: number,
+  strategy: 'latest' | 'best' = 'latest',
+  filterMode?: RoomMode,
+): ScoreRow[] {
   const best = new Map<string, ScoreRow>()
   for (const e of events) {
     const p = parsePayload<ScorePayload>(e.content)
     if (!p || typeof p.kills !== 'number' || typeof p.deaths !== 'number') continue
+    if (filterMode && (asRoomMode(p.mode) ?? 'dm') !== filterMode) continue
     const row = rowOf(e, p)
     const existing = best.get(e.pubkey)
     if (existing) {
-      const better = mode === 'best' ? row.kills > existing.kills : row.at > existing.at
+      const better = strategy === 'best' ? row.kills > existing.kills : row.at > existing.at
       if (!better) continue
     }
     best.set(e.pubkey, row)
