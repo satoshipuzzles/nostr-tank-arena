@@ -61,6 +61,10 @@ async function freshPage(w = 1280, h = 900) {
   await page.goto(SITE, { waitUntil: 'domcontentloaded', timeout: 30_000 })
   await page.evaluate(() => localStorage.clear())
   await page.reload({ waitUntil: 'domcontentloaded' })
+  // The garage ships folded shut. Half of this suite is about what is inside
+  // it — the skin axes, the preview — and a click cannot land on a button
+  // inside a closed `details`.
+  await page.evaluate(() => { document.getElementById('garage-fold').open = true })
   return page
 }
 

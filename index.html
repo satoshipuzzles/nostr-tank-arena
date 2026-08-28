@@ -264,6 +264,36 @@
           </div>
         </div>
 
+        <div class="row">
+          <button id="play-nip07">Play with my npub</button>
+          <button id="play-guest" class="ghost">Play as guest</button>
+          <button id="lobby-settings" class="ghost" type="button">Settings</button>
+        </div>
+        <p class="fine" id="lobby-note">
+          Guest play generates a throwaway key in this tab. Nothing to install, nothing saved.
+        </p>
+        <p class="error" id="lobby-error" hidden></p>
+
+        <!-- Open tables. A room in this game is just a name two people agreed
+             on, which is wonderfully simple and completely undiscoverable —
+             this is the notice board that fixes that. -->
+        <div class="live">
+          <div class="live-head">
+            <span class="live-title">Live games</span>
+            <button id="live-refresh" class="ghost tiny" type="button">Refresh</button>
+          </div>
+          <div id="live-rows" class="live-rows">looking for open tables…</div>
+        </div>
+
+        <!-- The garage and the loadout, folded. Both are preferences a device
+             remembers — you repaint the tank once a week, you pick a room
+             every visit — and open they had grown to two thousand pixels that
+             pushed the Play buttons three screens down. Closed `details`
+             rather than a second screen: one tap opens them in place, the
+             Settings links still land on them, and nothing inside is
+             duplicated or moved out of the card. -->
+        <details class="fold" id="loadout-fold">
+          <summary>Streaks — what your kills buy</summary>
         <!-- The streak loadout. Repair at 3 is the one house rule; the four
              tiers above it are yours, and each has its own pool of five that
              gets bigger as you climb. Rows are built from `rewardsForTier` and
@@ -271,7 +301,6 @@
              `onOwnKill` awards from cannot drift apart — same reason the skin
              picker is built from `SKINS`. -->
         <div class="loadout" id="loadout">
-          <span class="seg-label">Streaks</span>
           <div class="loadout-rows" id="loadout-rows"></div>
           <p class="fine">
             Hull repair at 3 is on the house. Every tier above it has its own
@@ -279,7 +308,10 @@
             Saved on this device.
           </p>
         </div>
+        </details>
 
+        <details class="fold" id="garage-fold">
+          <summary>Garage — skin, stickers, calling card</summary>
         <!-- The garage. Skins are cosmetic only: the finish changes, the
              player's colour never does. Filled from `SKINS` in src/skins.ts so
              the markup and the renderer cannot drift apart — and the preview
@@ -354,6 +386,7 @@
             </div>
           </div>
         </div>
+        </details>
 
         <div class="seg-row" id="row-steering">
           <span class="seg-label">Steering</span>
@@ -370,27 +403,6 @@
             <button type="button" data-value="off">Off</button>
           </div>
         </div>
-
-        <div class="row">
-          <button id="play-nip07">Play with my npub</button>
-          <button id="play-guest" class="ghost">Play as guest</button>
-          <button id="lobby-settings" class="ghost" type="button">Settings</button>
-        </div>
-
-        <!-- Open tables. A room in this game is just a name two people agreed
-             on, which is wonderfully simple and completely undiscoverable —
-             this is the notice board that fixes that. -->
-        <div class="live">
-          <div class="live-head">
-            <span class="live-title">Live games</span>
-            <button id="live-refresh" class="ghost tiny" type="button">Refresh</button>
-          </div>
-          <div id="live-rows" class="live-rows">looking for open tables…</div>
-        </div>
-        <p class="fine" id="lobby-note">
-          Guest play generates a throwaway key in this tab. Nothing to install, nothing saved.
-        </p>
-        <p class="error" id="lobby-error" hidden></p>
 
       </div>
     </div>

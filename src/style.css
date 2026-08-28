@@ -1305,13 +1305,21 @@ body.emp #hud::before {
 }
 /* Create-a-game: everything that shapes a room, as one declared act. Open by
    default — the first player in a room is setting rules for everyone after. */
-.create-game {
+.create-game,
+.fold {
   margin: 0 0 14px;
   padding: 12px 14px;
   border: 1px solid var(--line);
   border-radius: 12px;
 }
 .create-game > summary { font-size: 13px; margin-bottom: 12px; }
+/* The folded sections — the garage and the streak loadout. Same clothes as
+   Create a game, but closed: they are remembered preferences, not the round
+   you are about to start, and open they cost two thousand pixels. The summary
+   only pays for the inner margin once it is holding something. */
+.fold { margin-top: 14px; }
+.fold > summary { font-size: 13px; }
+.fold[open] > summary { margin-bottom: 12px; }
 .create-game .modes { margin-bottom: 12px; }
 /* The board picker, dressed like the skin rack: same catalog-outgrew-buttons
    shape, same clothes. */
@@ -1491,14 +1499,13 @@ body.emp #hud::before {
  * rest is spacing.
  */
 /*
- * The lobby on a desk: the card was fixed at `min(520px, 100%)` no matter how
- * wide the window got, so every row inside stacked into one column and the
- * card ran tall enough to fall off the bottom of the very screen with room to
- * spare — 1052px of card in a 900px-tall window, hemmed by empty black on
- * both sides. Past 860px there is width to spend, so the card grows and the
- * three rows that were costing the most height (fields+bots+players next to
- * the garage, and steering next to sound) run side by side instead of
- * top-to-bottom. `grid-template-areas` rather than reordering the markup: the
+ * The lobby on a desk. The first pass at this grid put the garage in a half
+ * column beside the fields — and then the garage grew custom art, stickers, a
+ * profile and calling cards, until it ran 1949px down one column with a
+ * matching hole in the other and the Play buttons three screens below the
+ * fold. The garage and the loadout are folded now, so the grid's whole job is
+ * pairing the short rows: name fields beside the player count, steering
+ * beside sound. `grid-template-areas` rather than reordering the markup: the
  * DOM order stays the natural tab order, only the visual position moves.
  */
 @media (min-width: 860px) {
@@ -1512,22 +1519,21 @@ body.emp #hud::before {
       "brand    brand"
       "tag      tag"
       "create   create"
-      "fields   garage"
-      "players  garage"
-      "loadout  loadout"
-      "steering sound"
+      "fields   players"
       "row      row"
-      "live     live"
       "note     note"
       "error    error"
-      "advanced advanced";
+      "live     live"
+      "loadout  loadout"
+      "garage   garage"
+      "steering sound";
   }
   .lobby-card > .brand { grid-area: brand; }
   .lobby-card > .tag { grid-area: tag; }
   .lobby-card > #create { grid-area: create; }
   .lobby-card > .fields { grid-area: fields; }
   .lobby-card > #row-players { grid-area: players; }
-  .lobby-card > #loadout { grid-area: loadout; }
+  .lobby-card > #loadout-fold { grid-area: loadout; }
   /*
    * Eight buttons is one too many for `.seg`'s flex-wrap to split evenly once
    * this row is squeezed into a half-width column: seven fit on the first
@@ -1535,14 +1541,13 @@ body.emp #hud::before {
    * fixed 4-column grid keeps two even rows of four instead.
    */
   #row-bots .seg { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
-  .lobby-card > .garage { grid-area: garage; }
+  .lobby-card > #garage-fold { grid-area: garage; }
   .lobby-card > #row-steering { grid-area: steering; }
   .lobby-card > #row-sound { grid-area: sound; }
   .lobby-card > .row { grid-area: row; }
   .lobby-card > .live { grid-area: live; }
   .lobby-card > #lobby-note { grid-area: note; }
   .lobby-card > #lobby-error { grid-area: error; }
-  .lobby-card > .advanced { grid-area: advanced; }
 }
 
 @media (max-height: 460px) and (orientation: landscape) {
@@ -1561,7 +1566,10 @@ body.emp #hud::before {
   .seg button { padding: 5px 8px; font-size: 12px; }
   .row { margin-top: 12px; }
   .row button { padding: 8px 14px; }
-  #lobby-note, .advanced { display: none; }
+  /* Just the note: `.advanced` used to be the lobby's relay disclosure, but
+     it lives on the settings screen now, and hiding it here would take the
+     relay editor away from exactly the phone that needs to reach it. */
+  #lobby-note { display: none; }
 }
 
 /* -------------------------------------------------------------- ammo */
