@@ -3704,26 +3704,32 @@ export class Renderer {
       // between "stand back" and "the lane is open", and a crate that broke in
       // a fireball would say the wrong one.
       const fire = blast.fire
+      // A coolant tower reaches over twice as far as a pair of drums, so it
+      // has to *look* like it: the fireball spreads and the sparks throw with
+      // the radius the physics used. The count grows more slowly than the area
+      // on purpose — a 2.4x blast at 2.4x the particles is a screenful of
+      // orange with the board somewhere behind it.
+      const size = blast.scale ?? 1
       this.confetti.burst(
         blast.x,
         blast.y,
-        blast.loud ? (fire ? 26 : 20) : 10,
-        fire ? 28 : 32,
+        Math.round((blast.loud ? (fire ? 26 : 20) : 10) * (1 + (size - 1) * 0.7)),
+        Math.round((fire ? 28 : 32) * size),
         fire
-          ? { speed: 150, up: 220, y: 26, size: 1.1, life: 0.75 }
+          ? { speed: 150 * size, up: 220, y: 26, size: 1.1, life: 0.75 }
           : { speed: 190, up: 90, y: 18, size: 0.95, life: 0.6 },
       )
       if (fire) {
-        for (let i = 0; i < (blast.loud ? 14 : 6); i++) {
+        for (let i = 0; i < Math.round((blast.loud ? 14 : 6) * size); i++) {
           this.plumes.puff(
-            blast.x + (Math.random() - 0.5) * 46,
+            blast.x + (Math.random() - 0.5) * 46 * size,
             20 + Math.random() * 60,
-            blast.y + (Math.random() - 0.5) * 46,
+            blast.y + (Math.random() - 0.5) * 46 * size,
             i < 6,
           )
         }
       }
-      if (blast.loud) this.shake = Math.max(this.shake, fire ? 14 : 7)
+      if (blast.loud) this.shake = Math.max(this.shake, (fire ? 14 : 7) * Math.min(size, 1.6))
     }
   }
 

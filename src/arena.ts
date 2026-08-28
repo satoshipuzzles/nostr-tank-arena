@@ -281,6 +281,33 @@ export const fullHpOf = (r: Rect): number =>
 export const explodes = (r: Rect): boolean => r.kind === 'barrel'
 
 /**
+ * A single drum, as a footprint. Every barrel on every board before The
+ * Reactor was within ten units of this square.
+ */
+const BLAST_UNIT = 110
+
+/** As far as one blast is allowed to reach, in units of a lob's radius. */
+const MAX_BLAST = 2.4
+
+/**
+ * How far this rect's explosion reaches, as a multiple of a lob's blast.
+ *
+ * A barrel rect is not one drum — the renderer fills it with a grid of them,
+ * so a 240-unit square is a tank farm and a 110-unit square is a pair. The
+ * blast scales with the footprint because the alternative is a coolant tower
+ * that looks like it would take the yard with it and then kills whoever is
+ * standing on top of it and nobody else. What you can see is the rule.
+ *
+ * The **short** side, not the long one and not the area: a 300x48 line of
+ * drums is one drum deep however far it runs, and scaling that up would make a
+ * thin decorative row the most dangerous thing on the board. And it is clamped
+ * *below* at one, so every barrel shipped before this change keeps exactly the
+ * radius it had — nothing on the ten existing boards moves.
+ */
+export const blastScaleOf = (r: Rect): number =>
+  explodes(r) ? Math.min(MAX_BLAST, Math.max(1, Math.min(r.w, r.h) / BLAST_UNIT)) : 1
+
+/**
  * Every destructible rect on the current board, in `WALLS` order.
  *
  * The bitmask on the state tick indexes into this, so its length is the number
@@ -461,7 +488,7 @@ const corners = (w: number, h: number): Pt[] => [
 ]
 
 /**
- * Ten boards, and the size range is as much of the variety as the shapes are.
+ * Twelve boards, and the size range is as much of the variety as the shapes are.
  *
  * 1500x1100 is a knife fight with four players in it; 2100x1550 gives you
  * somewhere to go and three seconds to watch somebody come and get you. Every
@@ -749,6 +776,77 @@ export const LAYOUTS: LayoutSpec[] = [
     ],
     mesas: (w, h) => [{ x: w / 2 - 280, y: h / 2 - 180, w: 560, h: 360 }],
     ramps: (_w, h) => [{ x: 550, y: h / 2 - 60, w: 120, h: 120, dir: 'e' }],
+  },
+  {
+    name: 'The Warehouse',
+    w: 1500,
+    h: 1100,
+    // The smallest board in the rotation, and the only one with no long shot in
+    // it. Four rows of racking run east to west and none of them line up, so
+    // every sightline is one aisle deep and about a second and a half wide: you
+    // come round the end of a shelf and somebody is already there.
+    //
+    // The rule this board is built on is that **driving in a straight line gets
+    // you killed** — the aisles are 130 units of clearance for a 22-unit hull,
+    // which is room to drive and no room at all to dodge. The lob (`Q`) is the
+    // answer, because it is the one shot that does not need the lane, and the
+    // racking is crates, so the other answer is to spend two magazines and make
+    // your own door.
+    //
+    // Everything is authored in the top half so the 180-degree mirror fills the
+    // bottom, which is also what guarantees no rect can overlap its own mirror
+    // on a board this tight.
+    cover: () => [
+      { x: 300, y: 250, w: 560, h: 46, kind: 'crate' },
+      { x: 980, y: 250, w: 300, h: 46, kind: 'crate' },
+      { x: 300, y: 430, w: 300, h: 46, kind: 'crate' },
+      { x: 720, y: 430, w: 560, h: 46, kind: 'crate' },
+      // Two concrete pillars, which are the only things on the board that do
+      // not come down. Without them a patient room can flatten the whole
+      // warehouse and the last two minutes are played on a car park.
+      { x: 620, y: 120, w: 60, h: 60, kind: 'rock' },
+      { x: 1130, y: 150, w: 60, h: 60, kind: 'rock' },
+    ],
+    spawns: corners,
+    pads: () => [
+      // In the aisle, which on this board means in the open.
+      { x: 750, y: 370 },
+      { x: 200, y: 350 },
+      { x: 1100, y: 560 },
+    ],
+  },
+  {
+    name: 'The Reactor',
+    w: 1800,
+    h: 1300,
+    // Puzz asked for a nuclear plant, and the thing that makes it one is not
+    // the paint: it is the coolant tower in the middle of each half. A barrel
+    // rect is drawn as a grid of drums, so a 240-unit square is a tank farm
+    // rather than a drum — and `blastScaleOf` gives it a blast to match, a bit
+    // over twice a lob's radius. Three shells, and a quarter of your half of
+    // the board goes up with whoever was using it for cover.
+    //
+    // That is the whole board: the strongest cover on it is also the worst
+    // place to stand, and everybody can see which is which. The turbine wall
+    // and the service block are the safe cover, and they are deliberately the
+    // long way round.
+    cover: () => [
+      { x: 560, y: 210, w: 260, h: 260, kind: 'barrel' },
+      // A pair of ordinary drums out on the flank: the control that makes the
+      // tower legible. Same colour, a fifth of the footprint, and exactly the
+      // blast every barrel on every other board has — 110 is the baseline
+      // `blastScaleOf` is measured against, so this one is the reference.
+      { x: 260, y: 480, w: 110, h: 110, kind: 'barrel' },
+      { x: 1150, y: 300, w: 48, h: 300, kind: 'rock' },
+      { x: 1250, y: 160, w: 300, h: 48, kind: 'crate' },
+      { x: 400, y: 220, w: 200, h: 48, kind: 'sandbag' },
+    ],
+    spawns: corners,
+    pads: () => [
+      { x: 900, y: 560 },
+      { x: 300, y: 300 },
+      { x: 1350, y: 620 },
+    ],
   },
 ]
 

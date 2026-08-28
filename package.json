@@ -62,7 +62,9 @@
     "test:covermask": "node test/covermask.mjs",
     "test:stickers": "node test/stickers.mjs",
     "test:killfeed": "node test/killfeed.mjs",
-    "test:botauthority": "node test/botauthority.mjs"
+    "test:botauthority": "node test/botauthority.mjs",
+    "test:boardshape": "node test/boardshape.mjs",
+    "test:tower": "node test/tower.mjs"
   },
   "dependencies": {
     "nostr-tools": "^2.10.4",

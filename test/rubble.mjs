@@ -527,14 +527,19 @@ try {
   // tipping a 120-unit chunk lifts its corner three times the height it was
   // built at, and which boards have long crates is a property of the layouts.
   //
-  // So: walk all eight. This is the check that would have caught the 59-unit
+  // So: walk them all. This is the check that would have caught the 59-unit
   // pile the first version of `rubbleParts` produced.
+  const boards = await page.evaluate(() => window.__arena.LAYOUTS.map((l) => l.name))
   const tall = await page.evaluate(() => {
     const a = window.__arena
     const r = window.__renderer
     const bad = []
     const was = a.currentLayoutIndex()
-    for (let i = 0; i < 8; i++) {
+    // Every board, not the first eight. This was written when eight was all
+    // there were, and it stayed a literal through the terrain pass and the
+    // themed boards — so the two tallest-cover layouts in the game were never
+    // in it and the label said they were.
+    for (let i = 0; i < a.LAYOUTS.length; i++) {
       a.setLayout(i)
       for (const b of a.BREAKABLE) {
         const mesh = r.rubbleMeshAt(b.id)
@@ -551,9 +556,9 @@ try {
     return bad
   })
   check(
-    'no pile on any of the eight boards stands taller than a hull',
+    'no pile on any board in the rotation stands taller than a hull',
     tall.length === 0,
-    tall.length ? JSON.stringify(tall.slice(0, 5)) : 'eight boards checked',
+    tall.length ? JSON.stringify(tall.slice(0, 5)) : `${boards.length} boards checked`,
   )
 
   check('no page errors', pageErrors.length === 0, pageErrors.join(' | '))
