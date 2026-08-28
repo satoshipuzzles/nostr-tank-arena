@@ -99,6 +99,19 @@ check(
   `footprint ${S.SPITFIRE_SPREAD}`,
 )
 check(
+  'a slow device cannot fly the plane over a tank without hitting it',
+  // The plane jumped a whole 400-unit stretch between frames; the tank sits
+  // in the middle of it, outside the footprint of BOTH endpoints. The point
+  // test misses at each end — which is the frame-rate bug — and the segment
+  // sweep catches it.
+  S.underStrafeSweep(300, 500, 700, 500, 500, 500 + S.SPITFIRE_SPREAD - 1) === true &&
+    S.underStrafeSweep(300, 500, 700, 500, 500, 500 + S.SPITFIRE_SPREAD + 1) === false &&
+    S.underStrafe(300, 500, 500, 500 + S.SPITFIRE_SPREAD - 1) === false &&
+    S.underStrafe(700, 500, 500, 500 + S.SPITFIRE_SPREAD - 1) === false,
+  `footprint ${S.SPITFIRE_SPREAD}, endpoints miss, segment hits`,
+)
+
+check(
   'the corner survives the wire and garbage does not',
   S.asCorner(2) === 2 && S.asCorner(4) === null && S.asCorner('1') === null && S.asCorner(null) === null,
 )

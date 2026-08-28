@@ -93,3 +93,32 @@ export function underStrafe(px: number, py: number, tx: number, ty: number): boo
   const dy = ty - py
   return dx * dx + dy * dy <= SPITFIRE_SPREAD * SPITFIRE_SPREAD
 }
+
+/**
+ * Was the target inside the footprint anywhere along the stretch the plane
+ * flew this step, from (ax,ay) to (bx,by)?
+ *
+ * The point test above is only honest when steps are small. The sim steps at
+ * the render rate, and at a slow device's four frames a second the plane
+ * moves several footprints between samples — a pass could fly straight over
+ * a parked tank and never register. Distance to the flown segment makes the
+ * sweep independent of frame rate: every client agrees on what a pass hit,
+ * however fast its screen paints. Same rule as everything else on the wire —
+ * the device must not change the game.
+ */
+export function underStrafeSweep(
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+  tx: number,
+  ty: number,
+): boolean {
+  const vx = bx - ax
+  const vy = by - ay
+  const len2 = vx * vx + vy * vy
+  const k = len2 === 0 ? 0 : Math.max(0, Math.min(1, ((tx - ax) * vx + (ty - ay) * vy) / len2))
+  const dx = tx - (ax + vx * k)
+  const dy = ty - (ay + vy * k)
+  return dx * dx + dy * dy <= SPITFIRE_SPREAD * SPITFIRE_SPREAD
+}

@@ -93,7 +93,7 @@ import {
   asCorner,
   cornerAt,
   spitfirePos,
-  underStrafe,
+  underStrafeSweep,
 } from './spitfire'
 import type { Rect } from './arena'
 import type { Bot, BotTarget } from './bots'
@@ -880,7 +880,16 @@ export class Game {
   /** In-flight spitfire passes, keyed by event id. The renderer reads this. */
   readonly strafes = new Map<
     string,
-    { id: string; owner: string; corner: Corner; t0: number; damage: number; hitAt: Map<string, number> }
+    {
+      id: string
+      owner: string
+      corner: Corner
+      t0: number
+      damage: number
+      hitAt: Map<string, number>
+      /** How far along the flight the damage sweep has raked, in ms from t0. */
+      sweptTo: number
+    }
   >()
   /**
    * A spitfire has been spent and is waiting for its corner. The tray paints a
@@ -2102,6 +2111,7 @@ export class Game {
       t0,
       damage: SPITFIRE_DAMAGE,
       hitAt: new Map(),
+      sweptTo: 0,
     })
     this.publishAsSession(KIND_STRIKE, payload)
     this.sound('siren', { at: cornerAt(corner) })
@@ -2351,6 +2361,7 @@ export class Game {
       t0: p.t0 + peer.offset,
       damage: Math.max(1, Math.min(MAX_HULL, Math.floor(p.d))),
       hitAt: new Map(),
+      sweptTo: 0,
     })
     this.sound('siren', { at: cornerAt(corner) })
     this.pushFeed(`${peer.name} called a spitfire`)
@@ -2374,13 +2385,19 @@ export class Game {
         this.strafes.delete(id)
         continue
       }
+      // The stretch flown since the last step. The footprint is tested
+      // against this whole segment, not the point the plane is on this
+      // frame — the sim steps at the render rate, and a slow device's plane
+      // jumps several footprints a frame. See `underStrafeSweep`.
+      const from = spitfirePos(s.corner, Math.max(0, s.sweptTo))
+      s.sweptTo = t
       const mine = s.owner === this.identity.sessionPubkey
       // Our own local bots, whoever's pass it is.
       for (const bot of this.bots) {
         if (bot.tank.dead) continue
         const peerTeam = this.peers.get(bot.session)?.view.team ?? 0
         if (peerTeam && this.teamOf(s.owner) === peerTeam) continue
-        if (!underStrafe(pos.x, pos.y, bot.tank.x, bot.tank.y)) continue
+        if (!underStrafeSweep(from.x, from.y, pos.x, pos.y, bot.tank.x, bot.tank.y)) continue
         const key = 'bot:' + bot.session
         if (now < (s.hitAt.get(key) ?? 0)) continue
         s.hitAt.set(key, now + SPITFIRE_HIT_MS)
@@ -2394,7 +2411,7 @@ export class Game {
       // Ourselves, when it is somebody else's.
       if (mine || this.watching || this.tank.dead || this.flying) continue
       if (this.friendly(s.owner)) continue
-      if (!underStrafe(pos.x, pos.y, this.tank.x, this.tank.y)) continue
+      if (!underStrafeSweep(from.x, from.y, pos.x, pos.y, this.tank.x, this.tank.y)) continue
       if (now < (s.hitAt.get('self') ?? 0)) continue
       s.hitAt.set('self', now + SPITFIRE_HIT_MS)
       if (hasBuff(this.buffs, 'shieldUntil', now)) {
@@ -3391,29 +3408,46 @@ export class Game {
   /** When each victim may next be hit, keyed by chopper owner then victim. */
   private chopperHitAt = new Map<string, number>()
 
-  /** When each gun next rattles, keyed by chopper owner. Cosmetic — see below. */
-  private chopperRattleAt = new Map<string, number>()
+  /** When each gun next rattles, keyed per gun. Cosmetic — see below. */
+  private rattleNextAt = new Map<string, number>()
 
   /**
-   * The guns you can hear: one rattle per firing chopper per interval.
+   * The guns you can hear: one rattle per firing gun per interval — choppers,
+   * juggernaut hoses, and strafing passes alike.
    *
-   * Purely cosmetic and deliberately separate from `takeChopperFire` — that
-   * runs at the damage cadence and only for choppers that can hurt *us*, and a
-   * teammate's gun hammering the far corner should still be audible. Our own
-   * plays unpositioned (we are in it); everybody else's carries the chopper's
-   * position and fades with distance like any other peer sound.
+   * Purely cosmetic and deliberately separate from the damage paths — those
+   * run at their own cadences and only for guns that can hurt *us*, and a
+   * teammate's gun hammering the far corner should still be audible. Guns you
+   * are inside play unpositioned; everybody else's carry the gun's position
+   * and fade with distance like any other peer sound.
    */
-  private rattleChoppers(now: number): void {
+  private rattleGuns(now: number): void {
     if (this.flying && this.chopperAt) this.rattle(this.identity.sessionPubkey, now)
+    if (!this.watching && this.suited && this.suitAt && !this.tank.dead) {
+      this.rattle('suit:me', now)
+    }
     for (const peer of this.peers.values()) {
-      if (peer.view.chopperUntil <= now || !peer.view.chopperAt) continue
-      this.rattle(peer.session, now, { x: peer.view.x, y: peer.view.y })
+      if (peer.view.chopperUntil > now && peer.view.chopperAt) {
+        this.rattle(peer.session, now, { x: peer.view.x, y: peer.view.y })
+      }
+      if (peer.view.suitUntil > now && peer.view.suitAt && !peer.view.dead) {
+        this.rattle('suit:' + peer.session, now, { x: peer.view.x, y: peer.view.y })
+      }
+    }
+    // A pass rattles at the plane, whoever called it in — the plane is never
+    // you, so it is always positioned.
+    for (const [id, s] of this.strafes) {
+      const t = now - s.t0
+      if (t < 0) continue
+      const pos = spitfirePos(s.corner, t)
+      if (pos.done) continue
+      this.rattle('strafe:' + id, now, { x: pos.x, y: pos.y })
     }
   }
 
   private rattle(owner: string, now: number, at?: { x: number; y: number }): void {
-    if (now < (this.chopperRattleAt.get(owner) ?? 0)) return
-    this.chopperRattleAt.set(owner, now + CHOPPER_RATTLE_MS)
+    if (now < (this.rattleNextAt.get(owner) ?? 0)) return
+    this.rattleNextAt.set(owner, now + CHOPPER_RATTLE_MS)
     this.sound('rattle', at ? { at } : { gain: 0.75 })
   }
 
@@ -4002,7 +4036,7 @@ export class Game {
     // And everybody else's juggernauts, for the same reason and in the same
     // place: continuous fire that lands before the shells do.
     this.takeSuitFire(now)
-    this.rattleChoppers(now)
+    this.rattleGuns(now)
     this.record(now)
     this.stepRewards(now)
     this.stepNuke(now)

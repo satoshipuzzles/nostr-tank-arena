@@ -190,6 +190,63 @@ try {
   check('a peer\'s strafing run costs a tank on the diagonal real hull',
     bled !== null && bled < before.hp, `hp ${before.hp} -> ${bled}`)
 
+  // ----------------------- 7. the rounds are rounds, and the guns are heard
+
+  // A fresh peer pass for the picture and the sound: the earlier ones are
+  // over, and this one exists only to be looked at while it flies.
+  await page.evaluate((PEER) => {
+    const g = window.__game
+    g.sfx = (name, opts) => {
+      window.__sfxLog = window.__sfxLog ?? []
+      window.__sfxLog.push({ name, at: opts?.at ?? null })
+    }
+    g.onEvent({
+      id: 's' + Math.random().toString(16).slice(2),
+      pubkey: PEER, kind: 21004, created_at: Math.floor(Date.now() / 1000), tags: [],
+      sig: '0'.repeat(128),
+      content: JSON.stringify({ k: 'strafe', t0: Date.now(), c: 1, d: 1 }),
+    }, false)
+  }, PEER)
+  const plane = await until(() => page.evaluate(() => {
+    const r = window.__renderer
+    const rigs = r.spitfireRigs()
+    if (!rigs.length) return null
+    const rig = r.spitfireRigAt(rigs[0].id)
+    if (!rig || !rig.tracers.visible) return null
+    return { id: rigs[0].id, count: rig.tracers.count, coneGone: !('beam' in rig) }
+  }), 8000)
+  check('a flying pass shows tracer rounds, not the old cone',
+    !!plane && plane.count >= 6 && plane.coneGone, JSON.stringify(plane))
+  const planePos = (id) => page.evaluate((id) => {
+    const rig = window.__renderer.spitfireRigAt(id)
+    if (!rig || !rig.tracers.visible) return null
+    const m = rig.tracers.instanceMatrix.array
+    return [0, 1, 2].map((i) => ({
+      x: Math.round(m[i * 16 + 12]), y: Math.round(m[i * 16 + 13]), z: Math.round(m[i * 16 + 14]),
+    }))
+  }, id)
+  const planeBefore = plane ? await planePos(plane.id) : null
+  const planeMoved = plane ? await until(async () => {
+    const nowPos = await planePos(plane.id)
+    if (!planeBefore || !nowPos) return null
+    const d = nowPos.map((q, i) =>
+      Math.hypot(q.x - planeBefore[i].x, q.y - planeBefore[i].y, q.z - planeBefore[i].z))
+    return Math.max(...d) > 15 ? { d } : null
+  }, 8000) : null
+  check('and the rounds march between frames — a static chain is still a laser',
+    !!planeMoved, JSON.stringify({ planeBefore, planeMoved }))
+  // Polled while the pass is still flying — frames are ~4/s under the
+  // software rasteriser, so a fixed read right after the movement check can
+  // land one frame in.
+  await until(() => page.evaluate(() =>
+    ((window.__sfxLog ?? []).filter((e) => e.name === 'rattle').length >= 3) || null), 10_000)
+  const strafeHeard = await page.evaluate(() =>
+    (window.__sfxLog ?? []).filter((e) => e.name === 'rattle'))
+  check('the pass rattles out of the sound sink, positioned at the plane',
+    strafeHeard.length >= 3 && strafeHeard.every((e) => !!e.at),
+    `${strafeHeard.length} rattles, first at ${JSON.stringify(strafeHeard[0]?.at)}`)
+  await page.evaluate(() => { window.__game.sfx = () => {} })
+
   check('no page errors', errors.length === 0, errors.join(' | '))
 } finally {
   await browser.close()

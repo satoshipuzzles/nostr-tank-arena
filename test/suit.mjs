@@ -468,6 +468,74 @@ try {
     JSON.stringify(hud),
   )
 
+  // -------------------- the hoses are rounds now, and you can hear them
+
+  // A fresh peer suit hosing a fixed point, aimed away from us: the subject
+  // is the picture and the sound, not the damage, and the peer's view state
+  // persists on its own so the page's loop draws it without any manual
+  // trigger-holding.
+  await page.evaluate((PEER) => {
+    const g = window.__game
+    g.peers.clear()
+    g.tank.dead = false
+    g.tank.x = 1400
+    g.tank.y = 200
+    g.sfx = (name, opts) => {
+      window.__sfxLog = window.__sfxLog ?? []
+      window.__sfxLog.push({ name, at: opts?.at ?? null })
+    }
+    const send = () => g.onEvent({
+      id: 's' + Math.random().toString(16).slice(2),
+      pubkey: PEER, kind: 21000, created_at: Math.floor(Date.now() / 1000), tags: [],
+      sig: '0'.repeat(128),
+      content: JSON.stringify({
+        t: Date.now(), x: 700, y: 800, h: 0, g: 0, hp: 3, d: false,
+        ks: 0, ds: 0, r: g.round, a: 4, j: 9000, jx: 500, jy: 800,
+      }),
+    }, false)
+    send()
+    window.__keepSuit = setInterval(send, 120)
+  }, PEER)
+  const hose = await until(() => page.evaluate(() => {
+    const stream = window.__renderer.suitStreamAt(0)
+    if (!stream || !stream.visible) return null
+    return { count: stream.count }
+  }), 10_000)
+  check('a hosing suit shows a stream of tracer rounds',
+    !!hose && hose.count >= 6, JSON.stringify(hose))
+  const hosePos = () => page.evaluate(() => {
+    const stream = window.__renderer.suitStreamAt(0)
+    if (!stream || !stream.visible) return null
+    const m = stream.instanceMatrix.array
+    return [0, 1, 2].map((i) => ({
+      x: Math.round(m[i * 16 + 12]), y: Math.round(m[i * 16 + 13]), z: Math.round(m[i * 16 + 14]),
+    }))
+  })
+  const hoseBefore = await hosePos()
+  const hoseMoved = await until(async () => {
+    const nowPos = await hosePos()
+    if (!hoseBefore || !nowPos) return null
+    const d = nowPos.map((q, i) =>
+      Math.hypot(q.x - hoseBefore[i].x, q.y - hoseBefore[i].y, q.z - hoseBefore[i].z))
+    return Math.max(...d) > 8 ? { d } : null
+  }, 8000)
+  check('and the rounds march between frames — the solid bar is gone',
+    !!hoseMoved, JSON.stringify({ hoseBefore, hoseMoved }))
+  // Polled, not slept: frames arrive four a second under a software
+  // rasteriser and the tape delays the first one, so a fixed window measures
+  // the environment. The claim is that rattles keep coming while it hoses.
+  await until(() => page.evaluate(() =>
+    ((window.__sfxLog ?? []).filter((e) => e.name === 'rattle').length >= 3) || null), 12_000)
+  const hoseHeard = await page.evaluate(() => {
+    clearInterval(window.__keepSuit)
+    return (window.__sfxLog ?? []).filter((e) => e.name === 'rattle')
+  })
+  check('the hose rattles out of the sound sink, positioned at the suit',
+    hoseHeard.length >= 3 &&
+      hoseHeard.every((e) => e.at && Math.abs(e.at.x - 700) < 60 && Math.abs(e.at.y - 800) < 60),
+    `${hoseHeard.length} rattles, first at ${JSON.stringify(hoseHeard[0]?.at)}`)
+  await page.evaluate(() => { window.__game.sfx = () => {} })
+
   check('no page errors', pageErrors.length === 0, pageErrors.join(' | '))
 
   if (process.env.TANK_SHOT) {

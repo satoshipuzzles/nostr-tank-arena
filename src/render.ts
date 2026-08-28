@@ -380,6 +380,56 @@ const TRACER_DUMMY = new THREE.Object3D()
 const TRACER_DIR = new THREE.Vector3()
 const TRACER_Q = new THREE.Quaternion()
 
+/** One slug. Shared by every gun that shoots them — chopper, spitfire, suit. */
+const TRACER_GEO = new THREE.BoxGeometry(3.4, 15, 3.4)
+
+/** A gun's worth of tracer rounds, hidden until the gun runs. */
+function makeTracerStream(): THREE.InstancedMesh {
+  const stream = new THREE.InstancedMesh(
+    TRACER_GEO,
+    new THREE.MeshBasicMaterial({
+      color: 0xffd166,
+      transparent: true,
+      opacity: 0.95,
+      depthWrite: false,
+    }),
+    TRACER_N,
+  )
+  stream.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
+  stream.visible = false
+  return stream
+}
+
+/**
+ * March the stack down a fire line given in the stream's local space —
+ * gun at the origin, impact at (dx, dy, dz) — fanning out to `fan` wide
+ * by the time the rounds land.
+ */
+function marchTracers(
+  stream: THREE.InstancedMesh,
+  now: number,
+  dx: number,
+  dy: number,
+  dz: number,
+  fan: number,
+): void {
+  TRACER_DIR.set(dx, dy, dz)
+  TRACER_Q.setFromUnitVectors(UP, TRACER_DIR.normalize())
+  for (let i = 0; i < TRACER_N; i++) {
+    const phase = (now / TRACER_MS + i / TRACER_N) % 1
+    const f = phase * fan
+    TRACER_DUMMY.position.set(
+      dx * phase + TRACER_JIT[i].x * f,
+      dy * phase,
+      dz * phase + TRACER_JIT[i].y * f,
+    )
+    TRACER_DUMMY.quaternion.copy(TRACER_Q)
+    TRACER_DUMMY.updateMatrix()
+    stream.setMatrixAt(i, TRACER_DUMMY.matrix)
+  }
+  stream.instanceMatrix.needsUpdate = true
+}
+
 // Sized against the tanks, not against a real helicopter.
 //
 // The first cut had a 150-unit rotor over a 30-unit hull and photographed as a
@@ -397,7 +447,6 @@ const CHOPPER_GEO = {
   rotor2: new THREE.BoxGeometry(9, 3, 96),
   disc: new THREE.CircleGeometry(52, 26),
   mast: new THREE.CylinderGeometry(3, 3, 16, 8),
-  tracer: new THREE.BoxGeometry(3.4, 15, 3.4),
   flash: new THREE.SphereGeometry(5, 8, 6),
   splash: new THREE.RingGeometry(CHOPPER_SPREAD - 9, CHOPPER_SPREAD, 30),
   shadow: new THREE.CircleGeometry(30, 22),
@@ -457,18 +506,8 @@ function makeChopper(hue: number): ChopperRig {
   // as a laser — the issue that replaced it said so, and it was right. Unlit,
   // because a tracer is its own light source and shading it would make it a
   // grey fleck.
-  const tracers = new THREE.InstancedMesh(
-    CHOPPER_GEO.tracer,
-    new THREE.MeshBasicMaterial({
-      color: 0xffd166,
-      transparent: true,
-      opacity: 0.95,
-      depthWrite: false,
-    }),
-    TRACER_N,
-  )
-  tracers.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
-  tracers.visible = false
+  const tracers = makeTracerStream()
+  tracers.position.y = -8
   root.add(tracers)
 
   // The muzzle, flickering under the hull while the gun runs. Small on
@@ -521,7 +560,7 @@ function disposeChopper(rig: ChopperRig): void {
 interface SpitfireRig {
   root: THREE.Group
   prop: THREE.Mesh
-  beam: THREE.Mesh
+  tracers: THREE.InstancedMesh
   splash: THREE.Mesh
   shadow: THREE.Mesh
 }
@@ -534,7 +573,6 @@ const SPITFIRE_GEO = {
   tailplane: new THREE.BoxGeometry(36, 3, 12),
   fin: new THREE.BoxGeometry(3, 16, 14),
   prop: new THREE.CircleGeometry(16, 18),
-  beam: new THREE.CylinderGeometry(3, 9, 1, 8, 1, true),
   splash: new THREE.RingGeometry(SPITFIRE_SPREAD - 9, SPITFIRE_SPREAD, 30),
   shadow: new THREE.CircleGeometry(26, 20),
 }
@@ -578,13 +616,12 @@ function makeSpitfire(hue: number): SpitfireRig {
   shadow.rotation.x = -Math.PI / 2
   root.add(shadow)
 
-  const beam = new THREE.Mesh(
-    SPITFIRE_GEO.beam,
-    new THREE.MeshBasicMaterial({
-      color: 0xffd68a, transparent: true, opacity: 0.7, depthWrite: false, side: THREE.DoubleSide,
-    }),
-  )
-  root.add(beam)
+  // The wing guns' rounds. A pass is firing for its whole run, so the stream
+  // is simply visible for the rig's lifetime — same slugs as the chopper's.
+  const tracers = makeTracerStream()
+  tracers.visible = true
+  tracers.position.y = -6
+  root.add(tracers)
 
   const splash = new THREE.Mesh(
     SPITFIRE_GEO.splash,
@@ -595,7 +632,7 @@ function makeSpitfire(hue: number): SpitfireRig {
   splash.rotation.x = -Math.PI / 2
   root.add(splash)
 
-  return { root, prop, beam, splash, shadow }
+  return { root, prop, tracers, splash, shadow }
 }
 
 /** Same rule as `disposeChopper`: per-rig materials only, shared geometry stays. */
@@ -607,6 +644,8 @@ function disposeSpitfire(rig: SpitfireRig): void {
     if (Array.isArray(m)) m.forEach((x) => x.dispose())
     else m.dispose()
   })
+  // Instance buffers are not materials; traverse above does not free them.
+  rig.tracers.dispose()
 }
 
 /**
@@ -2494,13 +2533,14 @@ export class Renderer {
   /** The shockwave: a ring on the felt, running out to the fence. */
   private nukeRing: THREE.Mesh
   /**
-   * Juggernaut tracer streams: one beam and one splash per suit on the board.
+   * Juggernaut tracer streams: one stream of rounds and one splash per suit
+   * on the board.
    *
    * A pool rather than per-rig geometry, for the same reason the strike lanes
    * are one: at most a couple of these exist at once, and the alternative is
    * two meshes on every rig in the room that are hidden for the entire round.
    */
-  private suitBeams: THREE.Mesh[] = []
+  private suitTracers: THREE.InstancedMesh[] = []
   private suitSplashes: THREE.Mesh[] = []
   private lastShellSeen = new Map<string, { x: number; y: number }>()
   private wasDead = new Map<string, boolean>()
@@ -2652,13 +2692,9 @@ export class Renderer {
     )
     this.nukeRing.rotation.x = -Math.PI / 2
     for (let i = 0; i < MAX_SUITS; i++) {
-      const beam = new THREE.Mesh(
-        new THREE.BoxGeometry(1, 2.6, 2.6),
-        new THREE.MeshBasicMaterial({ color: 0xffe08a, transparent: true, opacity: 0.85, depthWrite: false }),
-      )
-      beam.visible = false
-      this.suitBeams.push(beam)
-      this.scene.add(beam)
+      const stream = makeTracerStream()
+      this.suitTracers.push(stream)
+      this.scene.add(stream)
       const splash = new THREE.Mesh(
         new THREE.RingGeometry(0.55, 1, 20),
         new THREE.MeshBasicMaterial({
@@ -3974,27 +4010,12 @@ export class Renderer {
         // cone this replaced was first passed world coordinates after setting a
         // local position and pointed off into the sky. It photographed as
         // nothing at all, which is how a missing effect usually looks.
+        // The fan widens with the fall, so rounds leave the gun as one
+        // stream and land as a spray filling the ring on the felt.
+        marchTracers(rig.tracers, now, at.x - c.x, -CHOPPER_ALT + GROUND_Y, at.y - c.y, CHOPPER_SPREAD * 0.6)
+        rig.flash.scale.setScalar(0.7 + Math.abs(Math.sin(now / 31)) * 0.8)
         const dxx = at.x - c.x
         const dzz = at.y - c.y
-        const dy = -CHOPPER_ALT + GROUND_Y
-        TRACER_DIR.set(dxx, dy, dzz)
-        TRACER_Q.setFromUnitVectors(UP, TRACER_DIR.normalize())
-        for (let i = 0; i < TRACER_N; i++) {
-          const phase = (now / TRACER_MS + i / TRACER_N) % 1
-          // The fan widens with the fall, so rounds leave the gun as one
-          // stream and land as a spray filling the ring on the felt.
-          const fan = phase * CHOPPER_SPREAD * 0.6
-          TRACER_DUMMY.position.set(
-            dxx * phase + TRACER_JIT[i].x * fan,
-            dy * phase - 8,
-            dzz * phase + TRACER_JIT[i].y * fan,
-          )
-          TRACER_DUMMY.quaternion.copy(TRACER_Q)
-          TRACER_DUMMY.updateMatrix()
-          rig.tracers.setMatrixAt(i, TRACER_DUMMY.matrix)
-        }
-        rig.tracers.instanceMatrix.needsUpdate = true
-        rig.flash.scale.setScalar(0.7 + Math.abs(Math.sin(now / 31)) * 0.8)
 
         rig.splash.position.set(dxx, GROUND_Y + DECAL_LIFT - CHOPPER_ALT, dzz)
         rig.splash.scale.setScalar(1 + Math.sin(now / 90) * 0.06)
@@ -4052,15 +4073,10 @@ export class Renderer {
       rig.splash.position.set(0, GROUND_Y + DECAL_LIFT - SPITFIRE_ALT, 0)
       rig.splash.scale.setScalar(1 + Math.sin(now / 70) * 0.06)
 
-      // The guns, as one cone from the nose to the ground beneath — the
-      // chopper's beam trick, angled with the dive.
-      const dir = new THREE.Vector3(0, -SPITFIRE_ALT + GROUND_Y, 0)
-      const len = dir.length()
-      rig.beam.position.set(0, (-SPITFIRE_ALT + GROUND_Y) / 2, 0)
-      rig.beam.quaternion.setFromUnitVectors(UP, dir.normalize())
-      rig.beam.scale.set(1, len, 1)
-      const mat = rig.beam.material as THREE.MeshBasicMaterial
-      mat.opacity = 0.3 + Math.abs(Math.sin(now / 34)) * 0.38
+      // The guns: tracer rounds falling from the nose into the footprint
+      // ring, the same march the chopper's gun does — a pass fires straight
+      // down for its whole run.
+      marchTracers(rig.tracers, now, 0, -SPITFIRE_ALT + GROUND_Y, 0, SPITFIRE_SPREAD * 0.7)
 
       if (Math.random() < 0.6) {
         this.confetti.burst(p.x, p.y, 2, 30, { speed: 110, up: 60, y: 8, size: 0.5, life: 0.26 })
@@ -4176,6 +4192,16 @@ export class Renderer {
       x: rig.root.position.x,
       y: rig.root.position.z,
     }))
+  }
+
+  /** A pass's whole rig, for the suites — same reasoning as `chopperRigAt`. */
+  spitfireRigAt(id: string): SpitfireRig | null {
+    return this.spitfires.get(id) ?? null
+  }
+
+  /** The nth juggernaut tracer stream, for the suites. */
+  suitStreamAt(n: number): THREE.InstancedMesh | null {
+    return this.suitTracers[n] ?? null
   }
 
   /** Whether our own tank is being drawn at all. Also for the suites. */
@@ -4573,33 +4599,32 @@ export class Renderer {
   }
 
   /**
-   * The juggernauts' guns: a tracer stream and a splash where it lands.
+   * The juggernauts' guns: a stream of tracer rounds and a splash where they
+   * land.
    *
    * Drawn per client and never sent: the wire carries only "this suit is
    * hosing that point", and the dozens of rounds a second between the two are
    * entirely local — the same trade the chopper makes, and the reason a
    * continuous-fire weapon is affordable on a 10Hz relay stream at all.
    *
-   * The stream flickers on a fast sine rather than being a solid bar. A solid
-   * bar reads as a laser; a bar that stutters reads as a gun, and it costs one
-   * multiply.
+   * These were a solid bar with a stutter for a while — its own comment
+   * admitted a solid bar reads as a laser — and became real marching slugs
+   * when the chopper's did, for the same reason and with the same machinery.
    */
   private suits(game: Game, now: number): void {
     let n = 0
     const draw = (from: { x: number; y: number }, at: { x: number; y: number }) => {
-      const beam = this.suitBeams[n]
+      const stream = this.suitTracers[n]
       const splash = this.suitSplashes[n]
-      if (!beam || !splash) return
+      if (!stream || !splash) return
       n++
       const dx = at.x - from.x
       const dz = at.y - from.y
-      const len = Math.max(1, Math.hypot(dx, dz))
-      const y = GROUND_Y + SUIT_MUZZLE
-      beam.visible = true
-      beam.position.set(from.x + dx / 2, y, from.y + dz / 2)
-      beam.rotation.y = -Math.atan2(dz, dx)
-      beam.scale.set(len, 1, 1)
-      ;(beam.material as THREE.MeshBasicMaterial).opacity = 0.55 + 0.4 * Math.abs(Math.sin(now / 26))
+      stream.visible = true
+      stream.position.set(from.x, GROUND_Y + SUIT_MUZZLE, from.y)
+      // The rounds drop from the muzzle to the felt over the run, fanning
+      // into the hose's spread by the time they land.
+      marchTracers(stream, now, dx, -(SUIT_MUZZLE - DECAL_LIFT * 1.3), dz, SUIT_SPREAD * 0.55)
       splash.visible = true
       splash.position.set(at.x, GROUND_Y + DECAL_LIFT * 1.3, at.y)
       splash.scale.setScalar(SUIT_SPREAD * (0.72 + 0.16 * Math.sin(now / 60)))
@@ -4613,8 +4638,8 @@ export class Renderer {
       if (peer.view.suitUntil <= now || !peer.view.suitAt || peer.view.dead) continue
       draw(peer.view, peer.view.suitAt)
     }
-    for (let i = n; i < this.suitBeams.length; i++) {
-      this.suitBeams[i].visible = false
+    for (let i = n; i < this.suitTracers.length; i++) {
+      this.suitTracers[i].visible = false
       this.suitSplashes[i].visible = false
     }
   }
