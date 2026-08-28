@@ -3391,29 +3391,46 @@ export class Game {
   /** When each victim may next be hit, keyed by chopper owner then victim. */
   private chopperHitAt = new Map<string, number>()
 
-  /** When each gun next rattles, keyed by chopper owner. Cosmetic — see below. */
-  private chopperRattleAt = new Map<string, number>()
+  /** When each gun next rattles, keyed per gun. Cosmetic — see below. */
+  private rattleNextAt = new Map<string, number>()
 
   /**
-   * The guns you can hear: one rattle per firing chopper per interval.
+   * The guns you can hear: one rattle per firing gun per interval — choppers,
+   * juggernaut hoses, and strafing passes alike.
    *
-   * Purely cosmetic and deliberately separate from `takeChopperFire` — that
-   * runs at the damage cadence and only for choppers that can hurt *us*, and a
-   * teammate's gun hammering the far corner should still be audible. Our own
-   * plays unpositioned (we are in it); everybody else's carries the chopper's
-   * position and fades with distance like any other peer sound.
+   * Purely cosmetic and deliberately separate from the damage paths — those
+   * run at their own cadences and only for guns that can hurt *us*, and a
+   * teammate's gun hammering the far corner should still be audible. Guns you
+   * are inside play unpositioned; everybody else's carry the gun's position
+   * and fade with distance like any other peer sound.
    */
-  private rattleChoppers(now: number): void {
+  private rattleGuns(now: number): void {
     if (this.flying && this.chopperAt) this.rattle(this.identity.sessionPubkey, now)
+    if (!this.watching && this.suited && this.suitAt && !this.tank.dead) {
+      this.rattle('suit:me', now)
+    }
     for (const peer of this.peers.values()) {
-      if (peer.view.chopperUntil <= now || !peer.view.chopperAt) continue
-      this.rattle(peer.session, now, { x: peer.view.x, y: peer.view.y })
+      if (peer.view.chopperUntil > now && peer.view.chopperAt) {
+        this.rattle(peer.session, now, { x: peer.view.x, y: peer.view.y })
+      }
+      if (peer.view.suitUntil > now && peer.view.suitAt && !peer.view.dead) {
+        this.rattle('suit:' + peer.session, now, { x: peer.view.x, y: peer.view.y })
+      }
+    }
+    // A pass rattles at the plane, whoever called it in — the plane is never
+    // you, so it is always positioned.
+    for (const [id, s] of this.strafes) {
+      const t = now - s.t0
+      if (t < 0) continue
+      const pos = spitfirePos(s.corner, t)
+      if (pos.done) continue
+      this.rattle('strafe:' + id, now, { x: pos.x, y: pos.y })
     }
   }
 
   private rattle(owner: string, now: number, at?: { x: number; y: number }): void {
-    if (now < (this.chopperRattleAt.get(owner) ?? 0)) return
-    this.chopperRattleAt.set(owner, now + CHOPPER_RATTLE_MS)
+    if (now < (this.rattleNextAt.get(owner) ?? 0)) return
+    this.rattleNextAt.set(owner, now + CHOPPER_RATTLE_MS)
     this.sound('rattle', at ? { at } : { gain: 0.75 })
   }
 
@@ -4002,7 +4019,7 @@ export class Game {
     // And everybody else's juggernauts, for the same reason and in the same
     // place: continuous fire that lands before the shells do.
     this.takeSuitFire(now)
-    this.rattleChoppers(now)
+    this.rattleGuns(now)
     this.record(now)
     this.stepRewards(now)
     this.stepNuke(now)
