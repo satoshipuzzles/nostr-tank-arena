@@ -72,6 +72,7 @@ import {
   coverDamageBits,
   damageCover,
   groundSpeed,
+  blastScaleOf,
   explodes,
   resetCover,
 } from './arena'
@@ -3285,7 +3286,7 @@ export class Game {
     // behind it. A crate that killed people would make eight shells the best
     // weapon in the game rather than the slowest.
     if (boom) {
-      this.blast(rect.x + rect.w / 2, rect.y + rect.h / 2, shell.owner)
+      this.blast(rect.x + rect.w / 2, rect.y + rect.h / 2, shell.owner, blastScaleOf(rect))
     }
   }
 
@@ -3304,6 +3305,11 @@ export class Game {
       y: rect.y + rect.h / 2,
       at: performance.now(),
       loud: mine,
+      // How big the bang is, so the renderer can draw the one that happened.
+      // A coolant tower that reaches two and a bit lob radii and draws the
+      // same fireball as a pair of drums is a rule the player cannot see, and
+      // an invisible rule is the same thing as an unfair one.
+      scale: boom ? blastScaleOf(rect) : 1,
       // Fire and smoke, or splinters. A crate coming apart in a fireball would
       // say "stand back" about a thing that is safe to stand next to.
       fire: boom,
@@ -3321,7 +3327,15 @@ export class Game {
    * game state plus its own particle pool, and everything else it draws works
    * this way. Entries are read by timestamp and expire on their own.
    */
-  readonly coverBlasts: { x: number; y: number; at: number; loud: boolean; fire: boolean }[] = []
+  readonly coverBlasts: {
+    x: number
+    y: number
+    at: number
+    loud: boolean
+    fire: boolean
+    /** Blast radius as a multiple of a lob's. See `blastScaleOf`. */
+    scale: number
+  }[] = []
 
   /**
    * Everything a barrel takes with it.
@@ -3332,8 +3346,8 @@ export class Game {
    * who shot it, and a player who blows one up at point-blank range should find
    * that out.
    */
-  private blast(x: number, y: number, owner: string): void {
-    const r = LOB_BLAST + TANK_RADIUS
+  private blast(x: number, y: number, owner: string, scale = 1): void {
+    const r = LOB_BLAST * scale + TANK_RADIUS
     for (const bot of this.bots) {
       if (bot.tank.dead) continue
       if ((bot.tank.x - x) ** 2 + (bot.tank.y - y) ** 2 > r * r) continue

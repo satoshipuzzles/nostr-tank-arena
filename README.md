@@ -22,16 +22,21 @@ When the tip moves:
 
 1. the round ends and a podium shows the standings,
 2. scores reset to zero,
-3. **the map changes** — the board is `blockHash % 10`, so every client
-   generates the same arena from the same number with no message passing at
-   all. Ten boards ship, and the size range is part of the variety:
-   Crossroads (1600x1200), The Lanes (2000x1400), Pillars (1950x1450),
-   The Ring (1900x1400), The Yard (1500x1100), The Quarry (2100x1550),
-   The Hedges (1800x1350), The Depot (1700x1250), The Shallows (1800x1300 —
-   a river tanks cannot ford except at two gaps, though shells cross it
-   freely) and The Bluff (1900x1400 — a central mesa whose cliffs block
-   shots from below while a tank on top fires out over them). Every board is
-   180-degree rotationally symmetric, so no spawn is better than another.
+3. **the map changes** — the board is `blockHash % LAYOUTS.length`, so every
+   client generates the same arena from the same number with no message
+   passing at all. Twelve boards ship, and the size range is part of the
+   variety: Crossroads (1600x1200), The Lanes (2000x1400), Pillars
+   (1950x1450), The Ring (1900x1400), The Yard (1500x1100), The Quarry
+   (2100x1550), The Hedges (1800x1350), The Depot (1700x1250), The Shallows
+   (1800x1300 — a river tanks cannot ford except at two gaps, though shells
+   cross it freely), The Bluff (1900x1400 — a central mesa whose cliffs block
+   shots from below while a tank on top fires out over them), The Warehouse
+   (1500x1100 — four rows of racking, no sightline longer than one aisle, and
+   the racking is crates so a room can make its own door) and The Reactor
+   (1800x1300 — a coolant tower in each half whose blast is over twice a
+   lob's, so the best cover on the board is also the worst place to stand).
+   Every board is 180-degree rotationally symmetric, so no spawn is better
+   than another.
 
 Publishing a result writes an addressable record whose `d` tag carries the
 block height, so there is one signed record per player per round, and a `t` tag
@@ -192,7 +197,7 @@ Three things had to move together, and none of them fails loudly:
 - **The scoreboard**, which went from four rows to eight in a 800px window.
 
 The board does **not** grow with the room, deliberately. Board size comes from
-the block hash — eight layouts from 1500x1100 to 2100x1550 — so every client
+the block hash — twelve layouts from 1500x1100 to 2100x1550 — so every client
 agrees on it without being told. Deriving it from occupancy would mean two
 clients with different relay visibility playing different board sizes, which is
 the one thing a shared arena cannot survive.
