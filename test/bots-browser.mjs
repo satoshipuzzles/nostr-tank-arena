@@ -52,7 +52,6 @@ async function until(fn, ms = 25_000) {
   return null
 }
 
-const PEER = 'd1'.repeat(32)
 
 const browser = await puppeteer.launch({ executablePath, headless: 'new', args: FLAGS })
 const page = await browser.newPage()
@@ -221,36 +220,73 @@ try {
     JSON.stringify(death.published),
   )
 
-  // ------------------------ 2. a real player arrives, every bot stands down
+  // ------------------- 2. real players take seats one for one (bot authority)
 
-  // One state tick from a stranger. That is all it takes on a relay, and it
-  // has to be all it takes here — and it clears the LOT: one phantom bot in a
-  // populated room is one tank that eats real shells. See `syncBots`.
+  // Before ownership existed a single real player stood EVERY bot down: each
+  // client kept its own private set, and a bot in a populated room ate real
+  // shells re-simulated from a remote fire event ("hits aren't landing"). That
+  // is fixed a different way now — one client OWNS the bots and publishes them
+  // as ordinary tanks — so they are safe to keep, and Puzz's seat rule is back:
+  // a real player takes ONE seat, not all of them. See `syncBots`.
+  //
+  // Ownership is the lowest live session key, so these fixtures straddle this
+  // client's own key to *decide* it rather than race it: an 'f…' key keeps this
+  // client the owner, a '0…' key makes it defer. A 'd1…' stranger sorted either
+  // side of a random session key, which is what made this check flap.
+  const local = await page.evaluate(() => window.__game.identity.sessionPubkey)
+  const higher = (i) => 'f'.repeat(63) + (i + 1).toString(16)
+  const lower = '0'.repeat(63) + '1'
+  check('the fixtures straddle this client\'s key, so ownership is decided not raced',
+    local > lower && local < higher(0), `local ${local.slice(0, 8)}…`)
+
   const stranger = (pk) => ({
     id: 'a' + Math.random().toString(16).slice(2),
     pubkey: pk, kind: 21000, created_at: Math.floor(Date.now() / 1000), tags: [], sig: '0'.repeat(128),
     content: JSON.stringify({ t: Date.now(), x: 300, y: 300, h: 0, g: 0, hp: 3, d: false }),
   })
-  // Re-ticked on every poll rather than sent once: a peer that goes quiet
-  // expires, and an expired stranger would hand the seat back mid-check.
+  // Re-ticked every poll rather than sent once: a peer that goes quiet drops
+  // out of the roster the seat count and the owner election both read, and would
+  // hand the seat back mid-check.
   const seats = (pks) => page.evaluate((events) => {
     for (const ev of events) window.__game.onEvent(ev, false)
     return window.__game.botCount
   }, pks.map(stranger))
-  const allDown = await until(async () => ((await seats([PEER])) === 0 ? true : null))
-  check('one real player stands every bot down', !!allDown,
-    `botCount=${await seats([PEER])} (wanted 0 — bots are local-only)`)
+  // Back to an empty room between phases, so each starts from three bots rather
+  // than the last phase's leftovers.
+  const soloAgain = async () => {
+    await page.evaluate(() => {
+      for (const k of [...window.__game.peers.keys()]) if (!window.__game.isBot(k)) window.__game.peers.delete(k)
+    })
+    return until(async () => ((await seats([])) === 3 ? true : null))
+  }
 
-  const leftBehind = await page.evaluate(() => {
-    const g = window.__game
-    return [...g.peers.keys()].filter((k) => g.isBot(k))
-  })
-  check('and none of them are left in the peer map for the renderer to draw',
-    leftBehind.length === 0, JSON.stringify(leftBehind))
+  // One higher-key player: this client still owns, and gives up exactly one bot.
+  const tookOne = await until(async () => ((await seats([higher(0)])) === 2 ? true : null))
+  check('a real player takes one seat and the rest hold', !!tookOne,
+    `botCount=${await seats([higher(0)])} (asked 3, one human -> 2)`)
+  await soloAgain()
 
-  // The control for the two checks above: without it, "botCount is 0" would
-  // also be true of a build that never spawned any, and every check in this
-  // section would pass against the feature being missing entirely.
+  // A full room of real players: the subtraction floors at zero, none left in
+  // the peer map for the renderer to draw.
+  const filled = await until(async () => ((await seats([higher(0), higher(1), higher(2)])) === 0 ? true : null))
+  const leftBehind = await page.evaluate(() => [...window.__game.peers.keys()].filter((k) => window.__game.isBot(k)))
+  check('a full room of real players leaves no bots', !!filled && leftBehind.length === 0,
+    `botCount=${await seats([higher(0), higher(1), higher(2)])}, leftover ${JSON.stringify(leftBehind)}`)
+  await soloAgain()
+
+  // A LOWER-key player arrives: this client is no longer the owner, so it stands
+  // all of its own down and defers. With one human and three asked, only
+  // deference — not the seat subtraction — can take the board to zero, which is
+  // what separates this from the check above.
+  const deferred = await until(async () => (
+    (await seats([lower])) === 0 && !(await page.evaluate(() => window.__game.ownsBots)) ? true : null))
+  check('a lower-key owner stands this client\'s bots all the way down', !!deferred,
+    `botCount=${await seats([lower])}, ownsBots=${await page.evaluate(() => window.__game.ownsBots)}`)
+  await soloAgain()
+
+  // The control for the checks above: without it, "botCount is 0" would also be
+  // true of a build that never spawned any, and every check in this section
+  // would pass against the feature being missing entirely.
   check('the control: they were really there a moment ago', !!spawned && asPeers.length === 3)
 
   // --------------------------------------------------------- the bot control
