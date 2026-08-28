@@ -4352,8 +4352,17 @@ export class Game {
     // The kill cam. Only for a death somebody else caused — a self-destruct
     // has no camera to sit behind, and watching your own mistake from your own
     // seat is what the last three seconds already were.
+    //
+    // **Two frames, not five.** The tape samples from `update`, so how many
+    // frames the last three seconds hold is a fact about the device: a phone at
+    // twelve frames a second or a laptop under load can have four, and a
+    // player on a slow machine would silently never get a kill cam. Two is the
+    // real requirement — the camera anchors on the last frame and the playhead
+    // needs somewhere to walk from — and `killcamFrame` already refuses a
+    // replay whose killer is not in the final frame, which is the condition
+    // that actually matters.
     this.killcam =
-      killer && !fromBot && this.tape.length > 4
+      killer && !fromBot && this.tape.length >= 2
         ? { from: performance.now(), killer, frames: this.tape.slice() }
         : null
     this.pushFeed(killerName ? `${killerName} killed you` : 'you self-destructed')

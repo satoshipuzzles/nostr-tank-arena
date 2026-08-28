@@ -77,9 +77,11 @@ const arm = (seconds = 1.6) =>
         peer.lastSeen = performance.now()
         await sleep(50)
       }
-      // The page records on its own frames, so give it a beat of quiet to fill
-      // rather than assuming a busy loop left room for any.
-      await sleep(900)
+      // Polled, not slept. The tape samples from the render loop, and how many
+      // frames it holds after a fixed beat is a fact about how busy the machine
+      // is — reported red on a loaded box while it was green on mine, which is
+      // this fixture's window rather than the feature.
+      for (let i = 0; i < 60 && g.tape.length < 3; i++) await sleep(100)
       g.tank.x = 1100
       g.tank.y = 620
       return { tape: g.tape.length, peerAt: Math.round(peer.view.x) }
@@ -148,6 +150,41 @@ try {
     return { on: !!g.killcam, killer: g.killcam?.killer === PEER, frames: g.killcam?.frames.length ?? 0 }
   }, PEER)
   check('a kill by another player books a replay', booked.on && booked.killer, JSON.stringify(booked))
+
+  // **The device-speed case, which the fixture above was hiding.**
+  //
+  // The tape samples from the render loop, so how many frames the last three
+  // seconds hold is a fact about the machine: a phone at a few frames a second
+  // has two or three, and a gate of "more than four" silently means no kill cam
+  // for anybody on a slow device. Two frames is the real requirement — the
+  // camera anchors on the last one and the playhead needs somewhere to walk
+  // from — and this is the check that says so.
+  const thin = await page.evaluate((PEER) => {
+    const g = window.__game
+    g.killcam = null
+    g.tape.length = 0
+    const now = performance.now()
+    for (const t of [now - 400, now - 100]) {
+      g.tape.push({
+        t,
+        tanks: [
+          { s: g.identity.sessionPubkey, x: 1100, y: 620, hull: 0, gun: 0, dead: false },
+          { s: PEER, x: 500, y: 600, hull: 0, gun: 0, dead: false },
+        ],
+        shells: [],
+      })
+    }
+    g.tank.dead = false
+    g.tank.hp = 1
+    g.die(PEER)
+    g.tank.respawnAt = performance.now() + 60_000
+    return { frames: g.tape.length, booked: !!g.killcam }
+  }, PEER)
+  check(
+    'a tape of two frames is still a replay — a slow device gets one too',
+    thin.frames === 2 && thin.booked,
+    JSON.stringify(thin),
+  )
 
   const live = await until(async () => {
     const c = await camState()
