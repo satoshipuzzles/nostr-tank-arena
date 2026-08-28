@@ -173,7 +173,13 @@ export const SOLO: Binding = { keys: 'both', pad: 'any', mouse: true }
  */
 export const PLAYER_TWO: Binding = { keys: 'arrows', pad: 1, mouse: false }
 
-const DRIVE_KEYS: Record<
+/**
+ * Exported so the settings screen can *print* the bindings rather than have
+ * somebody type them out again. The issue that asked for this screen described
+ * today's controls as "undocumented keys"; a second hand-written copy of them
+ * would be documentation that goes stale on the first rebind.
+ */
+export const DRIVE_KEYS: Record<
   Binding['keys'],
   {
     up: string[]

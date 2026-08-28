@@ -9,7 +9,8 @@ import { BlockClock } from './blocks'
 import { BOT_COUNT, MAX_BOTS } from './bots'
 import { Game, KILLCAM_MS, NUKE_FLASH_MS, STRIKE_GAP, STRIKE_RADIUS, bombsFor, LOADOUT_TIERS, TIER_LABELS, DEFAULT_LOADOUT, parseLoadout, rewardsForTier } from './game'
 import type { FeedParty, Loadout } from './game'
-import { Input, PLAYER_TWO, SOLO, type Scheme } from './input'
+import { Input, PLAYER_TWO, SOLO, type Binding, type Scheme } from './input'
+import { DIGIT_KEYS, GAME_KEYS, PAD_KEYS, drivingKeys, keyLabel } from './keymap'
 import { TouchSticks } from './touch'
 
 import { DEFAULT_RELAYS, Identity, Net, mergeRelays } from './nostr'
@@ -565,7 +566,11 @@ const sfx = new Sfx()
 soundInput.value = sfx.muted ? 'off' : 'on'
 
 function paintSoundButton(): void {
-  $('sound-toggle').textContent = sfx.muted ? 'Sound: off' : 'Sound: on'
+  const word = sfx.muted ? 'Sound: off' : 'Sound: on'
+  $('sound-toggle').textContent = word
+  // The settings screen carries the same control rather than a second one, so
+  // muting with `M` mid-round leaves the two agreeing when the panel opens.
+  $('settings-mute').textContent = word
 }
 paintSoundButton()
 
@@ -4444,3 +4449,97 @@ $('board-mode-tabs').addEventListener('click', (e) => {
 $('board-close').addEventListener('click', () => {
   board.hidden = true
 })
+
+// ------------------------------------------------------------------ settings
+//
+// Puzz asked for one screen holding the loadouts, the controller settings and
+// the player card. Everything in it already existed and was scattered — the
+// relays behind a disclosure at the foot of the lobby, the controls written
+// down nowhere, the volume a single on/off — so this panel *moves* them rather
+// than growing a second copy of any of it. The relay editor in here is the
+// same element it always was; there is no second one to drift.
+
+const settings = $('settings')
+
+/** Which player's keys the reference is showing. */
+let keysShown: Binding['keys'] = 'both'
+
+const kbd = (label: string): string => `<kbd>${label}</kbd>`
+
+function paintKeymap(): void {
+  $('keymap-drive').innerHTML = drivingKeys(keysShown)
+    .map((r) => `<tr><td>${r.action}</td><td>${r.keys.map(kbd).join('')}</td></tr>`)
+    .join('')
+  $('keymap-game').innerHTML = [
+    ...GAME_KEYS.map((k) => `<tr><td>${k.action}</td><td>${kbd(keyLabel(k.code))}</td></tr>`),
+    `<tr><td>${DIGIT_KEYS.action}</td><td>${kbd(DIGIT_KEYS.label)}</td></tr>`,
+  ].join('')
+  $('keymap-pad').innerHTML = PAD_KEYS.map(
+    (r) => `<tr><td>${r.action}</td><td>${r.keys.map(kbd).join('')}</td></tr>`,
+  ).join('')
+  // `aria-pressed`, which is what every other segmented control in this file
+  // uses and what `.seg button[aria-pressed='true']` paints. The first version
+  // toggled a class, so the selected scheme was styled exactly like the two
+  // that were not — invisible to a DOM assertion, obvious in a screenshot.
+  for (const b of $('settings-scheme').querySelectorAll<HTMLButtonElement>('button')) {
+    b.setAttribute('aria-pressed', String(b.dataset.keys === keysShown))
+  }
+}
+
+function paintVolume(): void {
+  const pct = Math.round(sfx.volume * 100)
+  ;($('volume') as HTMLInputElement).value = String(pct)
+  $('volume-value').textContent = `${pct}%`
+}
+
+function openSettings(): void {
+  settings.hidden = false
+  paintKeymap()
+  paintVolume()
+  paintSoundButton()
+}
+
+// Both doors: the lobby before a round, and the in-game menu during one.
+$('show-settings').addEventListener('click', openSettings)
+$('lobby-settings').addEventListener('click', openSettings)
+$('settings-close').addEventListener('click', () => {
+  settings.hidden = true
+})
+
+$('settings-scheme').addEventListener('click', (e) => {
+  const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-keys]')
+  if (!btn) return
+  keysShown = (btn.dataset.keys ?? 'both') as Binding['keys']
+  paintKeymap()
+})
+
+// `input`, not `change`: the level is applied to the live gain node, so a
+// player dragging the slider hears the result while they are dragging it.
+$('volume').addEventListener('input', (e) => {
+  sfx.setVolume(Number((e.target as HTMLInputElement).value) / 100)
+  paintVolume()
+})
+$('settings-mute').addEventListener('click', () => {
+  sfx.toggle()
+  soundInput.value = sfx.muted ? 'off' : 'on'
+  paintSoundButton()
+})
+
+/**
+ * The garage, the streak loadout and the player card stay in the lobby.
+ *
+ * They are not settings: they change what you take into a round, and they sit
+ * next to the game you are about to start for the same reason a rack of clubs
+ * is at the first tee. Settings links to them rather than moving them, which
+ * is what the issue asked for, and the link closes the panel and scrolls the
+ * thing into view so the trip is one press rather than a hunt.
+ */
+const jumpTo = (id: string) => () => {
+  settings.hidden = true
+  board.hidden = true
+  const el = document.getElementById(id)
+  el?.scrollIntoView({ block: 'center' })
+}
+$('settings-garage').addEventListener('click', jumpTo('tank-cam'))
+$('settings-streaks').addEventListener('click', jumpTo('loadout'))
+$('settings-card').addEventListener('click', jumpTo('cards'))
