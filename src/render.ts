@@ -1508,6 +1508,12 @@ interface TankView {
   streak: number
   /** The finish this tank wears. See `src/skins.ts`. */
   skin: SkinId
+  /**
+   * Custom art (a validated data URL) worn over the hull, or null. Wins over
+   * `skin` when set; until the art arrives off the relay this is null and the
+   * tank wears `skin`'s fail-soft. See `src/customskins.ts`.
+   */
+  art: string | null
   /** True for the local player, whose ring is always drawn. */
   mine: boolean
   /**
@@ -1633,9 +1639,51 @@ function camoTexture(camo: CamoId, hue: number): THREE.CanvasTexture {
   return texture
 }
 
-function applySkin(rig: TankRig, skin: Skin, hue: number): void {
+/**
+ * Textures for custom art, keyed by the data URL itself — a data URL is its
+ * own content hash. Bounded: a long session in a busy lobby meets at most a
+ * few dozen outfits, but "at most" is a hope and this is a cap.
+ */
+const artCache = new Map<string, THREE.Texture>()
+
+function artTexture(art: string): THREE.Texture {
+  const held = artCache.get(art)
+  if (held) return held
+  if (artCache.size > 64) artCache.clear()
+  const img = new Image()
+  const tex = new THREE.Texture(img)
+  tex.colorSpace = THREE.SRGBColorSpace
+  // The data URL was validated on arrival (`isSafeArt`) and decodes locally —
+  // there is no network here and nothing to time out.
+  img.onload = () => {
+    tex.needsUpdate = true
+  }
+  img.src = art
+  artCache.set(art, tex)
+  return tex
+}
+
+function applySkin(rig: TankRig, skin: Skin, hue: number, art: string | null = null): void {
   const h = hue / 360
   const light = Math.max(0.08, Math.min(0.95, 0.58 * skin.light))
+  if (art) {
+    // Custom art covers the hull, so the hue moves to the trim — the carbon
+    // rule, for the carbon reason: a tank whose colour is nowhere is a tank
+    // nobody can tell apart at speed. The art is shown as uploaded: no hue
+    // tint, no light dial — recolouring somebody's own picture is a bug
+    // report, not a feature.
+    const tex = artTexture(art)
+    if (rig.body.map !== tex) {
+      rig.body.map = tex
+      rig.body.needsUpdate = true
+    }
+    rig.body.color.setHSL(0, 0, 0.88)
+    rig.body.metalness = 0.08
+    rig.body.roughness = 0.6
+    rig.body.emissive.setHSL(h, 0.9, 0.05)
+    rig.trim.color.setHSL(h, 0.85, 0.55)
+    return
+  }
   if (skin.camo) {
     // The tones live in the texture; `color` becomes the light/soot dial the
     // rest of the pipeline (wear's multiply, the skin's own `light`) turns.
@@ -2921,6 +2969,7 @@ export class Renderer {
         verified: true,
         streak: 0,
         skin: t.s === me ? game.skin : (peer?.skin ?? DEFAULT_SKIN),
+        art: t.s === me ? game.customArt : (peer?.customArt ?? null),
         mine: t.s === me,
         team: t.s === me ? game.team : (peer?.view.team ?? 0),
         ourTeam: game.team,
@@ -3036,6 +3085,7 @@ export class Renderer {
       verified: true,
       streak: game.streak,
       skin: game.skin,
+      art: game.customArt,
       mine: true,
       team: game.team,
       ourTeam: game.team,
@@ -3081,6 +3131,7 @@ export class Renderer {
         verified: peer.pubkey !== null || peer.bot === true,
         streak: peer.streak,
         skin: peer.skin,
+        art: peer.customArt,
         mine: localSessions?.has(peer.session) ?? false,
         team: peer.view.team,
         ourTeam: game.team,
@@ -3246,7 +3297,7 @@ export class Renderer {
       rig.trim.color.setHex(0x3a4049)
       rig.body.emissive.setHex(0x000000)
     } else {
-      applySkin(rig, SKINS[v.skin] ?? SKINS[DEFAULT_SKIN], hue)
+      applySkin(rig, SKINS[v.skin] ?? SKINS[DEFAULT_SKIN], hue, v.art)
       this.wear(rig, v, now, dt, eye && this.view === 'cockpit')
     }
 
@@ -4596,9 +4647,9 @@ export class TankPreview {
   }
 
   /** Point it at a finish and a player colour. */
-  setSkin(skin: SkinId, hue: number): void {
+  setSkin(skin: SkinId, hue: number, art: string | null = null): void {
     if (this.disposed) return
-    applySkin(this.rig, SKINS[skin] ?? SKINS[DEFAULT_SKIN], hue)
+    applySkin(this.rig, SKINS[skin] ?? SKINS[DEFAULT_SKIN], hue, art)
   }
 
   /** Who is driving: the callsign's initials, or the npub's picture once it lands. */

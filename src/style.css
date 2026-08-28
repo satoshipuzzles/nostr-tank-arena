@@ -1149,6 +1149,41 @@ body.emp #hud::before {
 #skin .seg button { font-size: 12px; padding: 7px 6px; }
 #skin .seg button:disabled { opacity: 0.35; cursor: default; }
 
+/* Your own art: a rack of saved uploads under the axes. The thumbnail IS the
+   button — a costume is picked by looking at it, not by reading its name. */
+#custom-skin { display: grid; gap: 7px; margin-top: 7px; }
+.custom-rack { display: flex; flex-wrap: wrap; gap: 8px; }
+.custom-card { position: relative; display: inline-block; }
+.custom-wear {
+  width: 52px;
+  height: 52px;
+  padding: 0;
+  border-radius: 10px;
+  border: 2px solid var(--line);
+  background: #0b0f18;
+  overflow: hidden;
+  cursor: pointer;
+  line-height: 0;
+}
+.custom-wear img { width: 100%; height: 100%; object-fit: cover; }
+.custom-wear[aria-pressed='true'] { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(255, 200, 87, 0.25); }
+.custom-del {
+  position: absolute;
+  top: -7px;
+  right: -7px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--dim);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+.custom-del:hover { color: #ff6b6b; }
+
 /* The driver's card, under the skin picker. */
 #profile { display: grid; gap: 7px; margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--line); }
 .profile-row { display: flex; align-items: center; gap: 9px; }

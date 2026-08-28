@@ -20,6 +20,16 @@ import type { Event as NostrEvent } from 'nostr-tools'
 import { modifierForBlock } from './modifiers'
 import { MAG_SIZE, RELOAD } from './sim'
 import { SKINS, PATTERNS, FINISHES, skinFor, patternOf, finishOf, asSkin } from './skins'
+import {
+  type CustomSkin,
+  SKIN_D_PREFIX,
+  SKIN_TAG,
+  encodeArt,
+  isSafeArt,
+  isSlug,
+  parseSkinContent,
+  slugify,
+} from './customskins'
 import type { Pattern, FinishId } from './skins'
 import { CARDS, DEFAULT_CARD, asCard, cardArt, cardOf, noCareer, unlocked } from './cards'
 import type { CardId, Career } from './cards'
@@ -153,13 +163,21 @@ const skinInput = {
   },
 }
 const paintSkinBlurb = () => {
-  $('skin-blurb').textContent = SKINS[asSkin(skinInput.value)].blurb
+  const worn = wornCustomSkin()
+  $('skin-blurb').textContent = worn
+    ? `${worn.name} — your own art. The hue moves to the trim.`
+    : SKINS[asSkin(skinInput.value)].blurb
 }
 $('skin-pattern').addEventListener('click', () => {
+  wearCustom(null)
   paintCarbonButton()
   paintSkinBlurb()
 })
-$('skin-finish').addEventListener('click', paintSkinBlurb)
+$('skin-finish').addEventListener('click', () => {
+  wearCustom(null)
+  paintSkinBlurb()
+})
+
 
 const playersInput = segmented('players')
 
@@ -239,6 +257,192 @@ const store = (k: string, v: string) => {
     /* private mode, not worth failing over */
   }
 }
+
+// ------------------------------------------------------- custom skins
+
+/**
+ * The player's own art, worn over the hull. The design decisions — the image
+ * lives *inside* the skin event as a bounded data URL, one event per skin,
+ * the hue survives by the carbon rule — are written down in customskins.ts.
+ *
+ * The collection lives in localStorage and is republished to the relays at
+ * play time (one addressable event per skin, alongside the attestation that
+ * names it, so the signer asks once). Peers resolve the marker through
+ * `resolvePeerArt` below.
+ */
+let customSkins: CustomSkin[] = (() => {
+  try {
+    const v = JSON.parse(stored('tank.customskins') ?? '[]') as unknown
+    if (!Array.isArray(v)) return []
+    return v.filter(
+      (s): s is CustomSkin =>
+        !!s && typeof s === 'object' && isSlug((s as CustomSkin).slug ?? '') &&
+        typeof (s as CustomSkin).name === 'string' && isSafeArt((s as CustomSkin).art),
+    )
+  } catch {
+    return []
+  }
+})()
+let wornSlug: string | null = (() => {
+  const v = stored('tank.wornskin')
+  return v && customSkins.some((s) => s.slug === v) ? v : null
+})()
+
+const wornCustomSkin = (): CustomSkin | null =>
+  customSkins.find((s) => s.slug === wornSlug) ?? null
+
+function wearCustom(slug: string | null): void {
+  wornSlug = slug && customSkins.some((s) => s.slug === slug) ? slug : null
+  store('tank.wornskin', wornSlug ?? '')
+  paintCustomRack()
+  if (running) {
+    const g = running.players[0].game
+    g.wornCustom = wornSlug
+    g.customArt = wornCustomSkin()?.art ?? null
+  }
+}
+
+// `escapeHtml` lives far below and calling it during module init is the
+// temporal-dead-zone crash paintLoadout documents — and unlike the tables
+// there, skin names ARE input (filenames). A local escaper, hoisted.
+function escAttr(v: string): string {
+  return v.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+}
+
+function paintCustomRack(): void {
+  const rack = $('custom-rack')
+  rack.innerHTML = customSkins
+    .map(
+      (s) =>
+        `<span class="custom-card">` +
+        // The art is our own saved data URL, validated on the way in.
+        `<button type="button" class="custom-wear" data-slug="${s.slug}" ` +
+        `aria-pressed="${s.slug === wornSlug}" title="${escAttr(s.name)}">` +
+        `<img src="${s.art}" alt="${escAttr(s.name)}"></button>` +
+        `<button type="button" class="custom-del" data-del="${s.slug}" ` +
+        `aria-label="delete ${escAttr(s.name)}">&times;</button></span>`,
+    )
+    .join('')
+  rack.hidden = customSkins.length === 0
+}
+
+const customNote = (text: string) => {
+  const n = $('custom-note')
+  n.textContent = text
+  n.hidden = !text
+}
+
+$('custom-upload').addEventListener('click', () => $('custom-file').click())
+$('custom-file').addEventListener('change', async () => {
+  const input = $('custom-file') as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  const art = await encodeArt(file)
+  if (!art) {
+    customNote('That image would not compress to a texture — try a simpler one.')
+    return
+  }
+  const name = (file.name.replace(/\.[a-z0-9]+$/i, '') || 'my skin').slice(0, 24)
+  let slug = slugify(name) || 'skin'
+  // A re-upload of the same name replaces it, which is what a person fixing
+  // their art expects; only a *different* skin needs a fresh slug.
+  const existing = customSkins.find((s) => s.slug === slug)
+  if (existing) existing.art = art
+  else customSkins.push({ slug, name, art })
+  if (customSkins.length > 12) customSkins.shift()
+  store('tank.customskins', JSON.stringify(customSkins))
+  customNote('')
+  wearCustom(slug)
+  paintSkinBlurb()
+  paintPreview()
+})
+$('custom-rack').addEventListener('click', (e) => {
+  const del = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-del]')
+  if (del) {
+    customSkins = customSkins.filter((s) => s.slug !== del.dataset.del)
+    store('tank.customskins', JSON.stringify(customSkins))
+    if (wornSlug === del.dataset.del) wearCustom(null)
+    else paintCustomRack()
+    paintSkinBlurb()
+    paintPreview()
+    return
+  }
+  const wear = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-slug]')
+  if (!wear) return
+  wearCustom(wear.dataset.slug === wornSlug ? null : (wear.dataset.slug ?? null))
+  paintSkinBlurb()
+  paintPreview()
+})
+paintCustomRack()
+
+/** Publish the worn skin as its addressable event. See the design notes above. */
+async function publishWornSkin(game: Game): Promise<void> {
+  const worn = wornCustomSkin()
+  if (!worn || game.watching) return
+  try {
+    const signed = await game.identity.signAsSelf({
+      kind: 30078,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [
+        ['d', SKIN_D_PREFIX + worn.slug],
+        ['t', SKIN_TAG],
+      ],
+      content: JSON.stringify({ name: worn.name, art: worn.art }),
+    })
+    game.net.publish(signed)
+    // The SAME signed event again, twice, on a short tail. Publishing is
+    // fire-and-forget and this one is a one-shot at the busiest moment of a
+    // connection's life — a drop here would leave every peer unable to dress
+    // this tank for the whole session. A relay that already has it answers
+    // "duplicate", which costs nothing, and no new signature is asked for.
+    setTimeout(() => game.net.publish(signed), 15_000)
+    setTimeout(() => game.net.publish(signed), 60_000)
+  } catch {
+    // A declined signer means peers see plastic in the right hue. The local
+    // art is untouched, and nothing downstream depends on this send.
+  }
+}
+
+/**
+ * Resolve peers' custom art off the relays.
+ *
+ * One bounded query per (pubkey, slug), retried at most twice more with a
+ * 15-second spacing — the event is addressable and tiny, but a wearer whose
+ * publish was declined or dropped would otherwise cost a REQ every poll
+ * forever, and the relay budget is a house rule. Misses fail soft: the tank
+ * keeps wearing plastic in its own hue.
+ */
+const artTried = new Map<string, { tries: number; nextAt: number }>()
+setInterval(() => {
+  if (!running) return
+  const now = performance.now()
+  const game = running.players[0].game
+  for (const peer of game.peers.values()) {
+    if (!peer.customSkin || peer.customArt || !peer.pubkey) continue
+    if (game.isBot(peer.session)) continue
+    const slug = peer.customSkin
+    const key = `${peer.pubkey}/${slug}`
+    const state = artTried.get(key) ?? { tries: 0, nextAt: 0 }
+    if (state.tries >= 3 || now < state.nextAt) continue
+    artTried.set(key, { tries: state.tries + 1, nextAt: now + 15_000 })
+    void game.net
+      .list({ kinds: [30078], authors: [peer.pubkey], '#d': [SKIN_D_PREFIX + slug] })
+      .then((events) => {
+        const latest = [...events].sort((a, b) => b.created_at - a.created_at)[0]
+        const parsed = latest ? parseSkinContent(latest.content, slug) : null
+        // Applied to whoever wears that outfit *now* — the peer object may
+        // have been replaced while the query was in flight.
+        if (!parsed) return
+        for (const p of game.peers.values()) {
+          if (p.pubkey === latest.pubkey && p.customSkin === slug) p.customArt = parsed.art
+        }
+      })
+      .catch(() => {
+        // The retry budget above already covers a relay that timed out.
+      })
+  }
+}, 2_000)
 
 nameInput.value = stored('tank.name') ?? ''
 roomInput.value = params.get('room') ?? stored('tank.room') ?? 'lobby'
@@ -654,7 +858,7 @@ try {
 
 function paintPreview(): void {
   if (!preview) return
-  preview.setSkin(asSkin(skinInput.value), PREVIEW_HUE)
+  preview.setSkin(asSkin(skinInput.value), PREVIEW_HUE, wornCustomSkin()?.art ?? null)
   preview.setDriver(nameInput.value.trim() || 'tank', null, PREVIEW_HUE)
 }
 $('skin-pattern').addEventListener('click', paintPreview)
@@ -1957,13 +2161,22 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
 
     const net = new Net(relays)
     const profiles = new Profiles(net)
-    const game = new Game(identity, net, room, name, color, watching, skin, cardPick)
+    const wornSkin = wornCustomSkin()
+    const game = new Game(
+      identity, net, room, name, color, watching, skin, cardPick,
+      wornSkin?.slug ?? null, wornSkin?.art ?? null,
+    )
     // Only player one has an ear. Two local players share one set of speakers,
     // and every event player two publishes is already heard here as a peer —
     // positioned, through the same code a remote player's shot goes through. A
     // second sink would play the same shot twice.
     game.sfx = (sound, opts) => sfx.play(sound, opts)
     await game.start()
+    // The worn art, republished so peers can dress this tank. Addressable and
+    // tiny, sent at the same moment as the attestation so a NIP-07 signer
+    // asks once per sitting rather than ambushing mid-round. A decline is a
+    // costume that stays local — nothing else is affected.
+    void publishWornSkin(game)
 
     const players: Player[] = [{ game, input: new Input(canvas, { ...SOLO }) }]
     // Player one owns the glass. There is no second thumb pair on a phone, and
