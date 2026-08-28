@@ -397,7 +397,7 @@ const CHOPPER_GEO = {
   rotor2: new THREE.BoxGeometry(9, 3, 96),
   disc: new THREE.CircleGeometry(52, 26),
   mast: new THREE.CylinderGeometry(3, 3, 16, 8),
-  tracer: new THREE.BoxGeometry(2.4, 11, 2.4),
+  tracer: new THREE.BoxGeometry(3.4, 15, 3.4),
   flash: new THREE.SphereGeometry(5, 8, 6),
   splash: new THREE.RingGeometry(CHOPPER_SPREAD - 9, CHOPPER_SPREAD, 30),
   shadow: new THREE.CircleGeometry(30, 22),
