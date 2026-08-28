@@ -59,7 +59,8 @@
     "test:tdm": "node test/tdm.mjs",
     "test:cards": "node test/cards.mjs",
     "test:killcam": "node test/killcam.mjs",
-    "test:covermask": "node test/covermask.mjs"
+    "test:covermask": "node test/covermask.mjs",
+    "test:stickers": "node test/stickers.mjs"
   },
   "dependencies": {
     "nostr-tools": "^2.10.4",

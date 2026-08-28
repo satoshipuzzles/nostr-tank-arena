@@ -299,6 +299,14 @@
               <input type="file" id="custom-file" accept="image/png,image/jpeg,image/webp" hidden>
               <p class="fine" id="custom-note" hidden></p>
             </div>
+            <!-- Emoji stickers on the hull. One tap on, one tap off, four deck
+                 corners — the grid is filled from STICKER_CATALOG in
+                 src/stickers.ts, which is also the receiver-side validation,
+                 so the picker cannot offer what a peer would refuse. -->
+            <div id="stickers">
+              <span class="seg-label">Stickers <span class="fine" id="sticker-count"></span></span>
+              <div class="sticker-grid" id="sticker-grid" role="group" aria-label="Emoji stickers"></div>
+            </div>
             <!-- Said out loud rather than faked. The finish is what you are
                  choosing here; the colour is dealt from your npub when you sit
                  down, and a preview that invented one would be lying about the

@@ -29,6 +29,7 @@ import { Identity, Net } from './nostr'
 import { DEFAULT_SKIN, asSkin, type SkinId } from './skins'
 import { CUSTOM_PREFIX, customRefOf } from './customskins'
 import { DEFAULT_CARD, asCard, type CardId } from './cards'
+import { asStickers } from './stickers'
 import {
   KIND_CLAIM,
   KIND_DEATH,
@@ -656,6 +657,12 @@ export interface Peer {
    */
   card: CardId
   /**
+   * Emoji stickers on their hull, off the same attestation. Only catalog
+   * entries survive the parse — see `src/stickers.ts` for why that is the
+   * whole validation.
+   */
+  stickers: string[]
+  /**
    * A local practice tank rather than somebody on a relay.
    *
    * Read by the renderer, which otherwise draws the `?` it puts on any peer
@@ -1046,6 +1053,8 @@ export class Game {
     public wornCustom: string | null = null,
     /** Our own art for the renderer, resolved locally at construction. */
     public customArt: string | null = null,
+    /** Emoji stickers on our hull, slot by slot. See `src/stickers.ts`. */
+    public stickers: string[] = [],
   ) {
     this.displayColor = color
     const spawn = SPAWNS[Math.floor(Math.random() * SPAWNS.length)]
@@ -1130,6 +1139,9 @@ export class Game {
       sk: this.wornCustom ? CUSTOM_PREFIX + this.wornCustom : this.skin,
       cc: this.card,
     }
+    // Absent, not empty: a bare hull is the default, and `em: []` would be
+    // three bytes of saying so on every attestation forever.
+    if (this.stickers.length) payload.em = this.stickers
     const signed = await this.identity.signAsSelf({
       kind: KIND_SESSION,
       created_at: Math.floor(Date.now() / 1000),
@@ -1289,6 +1301,7 @@ export class Game {
       peer.customArt = null
     }
     peer.card = asCard(p.cc)
+    peer.stickers = asStickers(p.em)
   }
 
   private ensurePeer(session: string): Peer {
@@ -1329,6 +1342,7 @@ export class Game {
         customSkin: null,
         customArt: null,
         card: DEFAULT_CARD,
+        stickers: [],
       }
       this.peers.set(session, peer)
       // Somebody just arrived, and they missed everything we have already said.

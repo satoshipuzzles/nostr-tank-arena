@@ -32,6 +32,7 @@ import {
 } from './customskins'
 import type { Pattern, FinishId } from './skins'
 import { CARDS, DEFAULT_CARD, asCard, cardArt, cardOf, noCareer, unlocked } from './cards'
+import { STICKER_CATALOG, STICKER_SLOTS, asStickers } from './stickers'
 import type { CardId, Career } from './cards'
 import { type Buffs, PICKUPS, type PickupKind, iconSvg } from './pickups'
 import { type Profile, Profiles, shortNpub } from './profiles'
@@ -845,10 +846,62 @@ paintModes()
  * the one thing on a tank that is not cosmetic — your hue is how eight players
  * tell each other apart. So the garage shows the finish, and says so.
  */
+/**
+ * Stickers: one tap on, one tap off.
+ *
+ * The grid is the whole interaction — a worn sticker is lit, tapping it peels
+ * it off, tapping a fresh one takes the next free deck corner (of four; see
+ * `src/stickers.ts` for why four). No slot-then-emoji two-step: on a phone
+ * that is a mode, and a mode in a lobby is a thing to get stuck in.
+ */
+let stickerPicks: string[] = (() => {
+  try {
+    return asStickers(JSON.parse(stored('tank.stickers') ?? '[]'))
+  } catch {
+    return []
+  }
+})()
+
+for (const emoji of STICKER_CATALOG) {
+  const b = document.createElement('button')
+  b.type = 'button'
+  b.dataset.value = emoji
+  b.textContent = emoji
+  $('sticker-grid').appendChild(b)
+}
+
+function paintStickers(): void {
+  for (const b of $('sticker-grid').querySelectorAll('button')) {
+    b.setAttribute('aria-pressed', String(stickerPicks.includes(b.dataset.value!)))
+  }
+  $('sticker-count').textContent = `${stickerPicks.length}/${STICKER_SLOTS}`
+}
+
+$('sticker-grid').addEventListener('click', (e) => {
+  const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-value]')
+  if (!b) return
+  const emoji = b.dataset.value!
+  const worn = stickerPicks.indexOf(emoji)
+  if (worn >= 0) stickerPicks.splice(worn, 1)
+  else if (stickerPicks.length < STICKER_SLOTS) stickerPicks.push(emoji)
+  else return
+  store('tank.stickers', JSON.stringify(stickerPicks))
+  paintStickers()
+  paintPreview()
+  // Mid-match too: the field is read on the next attestation rebroadcast, so
+  // the room re-dresses the tank without anything being restarted.
+  if (running) running.players[0].game.stickers = [...stickerPicks]
+})
+paintStickers()
+
 const PREVIEW_HUE = 48
 let preview: TankPreview | null = null
 try {
   preview = new TankPreview($<HTMLCanvasElement>('tank-cam'))
+  // The suites reach the preview the way they reach the game and the
+  // renderer: pixels prove a cosmetic, and the garage is where a cosmetic
+  // stands still long enough to be measured.
+  ;(window as unknown as { __preview: TankPreview }).__preview = preview
 } catch {
   // No WebGL in the lobby is survivable — the canvas simply stays empty and
   // every other control still works. Failing to start the *game* is a
@@ -859,6 +912,7 @@ try {
 function paintPreview(): void {
   if (!preview) return
   preview.setSkin(asSkin(skinInput.value), PREVIEW_HUE, wornCustomSkin()?.art ?? null)
+  preview.setStickers(stickerPicks)
   preview.setDriver(nameInput.value.trim() || 'tank', null, PREVIEW_HUE)
 }
 $('skin-pattern').addEventListener('click', paintPreview)
@@ -2164,7 +2218,7 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     const wornSkin = wornCustomSkin()
     const game = new Game(
       identity, net, room, name, color, watching, skin, cardPick,
-      wornSkin?.slug ?? null, wornSkin?.art ?? null,
+      wornSkin?.slug ?? null, wornSkin?.art ?? null, [...stickerPicks],
     )
     // Only player one has an ear. Two local players share one set of speakers,
     // and every event player two publishes is already heard here as a peer —
