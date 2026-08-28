@@ -241,6 +241,39 @@ check(crates.length >= 8, 'the racking is breakable, so a room can make its own 
 const aisle = Math.min(...crates.map((c) => c.h))
 check(aisle <= 50, 'the shelves are shelves, not blocks', `thinnest ${aisle}`)
 
+// ------------------------------------------------- where the CTF flags stand
+//
+// `baseFor` pushes each corner spawn toward the centre, and for months nothing
+// asked whether the spot it lands on is open ground *on every board* — the
+// browser flags suite samples exactly one board, the chain tip's, which is how
+// The Warehouse shipped with all four bases inside the racking and The
+// Shallows with two in the water. This is the sweep that was missing: every
+// base on every board, on open ground, clear of every spawn, and the four of
+// them far enough apart that reaches cannot brush. Arithmetic only, like the
+// rest of this file.
+const { baseFor, FLAG_TEAMS, FLAG_REACH } = arena
+for (let i = 0; i < LAYOUTS.length; i++) {
+  setLayout(i)
+  resetCover()
+  const name = LAYOUTS[i].name
+  const bases = []
+  for (let t = 1; t <= FLAG_TEAMS; t++) bases.push(baseFor(t))
+  const buried = bases.find((b) => arena.pointInWall(b.x, b.y) !== null)
+  check(!buried, `${name}: every flag base is on open ground`,
+    buried && `team ${buried.team} at ${Math.round(buried.x)},${Math.round(buried.y)}`)
+  const nearSpawn = bases.find((b) =>
+    SPAWNS.some((s) => Math.hypot(s.x - b.x, s.y - b.y) <= FLAG_REACH))
+  check(!nearSpawn, `${name}: and none is within reach of a spawn`,
+    nearSpawn && `team ${nearSpawn.team}`)
+  let closest = Infinity
+  for (let a = 0; a < bases.length; a++) {
+    for (let b = a + 1; b < bases.length; b++) {
+      closest = Math.min(closest, Math.hypot(bases[a].x - bases[b].x, bases[a].y - bases[b].y))
+    }
+  }
+  check(closest > FLAG_REACH * 2, `${name}: and no two reaches can touch`, `closest ${Math.round(closest)}`)
+}
+
 console.log('')
 if (failures) {
   console.error(`${failures} failed`)

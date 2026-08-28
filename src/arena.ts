@@ -1154,6 +1154,73 @@ export const LAYOUTS: LayoutSpec[] = [
       { x: 1150, y: 700 },
     ],
   },
+  {
+    name: 'The Citadel',
+    w: 1900,
+    h: 1400,
+    // The only permanent structure fight in the game. A rock keep holds the
+    // middle — one gate in the north face, one in the south, both prize pads
+    // inside — and rock is the point: The Warehouse can be flattened and The
+    // Tinderbox flattens itself, but the keep cannot come down. It has to be
+    // *entered*, and both doors are 110 units wide for a 44-unit hull, so
+    // going in is a commitment everybody outside can see you make.
+    //
+    // Holding the inside is not free parking: the lob drops straight over the
+    // walls, and the two gates line up with the mid-edge spawns, so the room
+    // knows exactly where to look when the occupant has been in there too
+    // long. The outer cover is authored as approach cover — a covered route
+    // to each gate, none of it reaching the walls.
+    cover: () => [
+      { x: 750, y: 510, w: 150, h: 40, kind: 'rock' },
+      { x: 1010, y: 510, w: 140, h: 40, kind: 'rock' },
+      { x: 750, y: 550, w: 40, h: 300, kind: 'rock' },
+      { x: 300, y: 300, w: 220, h: 48, kind: 'crate' },
+      { x: 1450, y: 350, w: 110, h: 110, kind: 'barrel' },
+      { x: 560, y: 980, w: 220, h: 48, kind: 'hedge' },
+      { x: 640, y: 240, w: 260, h: 48, kind: 'sandbag' },
+    ],
+    spawns: corners,
+    pads: () => [
+      // Inside the keep, off-centre so its mirror is the second prize rather
+      // than a duplicate of the first.
+      { x: 900, y: 650 },
+      { x: 300, y: 700 },
+      { x: 950, y: 320 },
+    ],
+  },
+  {
+    name: 'The Orchard',
+    w: 1700,
+    h: 1300,
+    // The density board. Twenty small trees and boulders in offset rows, and
+    // none of them bigger than a tank — so no sightline survives more than
+    // about a second of driving, in either direction. The whole board plays
+    // like the corner of every other one: point-blank exchanges, constant
+    // flanks, and nowhere to set up a long gun.
+    //
+    // Almost nothing here breaks — one crate run per half is the only thing a
+    // patient room can remove. That is the counterweight to The Tinderbox
+    // three boards up: that one detonates down to an open field, this one
+    // stays exactly this cluttered to the final kill.
+    cover: () => [
+      { x: 300, y: 250, w: 70, h: 70, kind: 'hedge' },
+      { x: 600, y: 180, w: 60, h: 60, kind: 'rock' },
+      { x: 900, y: 300, w: 70, h: 70, kind: 'hedge' },
+      { x: 1200, y: 220, w: 70, h: 70, kind: 'hedge' },
+      { x: 1450, y: 400, w: 60, h: 60, kind: 'rock' },
+      { x: 450, y: 520, w: 70, h: 70, kind: 'hedge' },
+      { x: 780, y: 600, w: 60, h: 60, kind: 'rock' },
+      { x: 1100, y: 480, w: 70, h: 70, kind: 'hedge' },
+      { x: 250, y: 800, w: 70, h: 70, kind: 'hedge' },
+      { x: 1400, y: 650, w: 110, h: 48, kind: 'crate' },
+    ],
+    spawns: corners,
+    pads: () => [
+      { x: 850, y: 400 },
+      { x: 400, y: 950 },
+      { x: 1250, y: 850 },
+    ],
+  },
 ]
 
 /**
