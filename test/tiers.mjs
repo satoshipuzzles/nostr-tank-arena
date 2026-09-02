@@ -303,11 +303,15 @@ try {
     // us is one of the four places that pop it.
     g.popShield()
     const downNow = g.buffs.shieldUntil > performance.now()
-    await sleep(2400)
     // `stepRewards` runs from `update`, so let the loop turn rather than
     // calling it here — a re-arm that only happens when a test calls it is not
-    // a re-arm.
-    const back = g.buffs.shieldUntil > performance.now()
+    // a re-arm. Polled rather than slept: under software GL the loop turns
+    // seconds apart, and a fixed 2.4s beat can land before the first tick.
+    let back = false
+    for (let i = 0; i < 120 && !back; i++) {
+      await sleep(100)
+      back = g.buffs.shieldUntil > performance.now()
+    }
     return { up, downNow, back, warranty: g.buffs.bulwarkUntil > performance.now() }
   })
   check('bulwark puts a shield up', bulwark.up, JSON.stringify(bulwark))
@@ -356,14 +360,23 @@ try {
     }, false)
     g.spend(10)
     const start = g.tank.hp
-    await sleep(2500)
-    const oneTick = g.tank.hp
-    await sleep(2500)
-    const twoTicks = g.tank.hp
+    // Polled per heal rather than slept through two of them: the drone ticks
+    // from `update`, and under software GL the loop turns seconds apart — a
+    // fixed 2.5s beat reads before the first tick, then finds two heals banked
+    // in one read. The 100ms poll is far finer than any frame gap, so each
+    // heal is seen on its own.
+    let oneTick = start
+    for (let i = 0; i < 120 && oneTick === start; i++) { await sleep(100); oneTick = g.tank.hp }
+    let twoTicks = oneTick
+    for (let i = 0; i < 120 && twoTicks === oneTick; i++) { await sleep(100); twoTicks = g.tank.hp }
     // Cap: it heals to full and then stops, rather than running the hull past
     // the modifier's maximum where nothing else in the game expects it.
+    // Waited on `regenAt` moving — proof a drone tick actually ran with the
+    // hull full — where a fixed sleep on a slow box could see no tick at all
+    // and pass without testing anything.
     g.tank.hp = max
-    await sleep(2500)
+    const armed = g.regenAt
+    for (let i = 0; i < 120 && g.regenAt === armed; i++) await sleep(100)
     const capped = g.tank.hp
     return { start, oneTick, twoTicks, capped, max }
   })
@@ -443,7 +456,6 @@ try {
 
   const salvo = await page.evaluate(async () => {
     const g = window.__game
-    const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
     g.tank.dead = false
     g.strikes.clear()
     g.setLoadout(['buck', 'drone', 'salvo', 'blackout'])
@@ -457,8 +469,12 @@ try {
     }, false)
     g.spend(15)
     const runs = [...g.strikes.values()].map((s) => ({ y: Math.round(s.y), dir: s.dir }))
-    // Let the renderer draw at least once — it is what owns the stripes.
-    await sleep(600)
+    // Let the renderer draw — it is what owns the stripes. Drawn here rather
+    // than waited for: under software GL a frame takes seconds, so a sleep of
+    // any length is a coin flip between counting fresh stripes and counting
+    // whatever the last frame left on the pool — and by the time a slow loop
+    // turns on its own, the run can be over and the lanes rightly dark.
+    window.__renderer?.draw(g)
     const lanes = window.__renderer
       ? window.__renderer.strikeLanes.filter((m) => m.visible && m.material.opacity > 0.05).length
       : -1

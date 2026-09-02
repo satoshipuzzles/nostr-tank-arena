@@ -57,7 +57,17 @@ import {
   suitAim,
   underSuitFire,
 } from './suit'
-import { BOT_COUNT, MAX_BOTS, botColorFor, botNameFor, killBot, makeBot, stepBot } from './bots'
+import {
+  BOT_COUNT,
+  DEFAULT_SKILL,
+  MAX_BOTS,
+  botColorFor,
+  botNameFor,
+  botSkillFor,
+  killBot,
+  makeBot,
+  stepBot,
+} from './bots'
 import { FLAG_TEAMS, canScore, canTake, carriers } from './flags'
 import { freshState, holderOn, points, stepPoint } from './domination'
 import type { Occupant, Point, PointState } from './domination'
@@ -2535,6 +2545,16 @@ export class Game {
   botsWanted = BOT_COUNT
 
   /**
+   * How hard the practice tanks fight — an index into `BOT_SKILLS`, defaulting
+   * to the rung the shipped bot sat at. Read only by the client that owns the
+   * bots, because only it steps them: difficulty is a property of the one
+   * simulation, so a joiner who becomes owner steps them at their own setting
+   * and there is no second board to disagree with. Like `botsWanted`, a want
+   * the lobby remembers rather than anything on the wire.
+   */
+  botSkillIndex = DEFAULT_SKILL
+
+  /**
    * The old on/off view of the same setting.
    *
    * Kept because half a dozen suites drive `botsEnabled = false` to get a
@@ -2680,9 +2700,55 @@ export class Game {
   /** Every live claim we know about, ours included, keyed by session. */
   private claims = new Map<string, Claim>()
 
-  /** Who is carrying which flag right now, as everybody else computes it too. */
+  /**
+   * The sides that actually have somebody on them, capped at `FLAG_TEAMS`.
+   *
+   * There are always four bases because `baseFor` is a pure function of the
+   * layout, which is what lets every client agree on where a flag stands
+   * without a word on the wire. But "four bases exist" is not "four sides are
+   * playing", and conflating the two is the bug this exists to close: with two
+   * players on sides one and two, flags three and four still stood at their
+   * corners, and `canTake` — which only asks "is this flag mine, and is anybody
+   * carrying it" — handed them over. The carrier then ran around holding a
+   * colour belonging to nobody in the room, and could walk it home for a free
+   * capture nobody was defending, which is not a capture-the-flag game.
+   *
+   * The renderer had this right and the rules did not. `syncFlags` has always
+   * built exactly this set to decide which poles to draw, so the two disagreed:
+   * the pole for an empty side was not drawn, and the flag on it was still
+   * takeable from a base the player could not see. That is why this is a method
+   * on `Game` rather than a second copy in the renderer — one definition, read
+   * by the rules and by the drawing, so they cannot drift apart again.
+   *
+   * Sides come off the same state ticks everything else reads, so a client that
+   * has not heard from somebody yet may briefly see a smaller room. That costs
+   * a refused pickup for a moment, which is the safe direction to be wrong in:
+   * the alternative is handing out a flag that the rest of the room does not
+   * believe exists.
+   */
+  sidesInPlay(): Set<number> {
+    const sides = new Set<number>()
+    if (this.team && this.team <= FLAG_TEAMS) sides.add(this.team)
+    for (const peer of this.peers.values()) {
+      if (peer.view.team && peer.view.team <= FLAG_TEAMS) sides.add(peer.view.team)
+    }
+    return sides
+  }
+
+  /**
+   * Who is carrying which flag right now, as everybody else computes it too.
+   *
+   * Filtered to the sides in play, so a claim on an empty side's flag is
+   * ignored rather than drawn. That covers the claim we might still be holding
+   * from before the side emptied out, and a claim from a client old enough to
+   * predate the rule — neither should put a colour on the board that belongs to
+   * nobody standing on it.
+   */
   flagCarriers(now = performance.now()): Map<number, string> {
-    return carriers(this.claims.values(), now)
+    const held = carriers(this.claims.values(), now)
+    const sides = this.sidesInPlay()
+    for (const flag of [...held.keys()]) if (!sides.has(flag)) held.delete(flag)
+    return held
   }
 
   /**
@@ -2747,7 +2813,15 @@ export class Game {
     }
 
     if (this.carrying) return
+    // Counted up rather than iterated off the set: `sidesInPlay` is insertion
+    // ordered and its order differs per client, and a fixed order here keeps
+    // the tie — two bases close enough to reach at once — resolved the same way
+    // everywhere. In practice the bases are far apart and only one can ever
+    // pass `canTake`, which is exactly why the order should not be the thing
+    // holding that up.
+    const sides = this.sidesInPlay()
     for (let flag = 1; flag <= FLAG_TEAMS; flag++) {
+      if (!sides.has(flag)) continue
       if (!canTake(this.team, flag, this.tank.x, this.tank.y, carried)) continue
       this.carrying = flag
       this.claims.set(this.identity.sessionPubkey, {
@@ -2914,32 +2988,6 @@ export class Game {
     return this.bots.length
   }
 
-  /**
-   * Spawn, step and retire the practice opponents.
-   *
-   * Bots stand down — ALL of them — the moment anybody real is in the room.
-   *
-   * This reverts the one-for-one seat rule from PR #35, and the reason is
-   * written here so nobody re-lands that arithmetic without reading it. Bots
-   * are pure local simulation: `fireBot` never publishes, ids come off a
-   * per-client counter, and every client's bots hunt every client's OWN tank.
-   * But `collide` lets a bot consume any shell (`hitBot` deletes on overlap)
-   * — including one re-simulated from a REMOTE player's fire event. So in a
-   * populated room, the victim's phantom bots — clustered on the victim,
-   * because that is who they hunt — step in front of most incoming fire:
-   * shells vanish with no feedback, and bot shells drain hull from tanks the
-   * rest of the room cannot see. Live symptom, diagnosed by rainmaker:
-   * "hits aren't landing 3/4 of the time". Turning bots off locally cannot
-   * fix it, because it is the *victim's* client that eats your shot.
-   *
-   * The one-for-one seat feature (issue 1335d694) comes back only with bot
-   * AUTHORITY: one owning client stepping the bots and publishing their state
-   * on the tick like any other tank. That is a netcode change, not an
-   * arithmetic one.
-   *
-   * Checked against peers that are *not* bots, because the bots are
-   * themselves in `peers` by the time this runs a second time.
-   */
   /**
    * The session key a bot wears on the wire.
    *
@@ -3155,7 +3203,15 @@ export class Game {
       // not having teams at all. So a bot takes the nearest live thing that is
       // not on its side, which is the player for the ones against us and an
       // enemy bot for the one with us.
-      const action = stepBot(bot, this.enemyFor(bot, target, dt), dt, now, this.maxHp, this.modifier.reload)
+      const action = stepBot(
+        bot,
+        this.enemyFor(bot, target, dt),
+        dt,
+        now,
+        this.maxHp,
+        this.modifier.reload,
+        botSkillFor(this.botSkillIndex),
+      )
       if (action.fire !== null) this.fireBot(bot, action.fire)
 
       // Straight into the peer record the renderer reads. No interpolation and
