@@ -40,6 +40,7 @@ export type Sound =
   | 'siren'
   | 'blast'
   | 'rattle'
+  | 'fall'
 
 export interface PlayOpts {
   /** Where it happened, in arena pixels. Omit for something that happened to you. */
@@ -54,12 +55,25 @@ export interface PlayOpts {
 const EARSHOT = 1400
 
 const STORAGE_KEY = 'tank.sound'
+const VOLUME_KEY = 'tank.volume'
+
+/**
+ * Where the master gain sat before there was a way to move it.
+ *
+ * The slider is a fraction of *full scale*, not of this, so the default is
+ * exactly what the game has always sounded like and a player who wants it
+ * louder can have that too. Anything above about 0.8 clips on a laptop
+ * speaker when a nuke goes off, which is a thing they are allowed to choose.
+ */
+const DEFAULT_VOLUME = 0.5
 
 export class Sfx {
   private ctx: AudioContext | null = null
   private master: GainNode | null = null
   private noiseBuffer: AudioBuffer | null = null
   muted: boolean
+  /** Master level, 0..1. Persisted, and applied live while a round is running. */
+  private level: number
 
   constructor() {
     let saved: string | null = null
@@ -69,6 +83,40 @@ export class Sfx {
       /* private mode */
     }
     this.muted = saved === 'off'
+    let vol: string | null = null
+    try {
+      vol = localStorage.getItem(VOLUME_KEY)
+    } catch {
+      /* private mode */
+    }
+    const parsed = vol === null ? NaN : Number(vol)
+    // A stored value that is not a number in range is treated as absent rather
+    // than clamped to an edge: someone else's key, or a half-written one, must
+    // not silently mute the game or pin it to full.
+    this.level = Number.isFinite(parsed) && parsed >= 0 && parsed <= 1 ? parsed : DEFAULT_VOLUME
+  }
+
+  /** Master level, 0..1. */
+  get volume(): number {
+    return this.level
+  }
+
+  /**
+   * Move the master level, now rather than at the next sound.
+   *
+   * Applied to the live gain node so a slider is audible while it is being
+   * dragged — a volume control you have to fire a shell to hear is a volume
+   * control nobody trusts. Muted stays muted: the two are independent, so
+   * unmuting returns you to the level you chose rather than to the default.
+   */
+  setVolume(v: number): void {
+    this.level = Math.max(0, Math.min(1, v))
+    try {
+      localStorage.setItem(VOLUME_KEY, String(this.level))
+    } catch {
+      /* private mode */
+    }
+    if (this.master && !this.muted) this.master.gain.value = this.level
   }
 
   /**
@@ -89,7 +137,7 @@ export class Sfx {
         return
       }
       this.master = this.ctx.createGain()
-      this.master.gain.value = 0.5
+      this.master.gain.value = this.level
       this.master.connect(this.ctx.destination)
     }
     if (this.ctx.state === 'suspended') void this.ctx.resume()
@@ -111,7 +159,7 @@ export class Sfx {
       if (this.master) this.master.gain.value = 0
     } else {
       this.unlock()
-      if (this.master) this.master.gain.value = 0.5
+      if (this.master) this.master.gain.value = this.level
     }
     return this.muted
   }
@@ -247,6 +295,15 @@ export class Sfx {
         // the rhythm is the machinegun, not any single report.
         this.noise(ctx, out, t, { dur: 0.045, gain: 0.34 * volume, from: 5200, to: 1000 })
         this.tone(ctx, out, t, { type: 'square', from: 230, to: 120, dur: 0.05, gain: 0.1 * volume })
+        break
+      case 'fall':
+        // Off the rim of an edgeless board. A long dive — the pitch falls for
+        // over a second, which is what sells distance — and a soft, late thud
+        // from somewhere far below. Distinct from 'death' on purpose: no blast,
+        // because nothing exploded; the tank just left.
+        this.tone(ctx, out, t, { type: 'sawtooth', from: 640, to: 60, dur: 1.15, gain: 0.3 * volume })
+        this.tone(ctx, out, t, { type: 'triangle', from: 880, to: 110, dur: 1.0, gain: 0.16 * volume })
+        this.noise(ctx, out, t + 1.15, { dur: 0.3, gain: 0.35 * volume, from: 700, to: 50 })
         break
       case 'reload':
         // Two clacks and a rising note: the magazine going home. The rise is

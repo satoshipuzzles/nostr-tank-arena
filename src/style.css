@@ -56,7 +56,7 @@ button:disabled { opacity: 0.5; cursor: default; }
 
 /* ---------------------------------------------------------------- lobby */
 
-#lobby, #board {
+#lobby, #board, #settings {
   position: fixed;
   inset: 0;
   display: grid;
@@ -66,7 +66,7 @@ button:disabled { opacity: 0.5; cursor: default; }
   z-index: 20;
   overflow: auto;
 }
-#lobby[hidden], #board[hidden], #hud[hidden] { display: none; }
+#lobby[hidden], #board[hidden], #settings[hidden], #hud[hidden] { display: none !important; }
 
 /*
  * `min-width: 0` is the whole reason this card fits on a phone.
@@ -1471,7 +1471,7 @@ body.emp #hud::before {
  * the address bar keeps resizing.
  */
 @media (max-width: 620px) {
-  #lobby, #board { padding: 16px; align-items: start; }
+  #lobby, #board, #settings { padding: 16px; align-items: start; }
   .card { padding: 20px 18px; }
   .fields { grid-template-columns: 1fr; gap: 0; }
   .seg-row { flex-direction: column; align-items: stretch; gap: 5px; margin-bottom: 12px; }
@@ -2631,3 +2631,56 @@ button.blocktile:focus-visible {
   border: 1px solid hsl(var(--card, 200) 60% 55% / 0.45);
 }
 .death-card-slot .card-art.small { width: 13px; height: 13px; }
+
+/*
+ * Settings.
+ *
+ * A list of sections, which is the shape a phone wants — so this is written
+ * for the phone and the desktop gets it for free rather than the other way
+ * round. Nothing here sets a fixed width: the card's own `min-width: 0` above
+ * is what keeps a long relay URL from pushing the panel off the side of the
+ * glass, and a table inside it needs the same treatment.
+ */
+.settings-card { max-width: 640px; }
+.setting { margin: 22px 0; }
+.setting h3 {
+  margin: 0 0 4px;
+  font-size: 15px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #f0c869;
+}
+.setting h4 {
+  margin: 16px 0 4px;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(255,255,255,0.5);
+}
+.setting + .setting { border-top: 1px solid rgba(255,255,255,0.07); padding-top: 18px; }
+
+.slider-row { display: flex; align-items: center; gap: 12px; margin: 10px 0 6px; }
+.slider-row label { flex: 0 0 auto; font-size: 13px; color: rgba(255,255,255,0.72); }
+/* Grows and, more importantly, is allowed to shrink: a range input has an
+   intrinsic width that will otherwise widen the whole card on a 390px screen. */
+.slider-row input[type='range'] { flex: 1 1 auto; min-width: 0; accent-color: #f0c869; }
+.slider-row b { flex: 0 0 44px; text-align: right; font-variant-numeric: tabular-nums; }
+
+.keymap { width: 100%; border-collapse: collapse; font-size: 13px; }
+.keymap td { padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.05); vertical-align: top; }
+.keymap td:first-child { color: rgba(255,255,255,0.72); }
+.keymap td:last-child { text-align: right; }
+/* The keys themselves. `kbd` rather than a span because that is what it is,
+   and a screen reader saying "keyboard W" is better than it saying "W". */
+.keymap kbd {
+  display: inline-block;
+  margin-left: 5px;
+  padding: 2px 7px;
+  border: 1px solid rgba(255,255,255,0.18);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  background: rgba(255,255,255,0.06);
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+}

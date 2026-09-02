@@ -196,6 +196,25 @@ try {
 
   // ------------------------------------------------------------- taking one
 
+  // Four bases always exist, but a flag only stands for a side somebody is on.
+  // With side 2 empty, its flag cannot be taken — the control for every pickup
+  // below, which occupies the side first.
+  await stand(1, 2)
+  const emptySide = await step()
+  check("the control: an empty side's flag cannot be taken",
+    emptySide.carrying === 0, JSON.stringify(emptySide))
+
+  /** Put a live peer on a side so its flag is in play. */
+  const occupy = (team) => page.evaluate((team) => {
+    const g = window.__game
+    const p = g.ensurePeer('f0'.repeat(32))
+    p.name = 'Foe'
+    p.view.team = team
+    p.lastSeen = performance.now()
+    return true
+  }, team)
+
+  await occupy(2)
   await stand(1, 2)
   const took = await step()
   check('standing on an enemy base takes their flag',
@@ -242,6 +261,7 @@ try {
 
   // ---------------------------------------------------------------- scoring
 
+  await occupy(2)
   await stand(1, 2)
   await step()
   const carried = await page.evaluate(() => window.__game.carrying)

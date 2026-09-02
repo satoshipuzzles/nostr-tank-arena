@@ -143,6 +143,7 @@
         <button id="team-toggle" class="ghost" title="Pick a side, or none for a free-for-all (T)">Team: none</button>
         <button id="copy-link" class="ghost">Copy invite link</button>
         <button id="publish-score" class="ghost">Publish score</button>
+        <button id="show-settings" class="ghost">Settings</button>
         <button id="show-board" class="ghost">Leaderboard</button>
       </div>
     </div>
@@ -381,6 +382,7 @@
         <div class="row">
           <button id="play-nip07">Play with my npub</button>
           <button id="play-guest" class="ghost">Play as guest</button>
+          <button id="lobby-settings" class="ghost" type="button">Settings</button>
         </div>
 
         <!-- Open tables. A room in this game is just a name two people agreed
@@ -398,14 +400,118 @@
         </p>
         <p class="error" id="lobby-error" hidden></p>
 
-        <details class="advanced" id="advanced">
-          <summary>Controllers and relays</summary>
+      </div>
+    </div>
+
+    <div id="board" hidden>
+      <div class="card board-card">
+        <h2>Leaderboard</h2>
+        <p class="fine">
+          Self-reported and signed by each player. Anyone can publish any number — see
+          <b>How to cheat this</b> in the README.
+        </p>
+        <div class="row tabs">
+          <button id="board-tab-wall" class="ghost">Blocks</button>
+          <button id="board-tab-seasons" class="ghost">Seasons</button>
+          <button id="board-tab-block" class="ghost">This block</button>
+          <button id="board-tab-all" class="ghost">All time</button>
+        </div>
+        <div class="row tabs mode-tabs" id="board-mode-tabs" hidden>
+          <button class="ghost on" data-mode="">All modes</button>
+          <button class="ghost" data-mode="dm">DM</button>
+          <button class="ghost" data-mode="tdm">TDM</button>
+          <button class="ghost" data-mode="ctf">CTF</button>
+          <button class="ghost" data-mode="dom">DOM</button>
+        </div>
+        <div id="board-rows">loading…</div>
+        <button id="board-close" class="ghost">Close</button>
+      </div>
+    </div>
+
+
+    <!--
+      Settings.
+
+      Puzz, 2026-08-25: "Settings screen with tank loadouts, controller
+      settings and player cards and stats." Everything here already existed and
+      was scattered: the relays were behind a disclosure at the bottom of the
+      lobby, the controls were undocumented keys, and the volume was a single
+      on/off. Nothing is duplicated — the relay editor is the *same* element,
+      moved, because a second copy of it would drift from the first.
+
+      Reachable from the lobby and from the in-game menu, and it is a list of
+      sections, which is the easy case for a phone. It gets no desktop pass.
+    -->
+    <div id="settings" hidden>
+      <div class="card settings-card">
+        <h2>Settings</h2>
+        <p class="fine">Saved on this device. Nothing here is published.</p>
+
+        <section class="setting">
+          <h3>Sound</h3>
+          <div class="slider-row">
+            <label for="volume">Volume</label>
+            <input id="volume" type="range" min="0" max="100" step="1" aria-describedby="volume-note" />
+            <b id="volume-value">50%</b>
+          </div>
+          <div class="row">
+            <button id="settings-mute" class="ghost" type="button">Sound: on</button>
+          </div>
+          <p class="fine" id="volume-note">
+            Moves the master level as you drag it. Muting and the level are
+            separate, so unmuting returns you to the level you picked.
+          </p>
+        </section>
+
+        <section class="setting">
+          <h3>Controls</h3>
+          <div class="seg-row" id="settings-scheme-row">
+            <span class="seg-label">Keys</span>
+            <div class="seg" id="settings-scheme" role="group" aria-label="Which keys to show">
+              <button type="button" data-keys="both">Solo</button>
+              <button type="button" data-keys="wasd">Player one</button>
+              <button type="button" data-keys="arrows">Player two</button>
+            </div>
+          </div>
+          <table class="keymap" id="keymap-drive"></table>
+          <h4>In the round</h4>
+          <table class="keymap" id="keymap-game"></table>
+          <h4>Gamepad</h4>
+          <table class="keymap" id="keymap-pad"></table>
           <div id="pads">No gamepad detected. Plug one in or press a button on it.</div>
           <p class="fine">
             Browsers only reveal a controller after you press something on it — that is the
-            pairing step, and there is nothing for this game to configure. Left stick drives,
-            right stick aims, right trigger or <b>A</b> fires.
+            pairing step, and there is nothing for this game to configure.
           </p>
+        </section>
+
+        <section class="setting">
+          <h3>Your tank and streaks</h3>
+          <p class="fine">
+            The garage and the kill-streak loadout live on the lobby screen,
+            next to the game you are about to start — they change what you take
+            into a round rather than how the game behaves.
+          </p>
+          <div class="row">
+            <button id="settings-garage" class="ghost" type="button">Open the garage</button>
+            <button id="settings-streaks" class="ghost" type="button">Pick your streaks</button>
+            <button id="settings-card" class="ghost" type="button">Player card and stats</button>
+          </div>
+        </section>
+
+        <section class="setting">
+          <h3>Relays</h3>
+          <p class="fine">
+            Where this game's events go. Shells and positions ride on ephemeral
+            events, so a relay forwards them and stores nothing.
+          </p>
+          <!-- Still a `details`, and still open. The disclosure is here so a
+               long relay list can be folded away on a phone rather than to
+               hide a section of a settings screen behind a summary — and
+               `test/relay-editor.mjs` drives it by setting `open` and firing
+               `toggle`, which is the seam the rows are built on. -->
+        <details class="advanced" id="advanced" open>
+          <summary>Relay list</summary>
           <!-- The relay editor. This was a bare textarea that only wrote to
                storage when you pressed Play, which is how a new default took
                three deploys to reach the person who asked for it. The textarea
@@ -446,31 +552,9 @@
             stores, so it costs two frames and no history.
           </p>
         </details>
-      </div>
-    </div>
+        </section>
 
-    <div id="board" hidden>
-      <div class="card board-card">
-        <h2>Leaderboard</h2>
-        <p class="fine">
-          Self-reported and signed by each player. Anyone can publish any number — see
-          <b>How to cheat this</b> in the README.
-        </p>
-        <div class="row tabs">
-          <button id="board-tab-wall" class="ghost">Blocks</button>
-          <button id="board-tab-seasons" class="ghost">Seasons</button>
-          <button id="board-tab-block" class="ghost">This block</button>
-          <button id="board-tab-all" class="ghost">All time</button>
-        </div>
-        <div class="row tabs mode-tabs" id="board-mode-tabs" hidden>
-          <button class="ghost on" data-mode="">All modes</button>
-          <button class="ghost" data-mode="dm">DM</button>
-          <button class="ghost" data-mode="tdm">TDM</button>
-          <button class="ghost" data-mode="ctf">CTF</button>
-          <button class="ghost" data-mode="dom">DOM</button>
-        </div>
-        <div id="board-rows">loading…</div>
-        <button id="board-close" class="ghost">Close</button>
+        <button id="settings-close" class="ghost">Close</button>
       </div>
     </div>
 

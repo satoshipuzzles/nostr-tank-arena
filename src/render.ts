@@ -40,7 +40,7 @@ import {
 import { CHOPPER_ALT, CHOPPER_SPREAD } from './chopper'
 import { SUIT_MUZZLE, SUIT_SPREAD } from './suit'
 import { SPITFIRE_ALT, SPITFIRE_SPREAD, spitfirePos } from './spitfire'
-import { FLAG_REACH, FLAG_TEAMS, baseFor } from './flags'
+import { FLAG_REACH, baseFor } from './flags'
 import { CAPTURE_S, POINT_RADIUS } from './domination'
 
 /**
@@ -2468,6 +2468,9 @@ class Plumes {
 
 // ---------------------------------------------------------------- renderer
 
+/** How long a tank tumbles before the void has it, in ms. */
+const FALL_TUMBLE_MS = 1300
+
 export class Renderer {
   private renderer: THREE.WebGLRenderer
   private scene = new THREE.Scene()
@@ -2477,6 +2480,19 @@ export class Renderer {
 
   private rigs = new Map<string, TankRig>()
   private you = makeTank()
+
+  /**
+   * Tanks going over the rim of an edgeless board, from `game.falls`.
+   *
+   * A pool of two rather than per-fall allocation, per the house rule about
+   * geometry in the frame it is needed. Two, because a tumble lasts just over
+   * a second and a third simultaneous fall inside that window is a highlight
+   * reel, not a rendering requirement — the oldest simply stops animating.
+   * A cut-down silhouette (hull, dome, treads) rather than a full `makeTank`
+   * rig: a name plate and health pips on a tank that is leaving are the two
+   * things nobody should be reading on the way down.
+   */
+  private fallRigs: { root: THREE.Group; body: THREE.MeshStandardMaterial }[] = []
 
   /**
    * Whether this client's own tank is on screen.
@@ -2603,7 +2619,17 @@ export class Renderer {
   private clock = new THREE.Clock()
   /** The camera's resting position, before shake is added. */
   private home = new THREE.Vector3()
+  /**
+   * The middle of the board, which is what the overhead camera looks at.
+   *
+   * Seeded from the layout that happens to be loaded when the renderer is
+   * constructed and re-centred by `adoptLayout` every time the board changes,
+   * because `ARENA_W`/`ARENA_H` are not constants — `setLayout` reassigns them,
+   * and the boards are not one size.
+   */
   private target = new THREE.Vector3(ARENA_W / 2, 0, ARENA_H / 2)
+  /** Kept so the key light can be re-aimed when the board changes size. */
+  private sun: THREE.DirectionalLight | null = null
   private aimPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -AIM_PLANE_Y)
   private raycaster = new THREE.Raycaster()
   /** Scratch camera used to test a candidate framing without disturbing the real one. */
@@ -2691,7 +2717,7 @@ export class Renderer {
 
     this.scene.add(this.board)
     this.buildBoard()
-    onLayoutChange(() => this.buildBoard())
+    onLayoutChange(() => this.adoptLayout())
     this.buildLights()
     this.scene.add(this.confetti.mesh)
     this.scene.add(this.plumes.mesh)
@@ -2785,6 +2811,25 @@ export class Renderer {
     }
     this.scene.add(this.lobRing)
     this.scene.add(this.lobShadow)
+
+    for (let i = 0; i < 2; i++) {
+      const body = toy(0xffffff)
+      const trim = toy(0x333a48, { roughness: 0.85 })
+      const root = new THREE.Group()
+      const hull = new THREE.Mesh(HULL_GEO, body)
+      hull.position.y = 16
+      const dome = new THREE.Mesh(DOME_GEO, body)
+      dome.position.y = 30
+      root.add(hull, dome)
+      for (const side of [-1, 1]) {
+        const tread = new THREE.Mesh(TREAD_GEO, trim)
+        tread.position.set(0, 7, side * 17)
+        root.add(tread)
+      }
+      root.visible = false
+      this.scene.add(root)
+      this.fallRigs.push({ root, body })
+    }
 
     this.resize()
     window.addEventListener('resize', this.resize)
@@ -2946,6 +2991,7 @@ export class Renderer {
     this.scene.add(new THREE.HemisphereLight(0xc6d9ea, 0x5f7742, 1.35))
 
     const sun = new THREE.DirectionalLight(0xfff0d2, 2.15)
+    this.sun = sun
     sun.position.set(ARENA_W / 2 + 700, 1500, ARENA_H / 2 - 900)
     sun.target.position.copy(this.target)
     sun.castShadow = true
@@ -2964,6 +3010,42 @@ export class Renderer {
     cam.updateProjectionMatrix()
     sun.shadow.bias = -0.0008
     this.scene.add(sun, sun.target)
+  }
+
+  /**
+   * The board changed. Rebuild it, and re-aim everything that was pointed at
+   * the old one.
+   *
+   * `ARENA_W` and `ARENA_H` are `let` exports that `setLayout` reassigns, and
+   * the twenty boards are not one size. Everything here used to be read once,
+   * in the constructor, and never again — so the camera kept looking at the
+   * middle of whichever layout happened to be loaded when the renderer was
+   * built, and kept the framing distance it had solved for that layout's
+   * dimensions.
+   *
+   * Which is every session, not an edge case. `clock.start()` is asynchronous,
+   * so the renderer is constructed *before* the first block arrives and seeds
+   * itself from `LAYOUTS[0]`. When the block lands and the real board is set,
+   * only the geometry was rebuilt. On any board bigger than Crossroads the
+   * camera then sits aimed above and left of the true centre, which is what
+   * puts the board down and to the right of the window.
+   *
+   * The sun goes with it: its target was copied from the same stale centre, so
+   * on a large board the key light was aimed at a point well inside the near
+   * corner and the shadows leaned the wrong way.
+   */
+  private adoptLayout(): void {
+    this.buildBoard()
+    this.target.set(ARENA_W / 2, 0, ARENA_H / 2)
+    if (this.sun) {
+      this.sun.position.set(ARENA_W / 2 + 700, 1500, ARENA_H / 2 - 900)
+      this.sun.target.position.copy(this.target)
+      this.sun.target.updateMatrixWorld()
+    }
+    // Re-solves the framing distance against the new dimensions and, in board
+    // view, puts the camera on it. `framesBoard` reads `ARENA_W`/`ARENA_H`
+    // through live module bindings, so it is already looking at the new board.
+    this.resize()
   }
 
   /**
@@ -3322,6 +3404,17 @@ export class Renderer {
       this.camera.fov = cockpit ? COCKPIT_FOV : BOARD_FOV
       this.camera.near = cockpit ? 3 : 60
       this.camera.updateProjectionMatrix()
+      // The orientation has to come back too. `applyShake` copies the board
+      // camera's *position* home every frame but only re-aims it in cockpit —
+      // the overhead camera is aimed once and never again — so without this
+      // the camera returns to altitude still pointed where the replay left
+      // it, at the horizon over the killer's shoulder: sky, no board, until
+      // something shakes or the view is toggled. The cockpit rig needs
+      // nothing here; it is re-aimed per frame.
+      if (!cockpit) {
+        this.camera.position.copy(this.home)
+        this.camera.lookAt(this.target)
+      }
       for (const mesh of this.shells.values()) mesh.visible = true
     }
 
@@ -3412,6 +3505,7 @@ export class Renderer {
     this.strikes(game, now)
     this.nuke(game, now)
     this.suits(game, now)
+    this.syncFalls(game, now)
     this.syncShells(game)
     this.syncLobAim(game)
     this.syncPickups(game, now)
@@ -3917,10 +4011,12 @@ export class Renderer {
       }
       return
     }
-    if (game.team && game.team <= FLAG_TEAMS) teams.add(game.team)
-    for (const peer of game.peers.values()) {
-      if (peer.view.team && peer.view.team <= FLAG_TEAMS) teams.add(peer.view.team)
-    }
+    // The rules' own answer, not a second copy of the question. These were two
+    // separate reckonings of "which sides are here" and they disagreed: this
+    // one skipped the pole for an empty side while `canTake` still handed out
+    // its flag, so the flag came off a base that was never drawn and wore a
+    // colour nobody in the room was playing. See `Game.sidesInPlay`.
+    for (const team of game.sidesInPlay()) teams.add(team)
 
     for (const [team, rig] of this.flagPoles) {
       if (teams.has(team)) continue
@@ -4699,6 +4795,50 @@ export class Renderer {
     for (let i = n; i < this.suitTracers.length; i++) {
       this.suitTracers[i].visible = false
       this.suitSplashes[i].visible = false
+    }
+  }
+
+  /**
+   * The tumble off an edgeless board's rim.
+   *
+   * Driven off `game.falls` — position, heading and colour at the moment the
+   * centre crossed the line — and everything after that is this function's
+   * fiction: the drive speed carries the hull clear of the slab, gravity does
+   * the rest, and it tumbles around the axis parallel to the rim it went
+   * over, which is the way a body actually tips off an edge. By the end of
+   * the animation it is over a thousand units below the board and small
+   * enough on screen that hiding it reads as the void winning, not a cut.
+   */
+  private syncFalls(game: Game, now: number): void {
+    const active = game.falls.filter((f) => now - f.at < FALL_TUMBLE_MS).slice(-this.fallRigs.length)
+    for (const [i, rig] of this.fallRigs.entries()) {
+      const f = active[i]
+      if (!f) {
+        rig.root.visible = false
+        continue
+      }
+      const s = (now - f.at) / 1000
+      // Which rim it went over: the nearest edge to where the game said the
+      // tank left. The fall point is on (or just past) the line it crossed,
+      // so the nearest edge IS that line.
+      const edges = [
+        { d: f.x, vx: -1, vz: 0 },
+        { d: ARENA_W - f.x, vx: 1, vz: 0 },
+        { d: f.y, vx: 0, vz: -1 },
+        { d: ARENA_H - f.y, vx: 0, vz: 1 },
+      ]
+      let edge = edges[0]
+      for (const e of edges) if (e.d < edge.d) edge = e
+      rig.body.color.setHSL(((f.hue % 360) + 360) % 360 / 360, 0.62, 0.54)
+      rig.root.visible = true
+      rig.root.position.set(
+        f.x + edge.vx * 110 * s,
+        GROUND_Y + 10 - 620 * s * s,
+        f.y + edge.vz * 110 * s,
+      )
+      // Yaw is the heading it drove off with; the tumble is pitch around the
+      // rim-parallel axis, accelerating as it goes.
+      rig.root.rotation.set(edge.vz * s * s * 3.6, -f.hull, -edge.vx * s * s * 3.6)
     }
   }
 

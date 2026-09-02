@@ -81,7 +81,18 @@ const arm = (seconds = 1.6) =>
       // frames it holds after a fixed beat is a fact about how busy the machine
       // is — reported red on a loaded box while it was green on mine, which is
       // this fixture's window rather than the feature.
-      for (let i = 0; i < 60 && g.tape.length < 3; i++) await sleep(100)
+      //
+      // And the peer stays *fresh* while we poll. This loop's length is also a
+      // fact about the machine, and `lastSeen` was last touched up in the
+      // movement loop above — on a loaded box the poll outlives
+      // PEER_TIMEOUT_MS, the peer is pruned, the tape's final frames lose the
+      // killer, and `killcamFrame` rightly refuses the replay. That was the
+      // four-red run on clean main: the fixture letting its own actor expire,
+      // not the feature.
+      for (let i = 0; i < 60 && g.tape.length < 3; i++) {
+        peer.lastSeen = performance.now()
+        await sleep(100)
+      }
       g.tank.x = 1100
       g.tank.y = 620
       return { tape: g.tape.length, peerAt: Math.round(peer.view.x) }
@@ -141,8 +152,27 @@ try {
 
   // ----------------------------------------- 2. a kill books it, a mistake does not
 
-  const booked = await page.evaluate((PEER) => {
+  const booked = await page.evaluate(async (PEER) => {
     const g = window.__game
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+    // The two preconditions the feature documents, checked against the live
+    // tape rather than assumed from the fixture a few evaluates ago: at least
+    // two frames (`die` refuses fewer — the playhead needs somewhere to walk
+    // from), and the killer in the final frame (`killcamFrame` refuses a
+    // camera with no subject). Both decay with time on a starved machine —
+    // the 3-second trim can thin the tape to one frame across a long enough
+    // frame gap, and a stale peer drops out of `record` — so they are held
+    // true here, at the moment of death, not just at arm time.
+    const peer = g.ensurePeer(PEER)
+    peer.view.x = 640
+    peer.view.y = 600
+    peer.view.dead = false
+    for (let i = 0; i < 50; i++) {
+      peer.lastSeen = performance.now()
+      const last = g.tape[g.tape.length - 1]
+      if (g.tape.length >= 2 && last && last.tanks.some((t) => t.s === PEER)) break
+      await sleep(100)
+    }
     g.tank.dead = false
     g.tank.hp = 1
     g.die(PEER)
@@ -252,6 +282,77 @@ try {
     JSON.stringify(ended),
   )
 
+  // ----------------------- 4b. the respawn race, which is the shipped blue sky
+  //
+  // RESPAWN_DELAY is 2.5 seconds and KILLCAM_MS is 2500 — the same length — so
+  // on a real death the respawn ends the replay, not the expiry: `respawn()`
+  // calls `endKillcam` a frame or so before the playhead runs out. The first
+  // ordinary frame then finds the tank already alive, so the `deaths()` rising
+  // edge that would have set a shake never fires, and the shake path's
+  // `lookAt(target)` — the accidental heal that makes the expiry path above
+  // look fine — never runs. Position comes home every frame regardless, but
+  // nothing re-aims: the camera sits at altitude pointed over the killer's
+  // shoulder at the horizon. Sky, no board, until the view is toggled. That is
+  // the bug as reported, and this section reproduces the *production* timing —
+  // the sections above pin `respawnAt` sixty seconds out precisely so their
+  // replay ends by expiry, which is how this stayed green while players saw
+  // sky.
+  const raced = await page.evaluate(async (PEER) => {
+    const g = window.__game
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+    const peer = g.ensurePeer(PEER)
+    peer.view.x = 640
+    peer.view.y = 600
+    peer.view.dead = false
+    for (let i = 0; i < 50; i++) {
+      peer.lastSeen = performance.now()
+      const last = g.tape[g.tape.length - 1]
+      if (g.tape.length >= 2 && last && last.tanks.some((t) => t.s === PEER)) break
+      await sleep(100)
+    }
+    g.tank.dead = false
+    g.tank.hp = 1
+    // Spend the shake left over from the section above — its expiry-path
+    // death set one, and at this machine's frame rate it may not have decayed
+    // yet. Live shake re-aims the camera every frame, which would heal the
+    // first restored frame here the way production, where a death's shake is
+    // gone within half a second, never does.
+    window.__renderer.shake = 0
+    g.die(PEER) // respawnAt left alone: 2.5 seconds, the length of the replay
+    const booked = !!g.killcam
+    // The *first* restored frame, caught in the act rather than polled for: a
+    // polling window either misses the frame on a slow machine or stays open
+    // long enough to admit an accidental heal (a stray shake, a quality
+    // drop's resize) that production does not get. The player sees whatever
+    // that first frame rendered, so that frame is the claim.
+    const r = window.__renderer
+    const origDraw = r.draw.bind(r)
+    let firstDot = null
+    r.draw = (...a) => {
+      const out = origDraw(...a)
+      if (firstDot === null && !g.killcam) {
+        const cam = r.camera
+        const fwd = cam.getWorldDirection(cam.position.clone())
+        const to = {
+          x: r.target.x - cam.position.x,
+          y: r.target.y - cam.position.y,
+          z: r.target.z - cam.position.z,
+        }
+        const len = Math.hypot(to.x, to.y, to.z) || 1
+        firstDot = +((fwd.x * to.x + fwd.y * to.y + fwd.z * to.z) / len).toFixed(3)
+      }
+      return out
+    }
+    for (let i = 0; i < 200 && firstDot === null; i++) await sleep(80)
+    r.draw = origDraw
+    return { booked, alive: !g.tank.dead, dot: firstDot }
+  }, PEER)
+  check(
+    'a respawn that ends the replay still gives the board back, aimed at the board',
+    raced.booked && raced.alive && raced.dot > 0.999,
+    JSON.stringify(raced),
+  )
+
   // ------------------------------------------ 5. the cases that get no replay
 
   const selfKill = await page.evaluate(() => {
@@ -269,6 +370,10 @@ try {
     const g = window.__game
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
     g.killcam = null
+    // The fixture peer has to be gone first: bots stand down — all of them —
+    // while anybody real is in the room, and how stale the peer is by now is a
+    // fact about how long the sections above took on this machine.
+    g.peers.clear()
     g.botsWanted = 1
     for (let i = 0; i < 60 && !g.bots.length; i++) await sleep(100)
     if (!g.bots.length) return { why: 'no bots' }

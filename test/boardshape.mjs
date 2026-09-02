@@ -155,13 +155,17 @@ for (let li = 0; li < LAYOUTS.length; li++) {
   )
   resetCover()
 
-  // The control. The fence is 24 units thick and the fill starts inside it, so
-  // a point in the corner of the border must be *outside* the reachable set —
-  // if it is not, `blocked` is answering false for everything and the two
-  // checks above are measuring nothing at all.
+  // The control: if `blocked` answered false for everything, the two checks
+  // above would be measuring nothing at all. It used to probe the border
+  // corner, "inside the fence" — but The Drop has no fence, and its corner is
+  // rim a tank can legitimately drive to. The centre of the vault's face is a
+  // solid rect on every board, walled or not, so the fill must never have it.
+  const face = WALLS.find((w) => w.kind === 'breach')
+  const faceKey =
+    Math.round((face.x + face.w / 2) / STEP) * 100000 + Math.round((face.y + face.h / 2) / STEP)
   check(
-    !fill.has(0),
-    `${name}: control — the fill does not leak through the fence`,
+    !fill.has(faceKey),
+    `${name}: control — the fill does not leak into the walls`,
   )
 }
 
@@ -236,6 +240,39 @@ const crates = WALLS.filter((w) => w.kind === 'crate')
 check(crates.length >= 8, 'the racking is breakable, so a room can make its own door', `${crates.length} crates`)
 const aisle = Math.min(...crates.map((c) => c.h))
 check(aisle <= 50, 'the shelves are shelves, not blocks', `thinnest ${aisle}`)
+
+// ------------------------------------------------- where the CTF flags stand
+//
+// `baseFor` pushes each corner spawn toward the centre, and for months nothing
+// asked whether the spot it lands on is open ground *on every board* — the
+// browser flags suite samples exactly one board, the chain tip's, which is how
+// The Warehouse shipped with all four bases inside the racking and The
+// Shallows with two in the water. This is the sweep that was missing: every
+// base on every board, on open ground, clear of every spawn, and the four of
+// them far enough apart that reaches cannot brush. Arithmetic only, like the
+// rest of this file.
+const { baseFor, FLAG_TEAMS, FLAG_REACH } = arena
+for (let i = 0; i < LAYOUTS.length; i++) {
+  setLayout(i)
+  resetCover()
+  const name = LAYOUTS[i].name
+  const bases = []
+  for (let t = 1; t <= FLAG_TEAMS; t++) bases.push(baseFor(t))
+  const buried = bases.find((b) => arena.pointInWall(b.x, b.y) !== null)
+  check(!buried, `${name}: every flag base is on open ground`,
+    buried && `team ${buried.team} at ${Math.round(buried.x)},${Math.round(buried.y)}`)
+  const nearSpawn = bases.find((b) =>
+    SPAWNS.some((s) => Math.hypot(s.x - b.x, s.y - b.y) <= FLAG_REACH))
+  check(!nearSpawn, `${name}: and none is within reach of a spawn`,
+    nearSpawn && `team ${nearSpawn.team}`)
+  let closest = Infinity
+  for (let a = 0; a < bases.length; a++) {
+    for (let b = a + 1; b < bases.length; b++) {
+      closest = Math.min(closest, Math.hypot(bases[a].x - bases[b].x, bases[a].y - bases[b].y))
+    }
+  }
+  check(closest > FLAG_REACH * 2, `${name}: and no two reaches can touch`, `closest ${Math.round(closest)}`)
+}
 
 console.log('')
 if (failures) {

@@ -32,7 +32,7 @@
 // flag that lies on the ground where its carrier died is a game about standing
 // in one place; a flag that goes home is a game about the run.
 
-import { ARENA_H, ARENA_W, SPAWNS } from './arena'
+import { ARENA_H, ARENA_W, SPAWNS, pointInWall } from './arena'
 
 /** How close you have to be to a base to take its flag, or to score on it. */
 export const FLAG_REACH = 90
@@ -103,11 +103,23 @@ export function baseFor(team: number): FlagBase | null {
   const dy = cy - spot.y
   const d = Math.hypot(dx, dy) || 1
   const k = Math.min(1, BASE_OFFSET / d)
-  return {
-    team,
-    x: Math.max(60, Math.min(ARENA_W - 60, spot.x + dx * k)),
-    y: Math.max(60, Math.min(ARENA_H - 60, spot.y + dy * k)),
+  let x = Math.max(60, Math.min(ARENA_W - 60, spot.x + dx * k))
+  let y = Math.max(60, Math.min(ARENA_H - 60, spot.y + dy * k))
+  // 150 toward the centre landed some bases inside the scenery, and the flags
+  // suite never saw it because it samples one board — the chain tip's. On The
+  // Warehouse every base was inside the racking; on The Shallows two were in
+  // the water. So the base keeps walking the same ray until it stands on open
+  // ground. Still a pure function of the layout — the walk is fixed steps
+  // along a line both ends of which come off the map — so every client still
+  // derives the same spot without a word on the wire. The centre of a board
+  // is never inside cover (the middle is where the fights are authored to
+  // happen), so the walk always finds ground before the ray runs out.
+  const step = 12 / d
+  for (let t = k; pointInWall(x, y) !== null && t < 1; t += step) {
+    x = Math.max(60, Math.min(ARENA_W - 60, spot.x + dx * Math.min(1, t + step)))
+    y = Math.max(60, Math.min(ARENA_H - 60, spot.y + dy * Math.min(1, t + step)))
   }
+  return { team, x, y }
 }
 
 /** Are we close enough to a base to take from it or score on it? */

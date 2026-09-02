@@ -428,6 +428,23 @@ const vaultPad = (w: number): Pt => {
   return { x: x + VAULT_SIDE / 2, y: y + VAULT_SIDE / 2 }
 }
 
+/**
+ * The vault's back rail, for boards with no fence to lean on.
+ *
+ * On every walled board the pocket's fourth side is the border ring itself. An
+ * edgeless board has no ring, which would leave the vault open along the rim —
+ * and worse than open: the gap between the rim and the side walls is 24 units,
+ * which a 22-unit hull squeaks through with two units to spare. A cache with a
+ * secret back door that only pixel-perfect driving finds is not a mechanic,
+ * it is a bug report waiting to be filed. So the two pockets get their own
+ * short rails — the only fence on the board, which also happens to read
+ * correctly: the one railed stretch of rim is the one with something behind it.
+ */
+const vaultRail = (w: number): Rect[] => {
+  const { x } = vaultOrigin(w)
+  return [{ x: x - VAULT_WALL, y: 0, w: VAULT_SIDE + VAULT_WALL * 2, h: BORDER, kind: 'fence' }]
+}
+
 const ring = (w: number, h: number): Rect[] => [
   { x: 0, y: 0, w, h: BORDER, kind: 'fence' },
   { x: 0, y: h - BORDER, w, h: BORDER, kind: 'fence' },
@@ -512,6 +529,28 @@ export interface LayoutSpec {
    * the pitch markings are more recognisable than the green.
    */
   ground?: { base: string; shade: string; blade: string; dark: string; lines?: boolean }
+  /**
+   * No perimeter fence: the board is a platform, and past the rim is the drop.
+   *
+   * This is a rules flag, not a paint job, and it reaches four things at once:
+   * `ring` contributes nothing to `WALLS`, `stepTank` stops clamping the hull
+   * to the board, a flat shell dies once it is clearly past the rim instead of
+   * bouncing home, and a tank whose centre crosses the edge falls — a death
+   * like any other, self-authoritative, credited to whoever hit that tank
+   * last if anybody recently did.
+   *
+   * Safe to derive from for the same reason `gravity` is: the layout is
+   * `blockHash % LAYOUTS.length` and nothing else, so every client agrees on
+   * whether the fence exists. A receiver that disagreed would clamp a tank its
+   * owner has already reported dead at the bottom of a fall.
+   *
+   * The vault keeps its pocket on an edgeless board: `setLayout` closes the
+   * open back with a short rail (`vaultRail`) — the only fence on the board —
+   * because a vault whose fourth wall was the fence stops being sealed the
+   * moment the fence goes, and `test/boardshape.mjs` is right to insist a
+   * cache you can drive into without breaching is a bug, not a variant.
+   */
+  edgeless?: boolean
 }
 
 /**
@@ -540,7 +579,7 @@ const corners = (w: number, h: number): Pt[] => [
 ]
 
 /**
- * Fourteen boards, and the size range is as much of the variety as the shapes are.
+ * Fifteen boards, and the size range is as much of the variety as the shapes are.
  *
  * 1500x1100 is a knife fight with four players in it; 2100x1550 gives you
  * somewhere to go and three seconds to watch somebody come and get you. Every
@@ -978,6 +1017,210 @@ export const LAYOUTS: LayoutSpec[] = [
       { x: 1750, y: 640 },
     ],
   },
+  {
+    name: 'The Drop',
+    w: 1700,
+    h: 1250,
+    // Puzz: "maybe some don't have edges and tanks can fall off." The first
+    // board where the most dangerous thing is not a gun.
+    //
+    // No fence. The rim is open all the way round, and a tank whose centre
+    // crosses it falls — a death like any other, credited to whoever hit that
+    // tank last if anybody recently did, so pressure near the edge is a
+    // weapon. See `LayoutSpec.edgeless` for everything the flag reaches.
+    //
+    // The cover is authored to point the fights outward: everything solid is
+    // in the middle band of the board, and the outer ~250 units are bare. The
+    // safe fight is in the middle where the walls are; the pads that matter
+    // sit toward the rim, so the price of a pickup is playing near the edge
+    // with your reverse gear as the only thing between you and the drop.
+    edgeless: true,
+    // Baked, dusty earth — a slab of ground torn out of the world, which is
+    // what the board's own slab-in-the-sky framing has been claiming all
+    // along. No touchlines: chalk on a platform over a void is a pitch, and a
+    // pitch has a fence.
+    ground: { base: '#a08b60', shade: '#93805a', blade: '#c4ae7e', dark: '#6b5c40', lines: false },
+    cover: () => [
+      // The middle band. A rock anchor and a sandbag line to duel across —
+      // both permanent, so the board never opens up into pure rim.
+      { x: 690, y: 470, w: 140, h: 64, kind: 'rock' },
+      { x: 430, y: 330, w: 250, h: 46, kind: 'sandbag' },
+      // The soft cover. One crate run and one drum pair per half — ten
+      // breakables board-wide with the vault, which exactly fills the first
+      // damage-mask bank. See `coverDamageBits`.
+      { x: 1030, y: 270, w: 210, h: 48, kind: 'crate' },
+      { x: 1210, y: 540, w: 90, h: 90, kind: 'barrel' },
+      // A hedge running toward the south rim: cover that walks you edgeward,
+      // which on this board is an invitation rather than a service.
+      { x: 330, y: 690, w: 48, h: 210, kind: 'hedge' },
+    ],
+    spawns: corners,
+    pads: () => [
+      { x: 860, y: 250 },
+      // 130 units from the west rim, on the centreline's mirror-safe offset:
+      // the bait pad. Reachable at a drive, held at your own risk.
+      { x: 130, y: 610 },
+      { x: 1330, y: 820 },
+    ],
+  },
+  {
+    name: 'The Gauntlet',
+    w: 2300,
+    h: 900,
+    // The shape is the identity. Every other board is roughly 1.4:1; this one
+    // is 2.6:1 — a firing range with a fence round it, and the long axis is
+    // the game. There is always a shot down the length if you stand in the
+    // open, so the board plays as a rhythm of crossings: sprint the gap,
+    // arrive at the next stagger, trade across the bags, go again.
+    //
+    // The two rocks by the middle are the only tall cover on the centreline,
+    // and the 160-unit slot between them is the one place you cross the board
+    // camera's longest sightline. Everything else is staggered off-axis, so
+    // the flanks are the slow safe road and the middle is the fast loud one.
+    cover: () => [
+      { x: 700, y: 380, w: 260, h: 48, kind: 'sandbag' },
+      { x: 1020, y: 200, w: 48, h: 260, kind: 'rock' },
+      { x: 350, y: 620, w: 220, h: 48, kind: 'crate' },
+      { x: 950, y: 700, w: 110, h: 110, kind: 'barrel' },
+      { x: 260, y: 330, w: 90, h: 90, kind: 'rock' },
+    ],
+    spawns: corners,
+    pads: () => [
+      // In the middle slot, on the worst ground on the board.
+      { x: 1150, y: 300 },
+      { x: 450, y: 450 },
+      { x: 700, y: 780 },
+    ],
+  },
+  {
+    name: 'The Trenches',
+    w: 1800,
+    h: 1300,
+    // The inverse of The Warehouse. There, the cover is tall and the lanes
+    // decide what you can see; here almost everything is sandbags, so you can
+    // see nearly everybody nearly all the time — you just cannot drive at
+    // them. Shells cross the bags, hulls do not, and the board plays as a
+    // slow exchange of fire across a maze neither side can rush.
+    //
+    // The lob is the punishment for camping a trench line, exactly as it is
+    // for camping anywhere else — but on this board it is the *only* indirect
+    // threat, because there is almost nothing to hide the arc behind. The one
+    // drum pair and the two boulders are the only things that break a
+    // sightline at hull height.
+    cover: () => [
+      { x: 300, y: 300, w: 420, h: 48, kind: 'sandbag' },
+      { x: 300, y: 300, w: 48, h: 300, kind: 'sandbag' },
+      { x: 860, y: 200, w: 48, h: 320, kind: 'sandbag' },
+      { x: 560, y: 640, w: 320, h: 48, kind: 'sandbag' },
+      { x: 1180, y: 380, w: 260, h: 48, kind: 'sandbag' },
+      { x: 620, y: 950, w: 48, h: 200, kind: 'sandbag' },
+      { x: 260, y: 1060, w: 90, h: 90, kind: 'rock' },
+      { x: 1350, y: 180, w: 100, h: 100, kind: 'barrel' },
+    ],
+    spawns: corners,
+    pads: () => [
+      { x: 960, y: 480 },
+      { x: 500, y: 1000 },
+      { x: 1440, y: 520 },
+    ],
+  },
+  {
+    name: 'The Tinderbox',
+    w: 1600,
+    h: 1200,
+    // The drum yard. Ten of the twelve pieces of cover on this board explode,
+    // which turns every piece of it into a bet: the thing you are hiding
+    // behind is also the thing that kills you if anybody spends three shells
+    // on it. `blastScaleOf` gives the twin tanks by the middle a bigger bang
+    // than the outriders, and the board's endgame is the opposite of every
+    // other map's — it does not open up slowly, it detonates a piece at a
+    // time until the last two tanks are duelling on a bare floor of rubble.
+    //
+    // The rock and the bag line are the only cover that survives a patient
+    // room, and they are deliberately nowhere near the pads.
+    cover: () => [
+      { x: 500, y: 250, w: 110, h: 110, kind: 'barrel' },
+      { x: 950, y: 300, w: 110, h: 110, kind: 'barrel' },
+      { x: 620, y: 480, w: 130, h: 130, kind: 'barrel' },
+      { x: 260, y: 560, w: 110, h: 110, kind: 'barrel' },
+      { x: 1200, y: 180, w: 110, h: 110, kind: 'barrel' },
+      { x: 420, y: 900, w: 200, h: 48, kind: 'sandbag' },
+      { x: 860, y: 140, w: 80, h: 80, kind: 'rock' },
+    ],
+    spawns: corners,
+    pads: () => [
+      { x: 800, y: 420 },
+      { x: 330, y: 330 },
+      { x: 1150, y: 700 },
+    ],
+  },
+  {
+    name: 'The Citadel',
+    w: 1900,
+    h: 1400,
+    // The only permanent structure fight in the game. A rock keep holds the
+    // middle — one gate in the north face, one in the south, both prize pads
+    // inside — and rock is the point: The Warehouse can be flattened and The
+    // Tinderbox flattens itself, but the keep cannot come down. It has to be
+    // *entered*, and both doors are 110 units wide for a 44-unit hull, so
+    // going in is a commitment everybody outside can see you make.
+    //
+    // Holding the inside is not free parking: the lob drops straight over the
+    // walls, and the two gates line up with the mid-edge spawns, so the room
+    // knows exactly where to look when the occupant has been in there too
+    // long. The outer cover is authored as approach cover — a covered route
+    // to each gate, none of it reaching the walls.
+    cover: () => [
+      { x: 750, y: 510, w: 150, h: 40, kind: 'rock' },
+      { x: 1010, y: 510, w: 140, h: 40, kind: 'rock' },
+      { x: 750, y: 550, w: 40, h: 300, kind: 'rock' },
+      { x: 300, y: 300, w: 220, h: 48, kind: 'crate' },
+      { x: 1450, y: 350, w: 110, h: 110, kind: 'barrel' },
+      { x: 560, y: 980, w: 220, h: 48, kind: 'hedge' },
+      { x: 640, y: 240, w: 260, h: 48, kind: 'sandbag' },
+    ],
+    spawns: corners,
+    pads: () => [
+      // Inside the keep, off-centre so its mirror is the second prize rather
+      // than a duplicate of the first.
+      { x: 900, y: 650 },
+      { x: 300, y: 700 },
+      { x: 950, y: 320 },
+    ],
+  },
+  {
+    name: 'The Orchard',
+    w: 1700,
+    h: 1300,
+    // The density board. Twenty small trees and boulders in offset rows, and
+    // none of them bigger than a tank — so no sightline survives more than
+    // about a second of driving, in either direction. The whole board plays
+    // like the corner of every other one: point-blank exchanges, constant
+    // flanks, and nowhere to set up a long gun.
+    //
+    // Almost nothing here breaks — one crate run per half is the only thing a
+    // patient room can remove. That is the counterweight to The Tinderbox
+    // three boards up: that one detonates down to an open field, this one
+    // stays exactly this cluttered to the final kill.
+    cover: () => [
+      { x: 300, y: 250, w: 70, h: 70, kind: 'hedge' },
+      { x: 600, y: 180, w: 60, h: 60, kind: 'rock' },
+      { x: 900, y: 300, w: 70, h: 70, kind: 'hedge' },
+      { x: 1200, y: 220, w: 70, h: 70, kind: 'hedge' },
+      { x: 1450, y: 400, w: 60, h: 60, kind: 'rock' },
+      { x: 450, y: 520, w: 70, h: 70, kind: 'hedge' },
+      { x: 780, y: 600, w: 60, h: 60, kind: 'rock' },
+      { x: 1100, y: 480, w: 70, h: 70, kind: 'hedge' },
+      { x: 250, y: 800, w: 70, h: 70, kind: 'hedge' },
+      { x: 1400, y: 650, w: 110, h: 48, kind: 'crate' },
+    ],
+    spawns: corners,
+    pads: () => [
+      { x: 850, y: 400 },
+      { x: 400, y: 950 },
+      { x: 1250, y: 850 },
+    ],
+  },
 ]
 
 /**
@@ -1002,6 +1245,8 @@ export let layoutName = ''
 export let arenaGravity = LAYOUTS[0].gravity ?? 1
 /** This board's ground, when it is not a pitch. See `LayoutSpec.ground`. */
 export let arenaGround = LAYOUTS[0].ground ?? null
+/** Whether this board has a rim you can drive off. See `LayoutSpec.edgeless`. */
+export let arenaEdgeless = LAYOUTS[0].edgeless ?? false
 
 export const WALLS: Rect[] = []
 export const SPAWNS: Pt[] = []
@@ -1072,6 +1317,7 @@ export function setLayout(index: number): void {
   layoutName = spec.name
   arenaGravity = spec.gravity ?? 1
   arenaGround = spec.ground ?? null
+  arenaEdgeless = spec.edgeless ?? false
 
   const half = spec.cover(spec.w, spec.h)
   // The vault goes in next to the border rather than being authored per board,
@@ -1081,9 +1327,13 @@ export function setLayout(index: number): void {
   // remembering to add it. Its mirror is explicit because — unlike `ring` — one
   // vault is not symmetric on its own.
   const vaults = vault(spec.w)
+  // An edgeless board has no ring — the missing fence IS the mechanic — and
+  // its vaults each get a back rail instead, appended with the vault block so
+  // no index that exists on a walled board moves. See `vaultRail`.
+  const rails = spec.edgeless ? vaultRail(spec.w) : []
   WALLS.length = 0
   WALLS.push(
-    ...ring(spec.w, spec.h),
+    ...(spec.edgeless ? [] : ring(spec.w, spec.h)),
     ...half,
     ...half.map((r) => flip(r, spec.w, spec.h)),
     // **Last, not first.** The vault shipped prepended, and prepending shifted
@@ -1098,6 +1348,8 @@ export function setLayout(index: number): void {
     // Found by rainmaker, measured against real geometry.
     ...vaults,
     ...vaults.map((r) => flip(r, spec.w, spec.h)),
+    ...rails,
+    ...rails.map((r) => flip(r, spec.w, spec.h)),
   )
 
   // Stamp identity and hulls. Order is `ring`, the authored half, its mirror,
