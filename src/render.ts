@@ -40,7 +40,7 @@ import {
 import { CHOPPER_ALT, CHOPPER_SPREAD } from './chopper'
 import { SUIT_MUZZLE, SUIT_SPREAD } from './suit'
 import { SPITFIRE_ALT, SPITFIRE_SPREAD, spitfirePos } from './spitfire'
-import { FLAG_REACH, FLAG_TEAMS, baseFor } from './flags'
+import { FLAG_REACH, baseFor } from './flags'
 import { CAPTURE_S, POINT_RADIUS } from './domination'
 
 /**
@@ -2619,7 +2619,17 @@ export class Renderer {
   private clock = new THREE.Clock()
   /** The camera's resting position, before shake is added. */
   private home = new THREE.Vector3()
+  /**
+   * The middle of the board, which is what the overhead camera looks at.
+   *
+   * Seeded from the layout that happens to be loaded when the renderer is
+   * constructed and re-centred by `adoptLayout` every time the board changes,
+   * because `ARENA_W`/`ARENA_H` are not constants — `setLayout` reassigns them,
+   * and the boards are not one size.
+   */
   private target = new THREE.Vector3(ARENA_W / 2, 0, ARENA_H / 2)
+  /** Kept so the key light can be re-aimed when the board changes size. */
+  private sun: THREE.DirectionalLight | null = null
   private aimPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -AIM_PLANE_Y)
   private raycaster = new THREE.Raycaster()
   /** Scratch camera used to test a candidate framing without disturbing the real one. */
@@ -2707,7 +2717,7 @@ export class Renderer {
 
     this.scene.add(this.board)
     this.buildBoard()
-    onLayoutChange(() => this.buildBoard())
+    onLayoutChange(() => this.adoptLayout())
     this.buildLights()
     this.scene.add(this.confetti.mesh)
     this.scene.add(this.plumes.mesh)
@@ -2981,6 +2991,7 @@ export class Renderer {
     this.scene.add(new THREE.HemisphereLight(0xc6d9ea, 0x5f7742, 1.35))
 
     const sun = new THREE.DirectionalLight(0xfff0d2, 2.15)
+    this.sun = sun
     sun.position.set(ARENA_W / 2 + 700, 1500, ARENA_H / 2 - 900)
     sun.target.position.copy(this.target)
     sun.castShadow = true
@@ -2999,6 +3010,42 @@ export class Renderer {
     cam.updateProjectionMatrix()
     sun.shadow.bias = -0.0008
     this.scene.add(sun, sun.target)
+  }
+
+  /**
+   * The board changed. Rebuild it, and re-aim everything that was pointed at
+   * the old one.
+   *
+   * `ARENA_W` and `ARENA_H` are `let` exports that `setLayout` reassigns, and
+   * the twenty boards are not one size. Everything here used to be read once,
+   * in the constructor, and never again — so the camera kept looking at the
+   * middle of whichever layout happened to be loaded when the renderer was
+   * built, and kept the framing distance it had solved for that layout's
+   * dimensions.
+   *
+   * Which is every session, not an edge case. `clock.start()` is asynchronous,
+   * so the renderer is constructed *before* the first block arrives and seeds
+   * itself from `LAYOUTS[0]`. When the block lands and the real board is set,
+   * only the geometry was rebuilt. On any board bigger than Crossroads the
+   * camera then sits aimed above and left of the true centre, which is what
+   * puts the board down and to the right of the window.
+   *
+   * The sun goes with it: its target was copied from the same stale centre, so
+   * on a large board the key light was aimed at a point well inside the near
+   * corner and the shadows leaned the wrong way.
+   */
+  private adoptLayout(): void {
+    this.buildBoard()
+    this.target.set(ARENA_W / 2, 0, ARENA_H / 2)
+    if (this.sun) {
+      this.sun.position.set(ARENA_W / 2 + 700, 1500, ARENA_H / 2 - 900)
+      this.sun.target.position.copy(this.target)
+      this.sun.target.updateMatrixWorld()
+    }
+    // Re-solves the framing distance against the new dimensions and, in board
+    // view, puts the camera on it. `framesBoard` reads `ARENA_W`/`ARENA_H`
+    // through live module bindings, so it is already looking at the new board.
+    this.resize()
   }
 
   /**
@@ -3964,10 +4011,12 @@ export class Renderer {
       }
       return
     }
-    if (game.team && game.team <= FLAG_TEAMS) teams.add(game.team)
-    for (const peer of game.peers.values()) {
-      if (peer.view.team && peer.view.team <= FLAG_TEAMS) teams.add(peer.view.team)
-    }
+    // The rules' own answer, not a second copy of the question. These were two
+    // separate reckonings of "which sides are here" and they disagreed: this
+    // one skipped the pole for an empty side while `canTake` still handed out
+    // its flag, so the flag came off a base that was never drawn and wore a
+    // colour nobody in the room was playing. See `Game.sidesInPlay`.
+    for (const team of game.sidesInPlay()) teams.add(team)
 
     for (const [team, rig] of this.flagPoles) {
       if (teams.has(team)) continue
