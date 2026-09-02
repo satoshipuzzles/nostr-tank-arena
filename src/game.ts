@@ -2969,32 +2969,6 @@ export class Game {
   }
 
   /**
-   * Spawn, step and retire the practice opponents.
-   *
-   * Bots stand down — ALL of them — the moment anybody real is in the room.
-   *
-   * This reverts the one-for-one seat rule from PR #35, and the reason is
-   * written here so nobody re-lands that arithmetic without reading it. Bots
-   * are pure local simulation: `fireBot` never publishes, ids come off a
-   * per-client counter, and every client's bots hunt every client's OWN tank.
-   * But `collide` lets a bot consume any shell (`hitBot` deletes on overlap)
-   * — including one re-simulated from a REMOTE player's fire event. So in a
-   * populated room, the victim's phantom bots — clustered on the victim,
-   * because that is who they hunt — step in front of most incoming fire:
-   * shells vanish with no feedback, and bot shells drain hull from tanks the
-   * rest of the room cannot see. Live symptom, diagnosed by rainmaker:
-   * "hits aren't landing 3/4 of the time". Turning bots off locally cannot
-   * fix it, because it is the *victim's* client that eats your shot.
-   *
-   * The one-for-one seat feature (issue 1335d694) comes back only with bot
-   * AUTHORITY: one owning client stepping the bots and publishing their state
-   * on the tick like any other tank. That is a netcode change, not an
-   * arithmetic one.
-   *
-   * Checked against peers that are *not* bots, because the bots are
-   * themselves in `peers` by the time this runs a second time.
-   */
-  /**
    * The session key a bot wears on the wire.
    *
    * Derived from its owner and its index rather than from the local counter
