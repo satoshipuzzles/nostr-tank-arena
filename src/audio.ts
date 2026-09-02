@@ -55,12 +55,25 @@ export interface PlayOpts {
 const EARSHOT = 1400
 
 const STORAGE_KEY = 'tank.sound'
+const VOLUME_KEY = 'tank.volume'
+
+/**
+ * Where the master gain sat before there was a way to move it.
+ *
+ * The slider is a fraction of *full scale*, not of this, so the default is
+ * exactly what the game has always sounded like and a player who wants it
+ * louder can have that too. Anything above about 0.8 clips on a laptop
+ * speaker when a nuke goes off, which is a thing they are allowed to choose.
+ */
+const DEFAULT_VOLUME = 0.5
 
 export class Sfx {
   private ctx: AudioContext | null = null
   private master: GainNode | null = null
   private noiseBuffer: AudioBuffer | null = null
   muted: boolean
+  /** Master level, 0..1. Persisted, and applied live while a round is running. */
+  private level: number
 
   constructor() {
     let saved: string | null = null
@@ -70,6 +83,40 @@ export class Sfx {
       /* private mode */
     }
     this.muted = saved === 'off'
+    let vol: string | null = null
+    try {
+      vol = localStorage.getItem(VOLUME_KEY)
+    } catch {
+      /* private mode */
+    }
+    const parsed = vol === null ? NaN : Number(vol)
+    // A stored value that is not a number in range is treated as absent rather
+    // than clamped to an edge: someone else's key, or a half-written one, must
+    // not silently mute the game or pin it to full.
+    this.level = Number.isFinite(parsed) && parsed >= 0 && parsed <= 1 ? parsed : DEFAULT_VOLUME
+  }
+
+  /** Master level, 0..1. */
+  get volume(): number {
+    return this.level
+  }
+
+  /**
+   * Move the master level, now rather than at the next sound.
+   *
+   * Applied to the live gain node so a slider is audible while it is being
+   * dragged — a volume control you have to fire a shell to hear is a volume
+   * control nobody trusts. Muted stays muted: the two are independent, so
+   * unmuting returns you to the level you chose rather than to the default.
+   */
+  setVolume(v: number): void {
+    this.level = Math.max(0, Math.min(1, v))
+    try {
+      localStorage.setItem(VOLUME_KEY, String(this.level))
+    } catch {
+      /* private mode */
+    }
+    if (this.master && !this.muted) this.master.gain.value = this.level
   }
 
   /**
@@ -90,7 +137,7 @@ export class Sfx {
         return
       }
       this.master = this.ctx.createGain()
-      this.master.gain.value = 0.5
+      this.master.gain.value = this.level
       this.master.connect(this.ctx.destination)
     }
     if (this.ctx.state === 'suspended') void this.ctx.resume()
@@ -112,7 +159,7 @@ export class Sfx {
       if (this.master) this.master.gain.value = 0
     } else {
       this.unlock()
-      if (this.master) this.master.gain.value = 0.5
+      if (this.master) this.master.gain.value = this.level
     }
     return this.muted
   }
