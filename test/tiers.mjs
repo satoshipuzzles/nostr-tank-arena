@@ -111,6 +111,8 @@ async function earnAndSpend(at) {
 
 try {
   await page.goto(URL_, { waitUntil: 'domcontentloaded', timeout: 30_000 })
+  // The loadout ships folded shut, and the reward click below needs a real box.
+  await page.evaluate(() => { document.getElementById('loadout-fold').open = true })
 
   // ------------------------------------------- 1. the pools, and the picker
   //

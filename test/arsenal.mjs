@@ -69,6 +69,8 @@ page.on('pageerror', (e) => pageErrors.push(e.message))
 
 try {
   await page.goto(URL, { waitUntil: 'domcontentloaded', timeout: 30_000 })
+  // The garage ships folded shut, and the skin clicks below need real boxes.
+  await page.evaluate(() => { document.getElementById('garage-fold').open = true })
 
   // --- skins: the lobby half ------------------------------------------------
   // The picker is two axes now — pattern × finish — because the catalog is a

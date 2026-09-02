@@ -924,6 +924,10 @@ $('skin-pattern').addEventListener('click', paintPreview)
 $('skin-finish').addEventListener('click', paintPreview)
 nameInput.addEventListener('input', paintPreview)
 window.addEventListener('resize', () => preview?.resize())
+// The garage starts folded, so the canvas is first sized inside a closed
+// `details` where clientWidth is zero and the constructor's fallback size
+// stands in. Opening the fold is the moment the real box exists.
+$('garage-fold').addEventListener('toggle', () => preview?.resize())
 paintPreview()
 
 /**
@@ -4597,6 +4601,11 @@ const jumpTo = (id: string) => () => {
   settings.hidden = true
   board.hidden = true
   const el = document.getElementById(id)
+  // The garage and the loadout are folded shut by default. A link that
+  // scrolled to a closed fold would land on a one-line summary and call it
+  // arrival, so the fold opens first and the scroll lands on the thing.
+  const fold = el?.closest('details')
+  if (fold) fold.open = true
   el?.scrollIntoView({ block: 'center' })
 }
 $('settings-garage').addEventListener('click', jumpTo('tank-cam'))
