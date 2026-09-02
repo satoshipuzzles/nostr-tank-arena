@@ -57,7 +57,17 @@ import {
   suitAim,
   underSuitFire,
 } from './suit'
-import { BOT_COUNT, MAX_BOTS, botColorFor, botNameFor, killBot, makeBot, stepBot } from './bots'
+import {
+  BOT_COUNT,
+  DEFAULT_SKILL,
+  MAX_BOTS,
+  botColorFor,
+  botNameFor,
+  botSkillFor,
+  killBot,
+  makeBot,
+  stepBot,
+} from './bots'
 import { FLAG_TEAMS, canScore, canTake, carriers } from './flags'
 import { freshState, holderOn, points, stepPoint } from './domination'
 import type { Occupant, Point, PointState } from './domination'
@@ -2535,6 +2545,16 @@ export class Game {
   botsWanted = BOT_COUNT
 
   /**
+   * How hard the practice tanks fight — an index into `BOT_SKILLS`, defaulting
+   * to the rung the shipped bot sat at. Read only by the client that owns the
+   * bots, because only it steps them: difficulty is a property of the one
+   * simulation, so a joiner who becomes owner steps them at their own setting
+   * and there is no second board to disagree with. Like `botsWanted`, a want
+   * the lobby remembers rather than anything on the wire.
+   */
+  botSkillIndex = DEFAULT_SKILL
+
+  /**
    * The old on/off view of the same setting.
    *
    * Kept because half a dozen suites drive `botsEnabled = false` to get a
@@ -3183,7 +3203,15 @@ export class Game {
       // not having teams at all. So a bot takes the nearest live thing that is
       // not on its side, which is the player for the ones against us and an
       // enemy bot for the one with us.
-      const action = stepBot(bot, this.enemyFor(bot, target, dt), dt, now, this.maxHp, this.modifier.reload)
+      const action = stepBot(
+        bot,
+        this.enemyFor(bot, target, dt),
+        dt,
+        now,
+        this.maxHp,
+        this.modifier.reload,
+        botSkillFor(this.botSkillIndex),
+      )
       if (action.fire !== null) this.fireBot(bot, action.fire)
 
       // Straight into the peer record the renderer reads. No interpolation and

@@ -6,7 +6,7 @@ import { SUIT_MS } from './suit'
 import { layoutForBlock, layoutName, setLayout } from './arena'
 import { Sfx } from './audio'
 import { BlockClock } from './blocks'
-import { BOT_COUNT, MAX_BOTS } from './bots'
+import { BOT_COUNT, BOT_SKILLS, DEFAULT_SKILL, MAX_BOTS } from './bots'
 import { Game, KILLCAM_MS, NUKE_FLASH_MS, STRIKE_GAP, STRIKE_RADIUS, bombsFor, LOADOUT_TIERS, TIER_LABELS, DEFAULT_LOADOUT, parseLoadout, rewardsForTier } from './game'
 import type { FeedParty, Loadout } from './game'
 import { Input, PLAYER_TWO, SOLO, type Binding, type Scheme } from './input'
@@ -1007,6 +1007,61 @@ $('bots-more').addEventListener('click', () => setBots(botsWanted + 1))
 $('bots').addEventListener('click', (e) => {
   const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-value]')
   if (b) setBots(Number(b.dataset.value))
+})
+
+// ----------------------------------------------------------- bot difficulty
+
+/**
+ * How hard the practice tanks fight, remembered like their number is. A want,
+ * not a wire value: only the client that owns the bots reads it, because it is
+ * the only one that steps them — see `Game.botSkillIndex`. Stored by id rather
+ * than index so re-ordering the levels one day cannot silently repoint an old
+ * preference at the wrong rung; a legacy numeric value is still honoured.
+ */
+let botSkill = ((): number => {
+  const raw = stored('tank.botskill')
+  const byId = BOT_SKILLS.findIndex((s) => s.id === raw)
+  if (byId >= 0) return byId
+  const n = Number(raw)
+  return Number.isInteger(n) && n >= 0 && n < BOT_SKILLS.length ? n : DEFAULT_SKILL
+})()
+// The invite link can set it, the same way it carries the crew and the board,
+// so a friend handed a hard room lands in one with nothing to configure.
+{
+  const fromUrl = params.get('botskill')
+  const byId = BOT_SKILLS.findIndex((s) => s.id === fromUrl)
+  if (byId >= 0) botSkill = byId
+  else if (fromUrl !== null) {
+    const n = Number(fromUrl)
+    if (Number.isInteger(n) && n >= 0 && n < BOT_SKILLS.length) botSkill = n
+  }
+}
+
+// One labelled button per rung, built from BOT_SKILLS so the picker cannot
+// drift from the levels the game actually has.
+const capitalise = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1)
+for (let i = 0; i < BOT_SKILLS.length; i++) {
+  const b = document.createElement('button')
+  b.type = 'button'
+  b.dataset.value = String(i)
+  b.textContent = capitalise(BOT_SKILLS[i].id)
+  $('botskill').appendChild(b)
+}
+const botSkillInput = segmented('botskill')
+botSkillInput.value = String(botSkill)
+
+function setBotSkill(i: number): void {
+  botSkill = Math.max(0, Math.min(BOT_SKILLS.length - 1, Math.floor(i)))
+  store('tank.botskill', BOT_SKILLS[botSkill].id)
+  botSkillInput.value = String(botSkill)
+  // Live, like the count: bots publish nothing, so retuning them mid-match is
+  // nobody else's business and needs no restart.
+  if (running) running.players[0].game.botSkillIndex = botSkill
+}
+
+$('botskill').addEventListener('click', (e) => {
+  const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-value]')
+  if (b) setBotSkill(Number(b.dataset.value))
 })
 
 // -------------------------------------------------- the rest of create-a-game
@@ -2428,6 +2483,8 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     // still put real shells into player two. Invisible damage is not a game.
     players[0].game.botsWanted = botsWanted
     for (const p of players.slice(1)) p.game.botsWanted = 0
+    // The difficulty rides with the crew onto the one game that has any bots.
+    players[0].game.botSkillIndex = botSkill
     // The remembered side reaches the fresh `Game`, and player two shares it —
     // two people on one couch are on one team unless they say otherwise, which
     // is what a couch is.
@@ -2471,6 +2528,8 @@ async function begin(makeIdentity: () => Promise<Identity>): Promise<void> {
     else url.searchParams.delete('private')
     if (botsWanted !== BOT_COUNT) url.searchParams.set('bots', String(botsWanted))
     else url.searchParams.delete('bots')
+    if (botSkill !== DEFAULT_SKILL) url.searchParams.set('botskill', BOT_SKILLS[botSkill].id)
+    else url.searchParams.delete('botskill')
     history.replaceState(null, '', url)
 
     // The lobby's own relay pool and its poll are for the lobby. Leaving them
