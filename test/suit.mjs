@@ -174,6 +174,38 @@ try {
     JSON.stringify(onBoard.rig),
   )
 
+  // From the hatch. The camera sits inside the suit, so the armour comes off —
+  // but the gun arms stay, and the tank's own barrel must not: a suited
+  // cockpit used to be exactly one floating tank barrel and nothing else,
+  // which is the bug this block pins down. Forced `draw` rather than a sleep —
+  // under swiftshader a frame can be three seconds away.
+  const hatch = await page.evaluate(() => {
+    const r = window.__renderer
+    r.setView('cockpit')
+    r.draw(window.__game)
+    const you = r.you
+    const out = {
+      mode: r.viewMode,
+      suit: !!you.suit && you.suit.visible,
+      armour: (you.suitArmour ?? []).map((p) => p.visible),
+      barrel: you.barrel.visible,
+      hull: you.hull.visible,
+    }
+    r.setView('board')
+    r.draw(window.__game)
+    return out
+  })
+  check(
+    'from the cockpit the suit is a pair of gun arms: armour off, tank barrel off',
+    hatch.mode === 'cockpit' &&
+      hatch.suit === true &&
+      hatch.hull === false &&
+      hatch.barrel === false &&
+      hatch.armour.length === 6 &&
+      hatch.armour.every((v) => v === false),
+    JSON.stringify(hatch),
+  )
+
   // The suit is slower. Measured by driving, not by reading a constant.
   const speeds = await page.evaluate(async () => {
     const g = window.__game
