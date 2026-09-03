@@ -1499,10 +1499,23 @@ interface TankRig {
   suit?: THREE.Group
   /** Legs, held for the walk cycle. */
   suitLegs?: THREE.Group[]
+  /**
+   * The suit minus its gun arms — torso, visor, pauldrons, legs. Held so the
+   * cockpit can take the armour off your own suit and leave the guns on: see
+   * the cockpit block in `draw`.
+   */
+  suitArmour?: THREE.Group[]
   /** Bounces and squashes. Purely cosmetic, sits between root and the body. */
   bob: THREE.Group
   hull: THREE.Group
   turret: THREE.Group
+  /**
+   * The gun tube, held apart from the dome because it stays on in cockpit
+   * view but comes off with the hull while the suit is on — the suit brings
+   * its own pair, and this one floating at hatch height was all a suited
+   * cockpit had left on screen.
+   */
+  barrel: THREE.Mesh
   label: THREE.Sprite
   /** The character in the hatch. Rides the turret, so the driver faces the gun. */
   driver: THREE.Group
@@ -1970,7 +1983,10 @@ function applySkin(rig: TankRig, skin: Skin, hue: number, art: string | null = n
  * guns are pointing, which is what makes hosing a lane read as aiming rather
  * than as a statue that happens to be shooting sideways.
  */
-function makeSuit(body: THREE.Material, trim: THREE.Material): { group: THREE.Group; legs: THREE.Group[] } {
+function makeSuit(
+  body: THREE.Material,
+  trim: THREE.Material,
+): { group: THREE.Group; legs: THREE.Group[]; armour: THREE.Group[] } {
   const group = new THREE.Group()
   const plate = (geo: THREE.BufferGeometry, mat: THREE.Material, y: number, x = 0, z = 0) => {
     const g = new THREE.Group()
@@ -1989,19 +2005,21 @@ function makeSuit(body: THREE.Material, trim: THREE.Material): { group: THREE.Gr
   // straight down, so *height* is nearly invisible and footprint is the whole
   // silhouette. The first cut was 30 wide and taller than this, and from the
   // board it read as a slightly odd tank.
-  group.add(plate(SUIT_TORSO_GEO, body, 46))
+  const armour = [plate(SUIT_TORSO_GEO, body, 46)]
   // The visor sits proud of the chest so the thing has a front. Without it the
   // suit reads as a crate with legs from the board camera.
-  group.add(plate(SUIT_HEAD_GEO, trim, 74, 6, 0))
+  armour.push(plate(SUIT_HEAD_GEO, trim, 74, 6, 0))
   for (const side of [-1, 1]) {
-    group.add(plate(SUIT_PAULDRON_GEO, body, 58, -2, side * 32))
+    armour.push(plate(SUIT_PAULDRON_GEO, body, 58, -2, side * 32))
     // The guns point along +x, which is the same axis the tank's barrel uses,
-    // so whatever aims one aims the other.
+    // so whatever aims one aims the other. Not in `armour`: they are the one
+    // part of the suit its own driver is shown from the cockpit.
     group.add(plate(SUIT_GUN_GEO, trim, 48, 34, side * 28))
   }
   const legs = [plate(SUIT_LEG_GEO, trim, 15, 0, -13), plate(SUIT_LEG_GEO, trim, 15, 0, 13)]
-  for (const leg of legs) group.add(leg)
-  return { group, legs }
+  armour.push(...legs)
+  for (const part of armour) group.add(part)
+  return { group, legs, armour }
 }
 
 function makeTank(): TankRig {
@@ -2159,6 +2177,7 @@ function makeTank(): TankRig {
     bob,
     hull,
     turret,
+    barrel,
     label,
     driver,
     domeParts,
@@ -3530,9 +3549,12 @@ export class Renderer {
       this.you.driver.visible = false
       this.you.ring.visible = false
       for (const part of this.you.domeParts) part.visible = false
-      // Including the suit: you are *inside* it, and thirty units of armour
-      // plate at the near plane is a grey screen.
-      if (this.you.suit) this.you.suit.visible = false
+      // Including the suit's armour: you are *inside* it, and thirty units of
+      // plate at the near plane is a grey screen. The gun arms stay on — they
+      // sit low and wide of the eye and converge on the crosshair, which is
+      // what makes a suited cockpit read as driving the mech rather than as a
+      // floating eye.
+      if (this.you.suitArmour) for (const part of this.you.suitArmour) part.visible = false
       for (const pip of this.you.pips) pip.visible = false
       // The reload bar belongs on this list and was missing from it, which is
       // the "yellow box when I shoot" Puzz reported. It is an unlit `#ffc44d`
@@ -3675,6 +3697,7 @@ export class Renderer {
       const built = makeSuit(rig.body, rig.trim)
       rig.suit = built.group
       rig.suitLegs = built.legs
+      rig.suitArmour = built.armour
       // On `bob`, not on the turret. The turret group sits 28 units up and the
       // suit stands on the felt, so hanging it there floated the whole mech
       // above its own shadow and its own ring — visible immediately in a
@@ -3686,6 +3709,10 @@ export class Renderer {
       rig.suit.visible = v.suited && !dead
       if (v.suited) {
         rig.suit.rotation.y = -gun
+        // The armour goes back on every frame; the cockpit block in `draw`
+        // strips your own again after this, under the same contract as the
+        // dome parts.
+        if (rig.suitArmour) for (const part of rig.suitArmour) part.visible = true
         // A walk cycle from position rather than from a timer: the legs move
         // because the suit moved, so a juggernaut standing still stands still.
         // Driven off world position for the same reason remote tanks climb
@@ -3699,8 +3726,11 @@ export class Renderer {
     }
     // Everything the tank is made of comes off while the suit is on. The dome
     // is set below with the rest of the per-frame visibility, so it is not
-    // touched twice here.
+    // touched twice here. The barrel goes with the hull: the suit brings its
+    // own pair of guns, and the tank's tube left floating at hatch height was
+    // the whole of what a suited cockpit had on screen.
     rig.hull.visible = !v.suited
+    rig.barrel.visible = !v.suited
 
     if (dead) rig.smokeOwed = 0
 
